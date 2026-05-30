@@ -1,4 +1,3 @@
-python -m pip install Flask
 from flask import Flask, request, render_template, jsonify, session
 import os, re, glob, base64, json, secrets, time, hashlib, threading, tempfile, shutil
 from collections import OrderedDict
