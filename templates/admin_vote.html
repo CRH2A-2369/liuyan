@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>投票管理</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js" integrity="sha512-E8QSvWZ0eCLGk4km3hxSsNmGWbLtSCSUcewDQPQWZF6pEU8GlT8a5fF32wOl1i8ftdMhssTrF/OhyGWwonTcXA==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
+  <style>
+    body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px;color:#333}
+    #create-panel{background:#fff3e0;padding:16px;border-radius:8px;margin-bottom:20px;border-left:4px solid #FF9800}
+    #create-panel h3{margin:0 0 10px}
+    #create-panel input,#create-panel textarea{width:100%;padding:8px;margin:6px 0;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}
+    #create-panel textarea{min-height:60px;resize:vertical}
+    #create-panel label{font-size:13px;display:block;margin:6px 0;cursor:pointer}
+    .opt-row{display:flex;gap:6px;align-items:center;margin:4px 0}
+    .opt-row input{flex:1}
+    .opt-row button{background:#f44336;padding:4px 10px;font-size:12px;height:30px;color:#fff;border:none;border-radius:4px;cursor:pointer}
+    button{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;color:#fff;font-size:14px}
+    .btn-primary{background:#2196F3}
+    .btn-danger{background:#f44336}
+    .btn-success{background:#4CAF50}
+    .btn-warn{background:#FF9800}
+    .poll-detail{background:#fff;border:1px solid #e0e0e0;border-radius:8px;padding:14px;margin-bottom:12px}
+    .poll-detail h4{margin:0 0 6px}
+    .vote-row{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:#f9f9f9;border-radius:4px;margin:4px 0;font-size:13px;gap:8px;flex-wrap:wrap}
+    .vote-row .del-btn{background:#f44336;padding:4px 10px;font-size:11px;height:26px;color:#fff;border:none;border-radius:3px;cursor:pointer}
+    table{width:100%;border-collapse:collapse;margin:10px 0}
+    th,td{border:1px solid #ddd;padding:8px 12px;text-align:left}
+    th{background:#f5f5f5}
+    .bar-wrap{background:#f0f0f0;border-radius:3px;height:18px;overflow:hidden;margin:2px 0}
+    .bar{height:100%;background:#673AB7;border-radius:3px;transition:width .3s}
+    .bar-ip{height:100%;background:#E91E63;border-radius:3px;transition:width .3s}
+    .bar-label{font-size:12px;display:flex;justify-content:space-between;margin:2px 0}
+    footer{margin-top:30px;text-align:center;color:#888;font-size:12px;border-top:1px solid #eee;padding:15px 0}
+    a.back-link{font-size:14px;color:#666;text-decoration:none;border:1px solid #ccc;padding:3px 10px;border-radius:4px;margin-left:10px}
+    #login-wall{text-align:center;margin-top:60px}
+    .hidden{display:none}
+    .toggle-row{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:13px}
+    .toggle-row input[type="checkbox"]{width:18px;height:18px;accent-color:#E91E63;cursor:pointer}
+    .weighted-badge{display:inline-block;background:#FCE4EC;color:#C62828;font-size:11px;padding:2px 8px;border-radius:10px;margin-left:6px}
+  </style>
+</head>
+<body>
+
+<div id="login-wall">
+  <h2>🔒 请先通过管理员验证</h2>
+  <p><a href="/admin">→ 前往管理员登录</a></p>
+</div>
+
+<div id="main-content" class="hidden">
+  <h2>🗳️ 投票管理
+    <a href="/admin" class="back-link">← 返回管理主页</a>
+    <a href="/admin/qun" class="back-link">💬 群聊管理</a>
+  </h2>
+
+  <div id="create-panel">
+    <h3>➕ 创建新投票</h3>
+    <input type="text" id="poll-title" placeholder="投票标题" maxlength="128">
+    <div id="options-container">
+      <div class="opt-row"><input type="text" class="poll-opt" placeholder="选项 1"><button onclick="removeOption(this)" style="visibility:hidden">✕</button></div>
+      <div class="opt-row"><input type="text" class="poll-opt" placeholder="选项 2"><button onclick="removeOption(this)" style="visibility:hidden">✕</button></div>
+    </div>
+    <button class="btn-warn" onclick="addOption()">+ 添加选项</button><br>
+    <label><input type="checkbox" id="poll-custom" onchange="toggleCustom()"> 允许用户自定义选项</label>
+    <input type="text" id="poll-custom-hint" placeholder="自定义选项提示文字..." style="display:none">
+    <label><input type="checkbox" id="poll-allow-edit"> 允许用户修改自己的投票</label>
+    <div style="display:flex;gap:16px;align-items:center;margin:8px 0">
+      <label style="font-size:13px;margin:0">
+        最少可选数 <input type="number" id="poll-min-select" value="1" min="1"
+          style="width:60px;padding:6px;border:1px solid #ccc;border-radius:4px">
+      </label>
+      <label style="font-size:13px;margin:0">
+        最多可选数 <input type="number" id="poll-max-select" value="1" min="1"
+          style="width:60px;padding:6px;border:1px solid #ccc;border-radius:4px">
+      </label>
+      <span style="font-size:11px;color:#888">（1≤最少≤最多≤选项总数）</span>
+    </div>
+    <button class="btn-success" onclick="createPoll()" style="margin-top:10px">创建投票</button>
+  </div>
+
+  <h3>📋 已有投票</h3>
+  <div id="poll-list"><p style="color:#888;text-align:center">加载中...</p></div>
+  <footer id="footer"></footer>
+</div>
+
+<script>
+var adminJse = null;
+try {
+  var savedKey = sessionStorage.getItem('admin_priv_key');
+  if (savedKey) {
+    adminJse = new JSEncrypt();
+    adminJse.setPrivateKey(savedKey);
+  }
+} catch(e) {}
+
+function deriveKey(str) {
+  return CryptoJS.enc.Hex.parse(CryptoJS.SHA256(str).toString());
+}
+var csrfToken = '';
+var authFetch = function(url, opts) {
+  opts = opts || {};
+  var headers = opts.headers || {};
+  if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+  return fetch(url, Object.assign({credentials:'same-origin'}, opts, {headers:headers}));
+};
+
+async function init() {
+  try {
+    var csrfRes = await fetch('/api/csrf', {credentials:'same-origin'});
+    csrfToken = (await csrfRes.json()).token;
+    var statusRes = await fetch('/api/admin/status', {credentials:'same-origin'});
+    var status = await statusRes.json();
+    if (status.logged_in && status.has_key) {
+      document.getElementById('login-wall').style.display = 'none';
+      document.getElementById('main-content').classList.remove('hidden');
+      loadPolls();
+      fetch('/api/footer').then(function(r){return r.text();}).then(function(t){document.getElementById('footer').textContent=t;});
+    } else {
+      document.getElementById('login-wall').style.display = 'block';
+      document.getElementById('main-content').classList.add('hidden');
+      if (status.logged_in && !status.has_key) {
+        fetch('/api/admin/logout', {credentials:'same-origin'}).then(function(){window.location.href='/admin';});
+      }
+    }
+  } catch(e) {
+    console.error('Init:', e);
+    document.getElementById('login-wall').innerHTML = '<h2>⚠️ 连接失败</h2><p>请刷新页面重试</p>';
+  }
+}
+init();
+
+function addOption() {
+  var container = document.getElementById('options-container');
+  var row = document.createElement('div');
+  row.className = 'opt-row';
+  row.innerHTML = '<input type="text" class="poll-opt" placeholder="新选项"><button onclick="removeOption(this)">✕</button>';
+  container.appendChild(row);
+}
+function removeOption(btn) { btn.parentElement.remove(); }
+function toggleCustom() {
+  document.getElementById('poll-custom-hint').style.display = document.getElementById('poll-custom').checked ? 'block' : 'none';
+}
+
+function createPoll() {
+  var title = document.getElementById('poll-title').value.trim();
+  if (!title) { alert('请输入标题'); return; }
+  var opts = [];
+  document.querySelectorAll('.poll-opt').forEach(function(inp){ var v=inp.value.trim(); if(v) opts.push(v); });
+  if (opts.length < 2) { alert('至少需要2个选项'); return; }
+  var custom = document.getElementById('poll-custom').checked;
+  var customHint = document.getElementById('poll-custom-hint').value.trim();
+  var allowEdit = document.getElementById('poll-allow-edit').checked;
+  var minSelect = parseInt(document.getElementById('poll-min-select').value) || 1;
+  var maxSelect = parseInt(document.getElementById('poll-max-select').value) || 1;
+  if (minSelect < 1) { alert('最少可选数不能小于1'); return; }
+  if (minSelect >= opts.length) { alert('最少可选数必须小于选项总数(' + opts.length + ')'); return; }
+  if (maxSelect < minSelect) { alert('最多可选数不能小于最少可选数'); return; }
+  if (maxSelect > opts.length) { alert('最多可选数不能超过选项总数(' + opts.length + ')'); return; }
+  authFetch('/api/admin/votes/create', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      title:title, options:opts, custom:custom, customHint:customHint,
+      allowEdit:allowEdit, minSelect:minSelect, maxSelect:maxSelect
+    })
+  }).then(function(r){
+    if(r.ok){
+      alert('✅ 投票创建成功');
+      document.getElementById('poll-title').value='';
+      document.querySelectorAll('.poll-opt').forEach(function(inp){inp.value='';});
+      document.getElementById('poll-custom').checked=false;
+      document.getElementById('poll-allow-edit').checked=false;
+      document.getElementById('poll-custom-hint').style.display='none';
+      document.getElementById('poll-custom-hint').value='';
+      document.getElementById('poll-min-select').value='1';
+      document.getElementById('poll-max-select').value='1';
+      loadPolls();
+    } else { r.text().then(alert); }
+  });
+}
+
+function loadPolls() {
+  fetch('/api/votes').then(function(r){return r.json();}).then(function(polls){
+    var list = document.getElementById('poll-list');
+    if (!polls.length) { list.innerHTML='<p style="color:#888;text-align:center;padding:20px">暂无投票</p>'; return; }
+    list.innerHTML = '';
+    polls.forEach(function(p){
+      var card = document.createElement('div');
+      card.className = 'poll-detail';
+      var features = [];
+      if (p.minSelect && p.maxSelect && (p.minSelect > 1 || p.maxSelect > 1)) {
+        features.push(p.minSelect + '~' + p.maxSelect + '选');
+      }
+      if (p.custom) features.push('自定义');
+      if (p.allowEdit) features.push('可修改');
+      var featureStr = features.length ? ' ['+features.join('+')+']' : '';
+      card.innerHTML = '<h4>'+esc(p.title)+' <span style="font-weight:normal;font-size:12px;color:#888">('+p.total_votes+'票)</span></h4>'+
+        '<div style="font-size:12px;color:#888;margin:4px 0">选项: '+p.options.map(esc).join(', ')+featureStr+'</div>'+
+        '<button class="btn-primary" onclick="viewPoll(\''+esc(p.id)+'\')">查看详情</button> '+
+        '<button class="btn-danger" onclick="deletePoll(\''+esc(p.id)+'\')">删除</button>';
+      list.appendChild(card);
+    });
+  });
+}
+
+function viewPoll(pollId) {
+  authFetch('/api/admin/votes/'+encodeURIComponent(pollId)+'/data').then(function(r){return r.json();}).then(function(data){
+    var list = document.getElementById('poll-list');
+    var cfg = data.config;
+    var features = [];
+    if (cfg.minSelect && cfg.maxSelect && (cfg.minSelect > 1 || cfg.maxSelect > 1)) {
+      features.push(cfg.minSelect + '~' + cfg.maxSelect + '选');
+    }
+    if (cfg.custom) features.push('允许自定义');
+    if (cfg.allowEdit) features.push('允许修改');
+    var featureStr = features.length ? ' ['+features.join('+')+']' : '';
+
+    var html = '<div class="poll-detail"><h4>📊 '+esc(cfg.title)+'</h4>';
+    html += '<p style="font-size:13px;color:#888">共 '+data.votes.length+' 票 | 选项: '+cfg.options.map(esc).join(', ')+featureStr+'</p>';
+
+    html += '<div style="max-height:300px;overflow-y:auto">';
+    data.votes.forEach(function(v){
+      html += '<div class="vote-row"><span>#'+v.seq+' 🔒 '+v.meta_enc.substring(0,50)+'...</span><button class="del-btn" onclick="deleteVote(\''+esc(pollId)+'\',\''+v.seq+'\')">删除</button></div>';
+    });
+    html += '</div>';
+
+    html += '<div style="margin-top:12px;background:#e8f5e9;padding:10px;border-radius:6px">';
+    html += '<strong>🔓 一键解密投票结果</strong>';
+    html += '<p style="font-size:12px;color:#888;margin:4px 0">自动用RSA私钥解密每个投票的AES密钥，再用AES解密内容</p>';
+    html += '<textarea id="dec-key-'+esc(pollId)+'" placeholder="如RSA私钥未加载，在此粘贴（含 BEGIN/END 行）" style="width:100%;margin:6px 0;padding:6px;border:1px solid #ccc;border-radius:4px;min-height:60px;resize:vertical;font-family:monospace;font-size:12px"></textarea>';
+
+    html += '<div class="toggle-row">';
+    html += '<input type="checkbox" id="ip-weight-'+esc(pollId)+'" onchange="decryptPoll(\''+esc(pollId)+'\')">';
+    html += '<label for="ip-weight-'+esc(pollId)+'" style="cursor:pointer;margin:0">🌐 启用IP权重策略</label>';
+    html += '<span style="font-size:11px;color:#888">（同一IP的多票会被均摊权重，不同昵称也合并）</span>';
+    html += '</div>';
+
+    html += '<button class="btn-success" onclick="decryptPoll(\''+esc(pollId)+'\')">🔓 一键解密统计</button>';
+    html += '<div id="dec-results-'+esc(pollId)+'"></div>';
+    html += '</div>';
+
+    html += '<br><button class="btn-primary" onclick="loadPolls()">← 返回列表</button></div>';
+    list.innerHTML = html;
+  });
+}
+
+function deleteVote(pollId, seq) {
+  if(!confirm('确定删除投票 #'+seq+' 吗？')) return;
+  authFetch('/api/admin/votes/'+encodeURIComponent(pollId)+'/'+seq, {method:'DELETE'}).then(function(){viewPoll(pollId);});
+}
+
+function deletePoll(pollId) {
+  if(!confirm('确定删除整个投票吗？此操作不可撤销！')) return;
+  authFetch('/api/admin/votes/'+encodeURIComponent(pollId), {method:'DELETE'}).then(function(r){
+    if(r.ok){alert('已删除');loadPolls();}else{r.text().then(function(t){alert('删除失败：'+t);});}
+  });
+}
+
+// ── 解析元数据 ──
+function parseMeta(metaStr) {
+  // 格式: IP | 日期 | 昵称
+  if (!metaStr || metaStr.startsWith('❌')) return { ip: null, date: '', nick: '' };
+  var parts = metaStr.split(' | ');
+  return {
+    ip: (parts[0] || '').trim() || null,
+    date: (parts[1] || '').trim(),
+    nick: (parts[2] || '').trim() || '匿名'
+  };
+}
+
+// ── 解密统计 ──
+function decryptPoll(pollId) {
+  var resultsDiv = document.getElementById('dec-results-' + pollId);
+
+  var jse = adminJse;
+  if (!jse) {
+    var keyInput = document.getElementById('dec-key-' + pollId);
+    var privKey = keyInput.value.trim();
+    if (!privKey) { alert('未找到RSA私钥，请粘贴'); return; }
+    jse = new JSEncrypt();
+    jse.setPrivateKey(privKey);
+  }
+
+  var ipWeightCheckbox = document.getElementById('ip-weight-' + pollId);
+  var useIpWeight = ipWeightCheckbox ? ipWeightCheckbox.checked : false;
+
+  resultsDiv.innerHTML = '<p style="color:#888">🔐 正在解密：RSA私钥→AES密钥→投票内容+元数据' +
+    (useIpWeight ? '（IP权重模式）' : '') + '...</p>';
+
+  authFetch('/api/admin/votes/' + encodeURIComponent(pollId) + '/data')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var tally = {};
+      var total = 0;
+      var failedRsa = 0;
+      var failedAes = 0;
+      // details: { idx, meta, choice, ip, nick, date }
+      var details = [];
+
+      data.votes.forEach(function(v, idx) {
+        try {
+          var aesKeyStr = jse.decrypt(v.rsa_key);
+          if (!aesKeyStr || aesKeyStr.length === 0) {
+            failedRsa++;
+            details.push({ idx: idx + 1, meta: '❌ RSA解密失败', choice: '—', ip: null, nick: null, date: '' });
+            return;
+          }
+          var key32 = deriveKey(aesKeyStr);
+          var aesOpts = {
+            iv: CryptoJS.enc.Base64.parse(v.iv),
+            mode: CryptoJS.mode.CBC,
+            padding: CryptoJS.pad.Pkcs7
+          };
+          var choice = CryptoJS.AES.decrypt(v.content_enc, key32, aesOpts).toString(CryptoJS.enc.Utf8);
+          var meta = '';
+          var ip = null, nick = null, date = '';
+          if (v.meta_enc) {
+            meta = CryptoJS.AES.decrypt(v.meta_enc, key32, aesOpts).toString(CryptoJS.enc.Utf8);
+            var parsed = parseMeta(meta);
+            ip = parsed.ip;
+            nick = parsed.nick;
+            date = parsed.date;
+          }
+          if (choice) {
+            tally[choice] = (tally[choice] || 0) + 1;
+            total++;
+            details.push({ idx: idx + 1, meta: meta || '—', choice: choice, ip: ip, nick: nick, date: date });
+          } else {
+            failedAes++;
+            details.push({ idx: idx + 1, meta: meta || '—', choice: '❌ AES解密失败', ip: ip, nick: nick, date: date });
+          }
+        } catch(e) {
+          failedAes++;
+          details.push({ idx: idx + 1, meta: '❌ 异常', choice: e.message, ip: null, nick: null, date: '' });
+        }
+      });
+
+      // ========== IP权重统计（按IP分组，同名IP不同昵称也合并）==========
+      var weightedTally = {};
+      var weightedTotal = 0;
+      var ipStats = null;
+
+      if (useIpWeight) {
+        var ipGroups = {};
+        var validVotesForWeight = details.filter(function(d) { return d.ip && !d.choice.startsWith('❌'); });
+
+        validVotesForWeight.forEach(function(d) {
+          if (!ipGroups[d.ip]) ipGroups[d.ip] = [];
+          ipGroups[d.ip].push(d);
+        });
+
+        var uniqueIpCount = Object.keys(ipGroups).length;
+
+        if (uniqueIpCount > 0) {
+          var ipBaseWeight = 1 / uniqueIpCount;
+          Object.keys(ipGroups).forEach(function(ip) {
+            var group = ipGroups[ip];
+            var perVoteWeight = ipBaseWeight / group.length;
+            group.forEach(function(d) {
+              weightedTally[d.choice] = (weightedTally[d.choice] || 0) + perVoteWeight;
+              weightedTotal += perVoteWeight;
+            });
+          });
+          ipStats = { uniqueIps: uniqueIpCount, ipGroups: ipGroups };
+        }
+      }
+
+      // ========== 渲染 ==========
+      resultsDiv.innerHTML = '';
+
+      if (total === 0) {
+        resultsDiv.innerHTML = '<p style="color:#f44336">❌ 未能解密任何投票（私钥不匹配或数据损坏）</p>';
+        return;
+      }
+
+      // --- 普通统计 ---
+      resultsDiv.innerHTML += '<h4 style="margin:0 0 8px">📊 普通统计' +
+        (useIpWeight ? ' <span style="font-weight:normal;font-size:12px;color:#888">（一票一票）</span>' : '') + '</h4>';
+
+      var entries = Object.entries(tally).sort(function(a,b) { return b[1] - a[1]; });
+      entries.forEach(function(e) {
+        var pct = Math.round(e[1] / total * 100);
+        resultsDiv.innerHTML +=
+          '<div class="bar-label"><span>' + esc(e[0]) + '</span><span>' + e[1] + '票 (' + pct + '%)</span></div>' +
+          '<div class="bar-wrap"><div class="bar" style="width:' + pct + '%"></div></div>';
+      });
+
+      // --- IP权重统计 ---
+      if (useIpWeight && ipStats && ipStats.uniqueIps > 0) {
+        resultsDiv.innerHTML += '<h4 style="margin:16px 0 8px">🌐 IP权重统计 <span class="weighted-badge">去重</span></h4>';
+        resultsDiv.innerHTML += '<p style="font-size:12px;color:#888;margin:4px 0">';
+        resultsDiv.innerHTML += '唯一IP数：<b>' + ipStats.uniqueIps + '</b> 个 | ';
+        resultsDiv.innerHTML += '每IP基础权重：<b>' + (100 / ipStats.uniqueIps).toFixed(1) + '%</b>';
+        resultsDiv.innerHTML += '</p>';
+
+        // IP分组详情（显示每个IP下的昵称列表）
+        resultsDiv.innerHTML += '<details style="font-size:12px;margin:6px 0">';
+        resultsDiv.innerHTML += '<summary style="cursor:pointer;color:#E91E63">📋 查看IP分组详情（含昵称）</summary>';
+        resultsDiv.innerHTML += '<div style="margin-top:6px">';
+        Object.keys(ipStats.ipGroups).forEach(function(ip) {
+          var group = ipStats.ipGroups[ip];
+          var ipWeight = (1 / ipStats.uniqueIps * 100).toFixed(1);
+          var perVoteWeight = (1 / ipStats.uniqueIps / group.length * 100).toFixed(1);
+          // 收集该IP下的所有昵称
+          var nickSet = {};
+          group.forEach(function(d) { if (d.nick) nickSet[d.nick] = true; });
+          var nickList = Object.keys(nickSet).map(function(n){return '"'+esc(n)+'"';}).join(', ');
+          resultsDiv.innerHTML += '<div style="padding:4px 8px;margin:2px 0;background:#FFF5F5;border-radius:4px">';
+          resultsDiv.innerHTML += '🖥️ <b>' + esc(ip) + '</b> — ' + group.length + '票 | 👤 ' + (nickList || '—') +
+            '（IP权重 ' + ipWeight + '%，每票 ' + perVoteWeight + '%）';
+          resultsDiv.innerHTML += '<div style="margin-left:16px;color:#888">';
+          group.forEach(function(d) {
+            resultsDiv.innerHTML += '· #' + d.idx + ' → ' + esc(d.choice) + ' (👤' + esc(d.nick||'?') + ')<br>';
+          });
+          resultsDiv.innerHTML += '</div></div>';
+        });
+        resultsDiv.innerHTML += '</div></details>';
+
+        // 加权柱状图
+        var weightedEntries = Object.entries(weightedTally).sort(function(a,b) { return b[1] - a[1]; });
+        weightedEntries.forEach(function(e) {
+          var wpct = Math.round(e[1] * 100);
+          resultsDiv.innerHTML +=
+            '<div class="bar-label"><span>' + esc(e[0]) + '</span><span>≈' + e[1].toFixed(2) + '票 (' + wpct + '%)</span></div>' +
+            '<div class="bar-wrap"><div class="bar-ip" style="width:' + wpct + '%"></div></div>';
+        });
+        resultsDiv.innerHTML += '<p style="font-size:11px;color:#888;margin:2px 0">';
+        resultsDiv.innerHTML += '💡 加权总分 = ' + weightedTotal.toFixed(2) + '（≈1.0）';
+        resultsDiv.innerHTML += '</p>';
+      }
+
+      var failTotal = failedRsa + failedAes;
+      resultsDiv.innerHTML += '<p style="font-size:12px;color:#888;margin:4px 0 12px">✅ 成功解密 ' + total + ' 票' +
+        (failTotal > 0 ? '（RSA失败 ' + failedRsa + '，AES失败 ' + failedAes + '）' : '') + '</p>';
+
+      // --- 投票明细表格 ---
+      resultsDiv.innerHTML += '<h4 style="margin:16px 0 8px">📋 投票明细（共 ' + details.length + ' 条）</h4>';
+      resultsDiv.innerHTML += '<div style="max-height:400px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:6px">';
+      resultsDiv.innerHTML += '<table style="width:100%;border-collapse:collapse;font-size:13px">';
+      resultsDiv.innerHTML += '<thead><tr style="background:#f5f5f5;position:sticky;top:0">';
+      resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:center;width:50px">#</th>';
+      if (useIpWeight) {
+        resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:left;width:120px">IP</th>';
+        resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:left;width:70px">昵称</th>';
+      }
+      resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:left">元数据</th>';
+      resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:left">投票选项</th>';
+      if (useIpWeight) {
+        resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:center;width:70px">权重</th>';
+      }
+      resultsDiv.innerHTML += '</tr></thead><tbody>';
+
+      details.forEach(function(d) {
+        var bg = d.idx % 2 === 0 ? '#fafafa' : '#fff';
+        var metaColor = d.meta.startsWith('❌') ? '#f44336' : '#333';
+        var choiceColor = d.choice.startsWith('❌') ? '#f44336' : '#333';
+        resultsDiv.innerHTML += '<tr style="background:' + bg + '">';
+        resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;color:#888">' + d.idx + '</td>';
+        if (useIpWeight) {
+          resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px;font-family:monospace;color:#E91E63">' + (d.ip ? esc(d.ip) : '—') + '</td>';
+          resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px">' + esc(d.nick || '—') + '</td>';
+        }
+        resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;color:' + metaColor + ';font-size:12px">' + esc(d.meta) + '</td>';
+        resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;color:' + choiceColor + ';font-weight:500">' + esc(d.choice) + '</td>';
+        if (useIpWeight) {
+          var weightStr = '—';
+          if (d.ip && !d.choice.startsWith('❌') && ipStats) {
+            var group = ipStats.ipGroups[d.ip];
+            if (group) {
+              var perVoteW = (1 / ipStats.uniqueIps / group.length * 100);
+              weightStr = perVoteW.toFixed(1) + '%';
+            }
+          }
+          resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;font-size:12px;color:#888">' + weightStr + '</td>';
+        }
+        resultsDiv.innerHTML += '</tr>';
+      });
+
+      resultsDiv.innerHTML += '</tbody></table></div>';
+    })
+    .catch(function(e) {
+      resultsDiv.innerHTML = '<p style="color:#f44336">请求失败: ' + esc(e.message) + '</p>';
+    });
+}
+
+var esc = function(s){ return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); };
+</script>
+</body>
+</html>
