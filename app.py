@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template, jsonify, session
+from flask import Flask, request, render_template, jsonify, session, make_response
 import os, re, glob, base64, json, secrets, time, hashlib, threading, tempfile, shutil
 from collections import OrderedDict
 from functools import wraps
@@ -10,14 +10,59 @@ from dotenv import load_dotenv
 load_dotenv()
 app = Flask(__name__)
 
+# === ReDoS 防护 ===
+import concurrent.futures
+
+_REDOS_DANGEROUS_PATTERNS = [
+    re.compile(r'\([^)]*[+*][^)]*\)[+*]'),
+    re.compile(r'\([^)]*\|[^)]*\)[+*]'),
+    re.compile(r'\(\.\+\)\+'),
+    re.compile(r'\(\.\*\)\*'),
+    re.compile(r'\(\.\*\)\{\d+,?\}'),
+    re.compile(r'\(\\[wWdDsS]\+\)\+'),
+    re.compile(r'\(\\[wWdDsS]\*\)\*'),
+]
+
+REGEX_TIMEOUT = 1.0
+REGEX_CONTENT_MAX = 1024
+
+def _is_redos_dangerous(pattern: str) -> bool:
+    stripped = re.sub(r'\\.', '', pattern)
+    for pat in _REDOS_DANGEROUS_PATTERNS:
+        if pat.search(stripped):
+            return True
+    depth = 0
+    max_depth = 0
+    for ch in stripped:
+        if ch == '(':
+            depth += 1
+            if depth > max_depth:
+                max_depth = depth
+        elif ch == ')':
+            depth -= 1
+    if max_depth > 3:
+        return True
+    return False
+
+def safe_regex_search(pattern: str, content: str, timeout: float = REGEX_TIMEOUT) -> bool:
+    content = content[:REGEX_CONTENT_MAX]
+    def _do_search():
+        try:
+            return bool(re.search(pattern, content))
+        except re.error:
+            return False
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_search)
+        try:
+            return future.result(timeout=timeout)
+        except (concurrent.futures.TimeoutError, Exception):
+            return False
+
 # === 1. 密钥与会话安全配置 ===
 SECRET_KEY_ENV = os.environ.get('FLASK_SECRET_KEY')
 if not SECRET_KEY_ENV:
-    temp_key = secrets.token_hex(64)
-    print(f"\n[⚠️ 安全警告] 未检测到 FLASK_SECRET_KEY！\n[🔑 临时密钥] {temp_key}\n请将其写入 .env 文件，否则重启后会话失效。\n")
-    app.secret_key = temp_key
-else:
-    app.secret_key = SECRET_KEY_ENV
+    raise RuntimeError('FLASK_SECRET_KEY 未设置！请在 .env 文件中配置 FLASK_SECRET_KEY')
+app.secret_key = SECRET_KEY_ENV
 
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -35,25 +80,38 @@ MSG_DIR = os.path.join(BASE_DIR, '留言')
 REPLY_DIR = os.path.join(BASE_DIR, '回复')
 QUN_DIR = os.path.join(BASE_DIR, '群')
 VOTE_DIR = os.path.join(BASE_DIR, 'vote_data')
+IP_DIR = os.path.join(BASE_DIR, 'ip')
 RSA_PUB = os.path.join(BASE_DIR, 'gongyao.txt')
 UNDER_FILE = os.path.join(BASE_DIR, 'under.txt')
 CHAT_FILE = os.path.join(QUN_DIR, 'chat_data.json')
+RULE_FILE = os.path.join(QUN_DIR, 'rule.txt')
+THRESHOLD_FILE = os.path.join(QUN_DIR, 'threshold.txt')
+NOTICE_FILE = os.path.join(BASE_DIR, 'notice_data.json')
 PERM_FILE = os.path.join(QUN_DIR, 'permission.txt')
 BLACK_FILE = os.path.join(BASE_DIR, 'black.txt')
 WHITE_FILE = os.path.join(BASE_DIR, 'white.txt')
 LOG_FILE = os.path.join(BASE_DIR, 'log.txt')
+CHAT_DIR = os.path.join(BASE_DIR, 'chat')
 
-for d in [MSG_DIR, REPLY_DIR, QUN_DIR, VOTE_DIR]:
+for d in [MSG_DIR, REPLY_DIR, QUN_DIR, VOTE_DIR, IP_DIR, CHAT_DIR]:
     os.makedirs(d, exist_ok=True)
-for f, v in [(UNDER_FILE, 'under construction'), (PERM_FILE, '0'), (BLACK_FILE, ''), (WHITE_FILE, '')]:
+_ip_log_lock = threading.Lock()
+for f, v in [
+    (UNDER_FILE, 'under construction'),
+    (PERM_FILE, '0'),
+    (BLACK_FILE, ''),
+    (WHITE_FILE, ''),
+    (RULE_FILE, ''),
+    (THRESHOLD_FILE, '5')
+]:
     if not os.path.exists(f):
         open(f, 'w', encoding='utf-8').write(v)
 if not os.path.exists(CHAT_FILE):
     json.dump([], open(CHAT_FILE, 'w', encoding='utf-8'))
-
+if not os.path.exists(NOTICE_FILE):
+    json.dump([], open(NOTICE_FILE, 'w', encoding='utf-8'))
 # === 4. 并发安全工具 ===
 _file_lock = threading.Lock()
-
 
 def atomic_write(path, content):
     dir_name = os.path.dirname(path) or '.'
@@ -75,17 +133,14 @@ def atomic_write(path, content):
                 os.remove(tmp_path)
             raise
 
-
 def get_seq():
     with _file_lock:
         return get_seq_unlocked()
-
 
 def get_seq_unlocked():
     files = glob.glob(os.path.join(MSG_DIR, '留言_*.txt'))
     seqs = [int(m.group(1)) for f in files if (m := re.search(r'(\d+)', os.path.basename(f)))]
     return max(seqs) + 1 if seqs else 1
-
 
 def atomic_write_unlocked(path, content):
     dir_name = os.path.dirname(path) or '.'
@@ -106,10 +161,10 @@ def atomic_write_unlocked(path, content):
             os.remove(tmp_path)
         raise
 
-
 def atomic_chat_update(updater_fn):
     with _file_lock:
-        chat = json.load(open(CHAT_FILE, 'r', encoding='utf-8'))
+        with open(CHAT_FILE, 'r', encoding='utf-8') as f:
+            chat = json.load(f)
         result = updater_fn(chat)
         fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(CHAT_FILE), suffix='.tmp')
         try:
@@ -126,7 +181,6 @@ def atomic_chat_update(updater_fn):
             raise
         return result
 
-
 def safe_resolve(base_dir, filename):
     safe = re.sub(r'[^\w.\-]', '', filename)
     if not safe or safe in ('.', '..'):
@@ -137,14 +191,13 @@ def safe_resolve(base_dir, filename):
         return None
     return full
 
-
 def read_perm_file():
     with _file_lock:
         try:
-            return open(PERM_FILE, 'r').read().strip()
+            with open(PERM_FILE, 'r') as f:
+                return f.read().strip()
         except Exception:
             return '0'
-
 
 def safe_vote_dir(poll_id):
     safe = re.sub(r'[^\w\u4e00-\u9fff\-]', '_', poll_id)
@@ -156,17 +209,94 @@ def safe_vote_dir(poll_id):
         return None
     return full
 
-
 def get_vote_seq_unlocked(poll_dir):
     files = glob.glob(os.path.join(poll_dir, '投票_*.txt'))
     seqs = [int(m.group(1)) for f in files if (m := re.search(r'(\d+)', os.path.basename(f)))]
     return max(seqs) + 1 if seqs else 1
 
-
 def get_vote_seq(poll_dir):
     with _file_lock:
         return get_vote_seq_unlocked(poll_dir)
 
+# === 4.5 Origin/Referer 校验（防御 CSRF 固定 Token + 跨站伪造） ===
+import urllib.parse as _urlparse
+
+FORCE_HOST = os.environ.get('FORCE_HOST', '').strip()
+
+def _extract_host_parts(url):
+    """从 URL 中安全提取 netloc 和 hostname"""
+    try:
+        p = _urlparse.urlparse(url)
+        return p.netloc, p.hostname
+    except Exception:
+        return None, None
+
+
+def _build_allowed_hosts():
+    """构建允许的 Host 集合（请求 Host + 环境变量 + 本地回环）"""
+    allowed = set()
+
+    # 1) 请求自身的 Host
+    host = request.host
+    if host:
+        allowed.add(host)
+        allowed.add(host.split(':')[0])
+
+    # 2) 环境变量 FORCE_HOST（反向代理场景：CDN / Nginx 转发后 Host 可能不同）
+    if FORCE_HOST:
+        allowed.add(FORCE_HOST)
+        allowed.add(FORCE_HOST.split(':')[0])
+
+    # 3) 本地回环（开发 / 内网场景）
+    port = request.environ.get('SERVER_PORT', '5033')
+    for lh in ('127.0.0.1', 'localhost', '::1'):
+        allowed.add(lh)
+        allowed.add(f'{lh}:{port}')
+
+    return allowed
+
+
+def validate_origin_referer():
+    """
+    校验 Origin / Referer 头是否匹配本站。
+
+    两层防御：
+    - Origin：浏览器保证不可伪造（CORS 规范强制）
+    - Referer：兼容不支持 Origin 的旧环境
+    - 两个都缺失时放行（非浏览器客户端，如 curl / 脚本，天然免疫 CSRF）
+
+    即使攻击者通过某种方式拿到了固定的 session CSRF Token，
+    也无法从外部域名发起跨站请求——浏览器会自动附带 Origin 头暴露真实来源。
+    """
+    if request.method not in ('POST', 'PUT', 'DELETE', 'PATCH'):
+        return True
+
+    origin = (request.headers.get('Origin') or '').strip()
+    referer = (request.headers.get('Referer') or '').strip()
+
+    # 非浏览器客户端 → 无害
+    if not origin and not referer:
+        return True
+
+    allowed = _build_allowed_hosts()
+
+    # 优先校验 Origin（浏览器保证不可伪造）
+    if origin:
+        netloc, hostname = _extract_host_parts(origin)
+        if netloc and netloc not in allowed:
+            if hostname and hostname not in allowed:
+                app.logger.warning(f'[CSRF] Origin 不匹配: {origin} ∉ {allowed}')
+                return False
+
+    # 次选 Referer
+    if referer:
+        netloc, hostname = _extract_host_parts(referer)
+        if netloc and netloc not in allowed:
+            if hostname and hostname not in allowed:
+                app.logger.warning(f'[CSRF] Referer 不匹配: {referer} ∉ {allowed}')
+                return False
+
+    return True
 
 # === 5. 核心工具函数 ===
 def get_client_ip():
@@ -182,15 +312,12 @@ def get_client_ip():
             return xff.split(',')[0].strip()
     return direct_ip
 
-
 def get_fp():
     ua = request.headers.get('User-Agent', '')
     return hashlib.sha256(f"{get_client_ip()}|{ua}".encode()).hexdigest()[:16]
 
-
 def is_admin():
     return session.get('admin') is True
-
 
 def load_blacklist():
     try:
@@ -198,83 +325,241 @@ def load_blacklist():
     except Exception:
         return set()
 
-
 def load_whitelist():
     try:
         return set(line.strip() for line in open(WHITE_FILE, 'r', encoding='utf-8') if line.strip())
     except Exception:
         return set()
 
-
 def load_chat():
     with _file_lock:
-        return json.load(open(CHAT_FILE, 'r', encoding='utf-8'))
+        with open(CHAT_FILE, 'r', encoding='utf-8') as f:
+            chat = json.load(f)
+        for m in chat:
+            normalize_msg(m)
+        return chat
 
+def sha512(s):
+    return hashlib.sha512(s.encode()).hexdigest()
+
+def log_ip_visit(ip):
+    """记录 IP 访问（按天聚合：SHA512(IP) | RSA(IP) | 当天次数）"""
+    date_str = datetime.now(CST).strftime('%Y-%m-%d')
+    ip_hash = sha512(ip)
+    ip_encrypted = rsa_encrypt_report(ip)
+
+    filepath = os.path.join(IP_DIR, f'ip_{date_str}')
+
+    with _ip_log_lock:
+        lines = []
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+        except Exception:
+            pass
+
+        new_lines = []
+        found = False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split('|', 2)
+            if len(parts) >= 3 and parts[0].strip() == ip_hash:
+                try:
+                    count = int(parts[2].strip()) + 1
+                except ValueError:
+                    count = 1
+                new_lines.append(f"{ip_hash} | {ip_encrypted} | {count}\n")
+                found = True
+            else:
+                new_lines.append(stripped + '\n')
+
+        if not found:
+            new_lines.append(f"{ip_hash} | {ip_encrypted} | 1\n")
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(''.join(new_lines))
+
+def normalize_msg(m):
+    m.setdefault('state', 'enabled')
+    m.setdefault('key_hash', '')
+    m.setdefault('reports', [])
+    return m
+
+def load_rule():
+    try:
+        return open(RULE_FILE, 'r', encoding='utf-8').read().strip()
+    except Exception:
+        return ''
+
+def load_threshold():
+    try:
+        return int(open(THRESHOLD_FILE, 'r', encoding='utf-8').read().strip() or '5')
+    except Exception:
+        return 5
+def load_notices():
+    try:
+        with open(NOTICE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_notices(data):
+    atomic_write(NOTICE_FILE, json.dumps(data, ensure_ascii=False))
+
+def rsa_encrypt_report(plaintext):
+    """用服务器RSA公钥加密数据（管理员私钥可解密）"""
+    try:
+        pub = RSA.importKey(open(RSA_PUB, 'rb').read())
+        return base64.b64encode(PKCS1_v1_5.new(pub).encrypt(plaintext.encode())).decode()
+    except Exception:
+        return ''
+
+def encrypt_ip(ip):
+    """
+    用 RSA 公钥加密 IP 地址。
+    返回格式：
+      'RSA:<base64>'  — 加密成功，前端可用私钥解密
+      'PLAIN:<ip>'    — 加密失败时的降级（保留原始数据不丢失）
+    """
+    if not ip:
+        return ''
+    encrypted = rsa_encrypt_report(ip)
+    if encrypted:
+        return 'RSA:' + encrypted
+    return 'PLAIN:' + ip
+
+def check_regex_disable(content):
+    rule = load_rule()
+    if not rule:
+        return False
+    try:
+        re.compile(rule)
+    except re.error:
+        return False
+    return safe_regex_search(rule, content)
 
 def save_chat(data):
     atomic_write(CHAT_FILE, json.dumps(data, ensure_ascii=False))
-
 
 def generate_csrf():
     if 'csrf_token' not in session:
         session['csrf_token'] = secrets.token_hex(32)
     return session['csrf_token']
 
+# === 新增：后端处理中锁（根治连点重复提交）===
+_processing_ips = {}
+_processing_lock = threading.Lock()
 
-# === 6. 速率限制模块 ===
-RATE_LIMIT_WRITE = 8
-RATE_LIMIT_READ = 56
-RATE_MAX_ENTRIES = 10000
-_rate_counters = OrderedDict()
-_rate_lock = threading.Lock()
+def acquire_processing_lock(ip, ttl=15):
+    now = time.time()
+    with _processing_lock:
+        if ip in _processing_ips and _processing_ips[ip] > now:
+            return False
+        _processing_ips[ip] = now + ttl
+        return True
 
+def release_processing_lock(ip):
+    with _processing_lock:
+        _processing_ips.pop(ip, None)
 
-def _get_minute_bucket():
-    return int(time.time() // 60) * 60
+# === 6. 速率限制模块（7秒缓冲锁 + 白名单豁免）===
+import sqlite3
+import random as _random
 
+_rate_db_path = os.path.join(BASE_DIR, 'rate_limits.db')
+_rate_db_lock = threading.Lock()
+
+def _init_rate_db():
+    with _rate_db_lock:
+        conn = sqlite3.connect(_rate_db_path, timeout=5.0)
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS rate_blocks (
+                ip TEXT PRIMARY KEY,
+                block_until REAL NOT NULL
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+_init_rate_db()
 
 def _is_whitelisted(ip):
     return ip in load_whitelist()
 
-
-def _log_exceed(ip, bucket, write_count, read_count):
-    ts = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(bucket))
-    line = f"{ts} | {ip} | write={write_count} read={read_count}\n"
+def check_rate_limit_before(ip):
+    _cleanup_rate_limits()
+    if _is_whitelisted(ip):
+        return True, True, 0, 0
+    now = time.time()
     try:
-        with _file_lock:
-            with open(LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(line)
-    except Exception:
-        pass
+        with _rate_db_lock:
+            conn = sqlite3.connect(_rate_db_path, timeout=3.0)
+            conn.execute('PRAGMA busy_timeout = 3000')
+            cur = conn.execute('SELECT block_until FROM rate_blocks WHERE ip = ?', (ip,))
+            row = cur.fetchone()
+            conn.close()
+            if row and now < row[0]:
+                remaining = int(row[0] - now)
+                return False, False, row[0], remaining
+            return True, False, 0, 0
+    except Exception as e:
+        print(f"[RATE LIMIT CHECK ERROR] {e}")
+        return True, False, 0, 0
 
+def set_rate_limit_after(ip):
+    if _is_whitelisted(ip):
+        return 0
+    block_until = time.time() + 7.0
+    try:
+        with _rate_db_lock:
+            conn = sqlite3.connect(_rate_db_path, timeout=3.0)
+            conn.execute('PRAGMA busy_timeout = 3000')
+            conn.execute('''
+                INSERT INTO rate_blocks (ip, block_until) VALUES (?, ?)
+                ON CONFLICT(ip) DO UPDATE SET block_until=excluded.block_until
+            ''', (ip, block_until))
+            conn.commit()
+            conn.close()
+        return block_until
+    except Exception as e:
+        print(f"[RATE LIMIT SET ERROR] {e}")
+        return 0
 
-def check_rate_limit(limit_type):
+def rate_limit_json(data, status=200, in_whitelist=False, block_until=0):
+    resp = make_response(jsonify(data), status)
+    resp.headers['X-RateLimit-Whitelisted'] = '1' if in_whitelist else '0'
+    if block_until > 0:
+        resp.headers['X-RateLimit-BlockUntil'] = str(block_until)
+        resp.headers['X-RateLimit-Remaining'] = str(max(0, int(block_until - time.time())))
+    return resp
+
+def _cleanup_rate_limits():
+    if _random.randint(1, 100) > 5:
+        return
+    now = time.time()
+    try:
+        with _rate_db_lock:
+            conn = sqlite3.connect(_rate_db_path, timeout=3.0)
+            conn.execute('DELETE FROM rate_blocks WHERE block_until < ?', (now,))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"[RATE LIMIT CLEANUP ERROR] {e}")
+
+def check_rate_limit(action='read'):
     ip = get_client_ip()
     if _is_whitelisted(ip):
         return None
-    bucket = _get_minute_bucket()
-    key = (ip, bucket)
-    limit = RATE_LIMIT_WRITE if limit_type == 'write' else RATE_LIMIT_READ
-    with _rate_lock:
-        prev_bucket = bucket - 60
-        while _rate_counters:
-            oldest_key = next(iter(_rate_counters))
-            if oldest_key[1] < prev_bucket:
-                _rate_counters.pop(oldest_key)
-            else:
-                break
-        while len(_rate_counters) >= RATE_MAX_ENTRIES:
-            _rate_counters.popitem(last=False)
-        counts = _rate_counters.setdefault(key, {'write': 0, 'read': 0})
-        _rate_counters.move_to_end(key)
-        counts[limit_type] += 1
-        current_count = counts[limit_type]
-        if current_count > limit:
-            _log_exceed(ip, bucket, counts['write'], counts['read'])
-            remaining = 60 - int(time.time()) % 60
-            return jsonify({'error': f'请求过于频繁，请{remaining}秒后重试'}), 429
+    if action == 'write':
+        allowed, _, block_until, remaining = check_rate_limit_before(ip)
+        if not allowed:
+            return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, False, block_until)
     return None
-
 
 # === 7. 安全中间件 ===
 @app.before_request
@@ -286,9 +571,15 @@ def security_checks():
         if stored and stored != get_fp():
             session.clear()
 
-
 @app.after_request
 def secure_headers(response):
+    # ★ 记录 IP 访问（排除自身查询接口避免自循环）
+    if not request.path.startswith('/api/admin/ip'):
+        try:
+            log_ip_visit(get_client_ip())
+        except Exception:
+            pass
+
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '0'
@@ -298,7 +589,7 @@ def secure_headers(response):
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
+        "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https:; "
         "connect-src 'self' https:; "
@@ -306,11 +597,14 @@ def secure_headers(response):
     )
     return response
 
-
 def require_csrf(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            # ★ 第一层：Origin / Referer 校验（防跨站伪造）
+            if not validate_origin_referer():
+                return jsonify({'error': '跨域请求被拒绝（Origin/Referer 不匹配）'}), 403
+            # ★ 第二层：CSRF Token 校验（防同站利用）
             token = session.get('csrf_token')
             header = request.headers.get('X-CSRF-Token')
             if not token or token != header:
@@ -318,9 +612,7 @@ def require_csrf(f):
         return f(*args, **kwargs)
     return decorated
 
-
 def require_private_key(f):
-    """装饰器：要求 Session 中已通过私钥校验"""
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get('admin_has_key'):
@@ -328,14 +620,12 @@ def require_private_key(f):
         return f(*args, **kwargs)
     return decorated
 
-
 # === 8. 路由：认证与安全 ===
 @app.route('/api/csrf')
 def api_csrf():
     rl = check_rate_limit('read')
     if rl: return rl
     return jsonify({'token': generate_csrf()})
-
 
 @app.route('/api/admin/status')
 def admin_status():
@@ -345,7 +635,6 @@ def admin_status():
         'logged_in': is_admin(),
         'has_key': session.get('admin_has_key', False)
     })
-
 
 @app.route('/api/admin/challenge')
 def admin_challenge():
@@ -364,13 +653,14 @@ def admin_challenge():
         print(f"[ERROR] 公钥加载失败: {e}")
         return jsonify({'challenge': 'ERROR'})
 
-
 @app.route('/api/admin/verify', methods=['POST'])
 @require_csrf
 def admin_verify():
     rl = check_rate_limit('write')
-    if rl: return rl
-    plaintext = request.form.get('plaintext')
+    if rl:
+        return rl
+    data = request.get_json(silent=True) or {}
+    plaintext = (data.get('plaintext') or request.form.get('plaintext', '')).strip()
     stored = session.get('challenge_nonce')
     ctime = session.get('challenge_time', 0)
     if not plaintext:
@@ -389,19 +679,16 @@ def admin_verify():
     generate_csrf()
     return jsonify({'status': 'ok'})
 
-
 @app.route('/api/admin/logout', methods=['GET', 'POST'])
 @require_csrf
 def admin_logout():
     session.clear()
     return jsonify({'status': 'ok'})
 
-
-# === 9. 路由：基础与留言 ===
+# === 9. 路由：基础与留言（v2 三部分格式）===
 @app.route('/api/myip')
 def my_ip():
     return get_client_ip()
-
 
 @app.route('/gongyao.txt')
 def pub_key():
@@ -413,31 +700,40 @@ def pub_key():
     except Exception:
         return "公钥读取失败", 500
 
-
 @app.route('/api/footer', methods=['GET'])
 def get_footer():
     return open(UNDER_FILE, encoding='utf-8').read()
 
-
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        rl = check_rate_limit('write')
-        if rl: return rl
-        data = request.get_json()
-        if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv', 'meta_msg')):
-            return "数据不完整", 400
-        rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
-        iv = data['iv'].replace('\n', '').replace('\r', '').strip()
-        meta_msg = data['meta_msg'].replace('\n', '').replace('\r', '').strip()
-        aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
-        content = f"{rsa_key}|{iv}\n{meta_msg}\n{aes_msg}"
-        with _file_lock:
-            seq = get_seq_unlocked()
-            atomic_write_unlocked(os.path.join(MSG_DIR, f"留言_{seq}.txt"), content)
-        return {"status": "ok"}, 200
-    return render_template('login.html')
+        ip = get_client_ip()
+        if not acquire_processing_lock(ip):
+            return rate_limit_json({"error": "请求处理中，请勿重复提交"}, 429, False, 0)
+        try:
+            allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
+            if not allowed:
+                return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
+            data = request.get_json(silent=True) or {}
+            if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv')):
+                return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
+            rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
+            iv = data['iv'].replace('\n', '').replace('\r', '').strip()
+            aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
 
+            server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
+            server_meta = f"{get_client_ip()} | {server_time}"
+            server_enc = rsa_encrypt_report(server_meta)
+
+            content = f"v2|{rsa_key}|{iv}\n{aes_msg}\n{server_enc}"
+            with _file_lock:
+                seq = get_seq_unlocked()
+                atomic_write_unlocked(os.path.join(MSG_DIR, f"留言_{seq}.txt"), content)
+            block_until = set_rate_limit_after(ip)
+            return rate_limit_json({"status": "ok"}, 200, in_wl, block_until)
+        finally:
+            release_processing_lock(ip)
+    return render_template('login.html')
 
 @app.route('/admin')
 def admin_page():
@@ -449,19 +745,34 @@ def admin_page():
     for f in files:
         try:
             with open(f, encoding='utf-8') as fh:
-                lines = fh.readlines()
-                if len(lines) < 3: continue
-                msgs.append({
-                    'file': os.path.basename(f),
-                    'seq': re.search(r'(\d+)', os.path.basename(f)).group(1),
-                    'rsa_iv': lines[0].strip(),
-                    'meta_enc': lines[1].strip(),
-                    'content_enc': ''.join(lines[2:]).strip()
-                })
+                lines = [l.strip() for l in fh.readlines() if l.strip()]
+                if len(lines) < 2:
+                    continue
+                is_v2 = lines[0].startswith('v2|')
+                seq = re.search(r'(\d+)', os.path.basename(f)).group(1)
+                if is_v2:
+                    msgs.append({
+                        'file': os.path.basename(f),
+                        'seq': seq,
+                        'rsa_iv': lines[0],
+                        'aes_msg': lines[1],
+                        'server_enc': lines[2] if len(lines) > 2 else '',
+                        'is_v2': True
+                    })
+                else:
+                    if len(lines) < 3:
+                        continue
+                    msgs.append({
+                        'file': os.path.basename(f),
+                        'seq': seq,
+                        'rsa_iv': lines[0].strip(),
+                        'meta_enc': lines[1].strip(),
+                        'content_enc': ''.join(lines[2:]).strip(),
+                        'is_v2': False
+                    })
         except Exception:
             continue
     return render_template('admin.html', messages=msgs)
-
 
 # === 10. 路由：回复 ===
 @app.route('/api/replies', methods=['GET'])
@@ -469,18 +780,41 @@ def get_replies():
     rl = check_rate_limit('read')
     if rl: return rl
     reps = []
-    for f in glob.glob(os.path.join(REPLY_DIR, '回复_*.txt')):
-        m = re.search(r'(\d+)', os.path.basename(f))
+    # 新格式：回复_{seq}_{num}.txt
+    for f in glob.glob(os.path.join(REPLY_DIR, '回复_*_*.txt')):
+        m = re.search(r'回复_(\d+)_(\d+)\.txt', os.path.basename(f))
         if not m: continue
         try:
             with open(f, encoding='utf-8') as fh:
                 lines = fh.readlines()
                 if len(lines) >= 2:
-                    reps.append({'seq': m.group(1), 'iv': lines[0].strip(), 'aes_msg': ''.join(lines[1:]).strip()})
+                    reps.append({
+                        'seq': m.group(1),
+                        'num': int(m.group(2)),
+                        'iv': lines[0].strip(),
+                        'aes_msg': ''.join(lines[1:]).strip()
+                    })
+        except Exception:
+            continue
+    # 旧格式兼容：回复_{seq}.txt → 视为 num=1
+    for f in glob.glob(os.path.join(REPLY_DIR, '回复_*.txt')):
+        m = re.search(r'回复_(\d+)\.txt', os.path.basename(f))
+        if not m: continue
+        if any(r['seq'] == m.group(1) and r['num'] == 1 for r in reps):
+            continue       # 已有 _1 文件则跳过旧文件
+        try:
+            with open(f, encoding='utf-8') as fh:
+                lines = fh.readlines()
+                if len(lines) >= 2:
+                    reps.append({
+                        'seq': m.group(1),
+                        'num': 1,
+                        'iv': lines[0].strip(),
+                        'aes_msg': ''.join(lines[1:]).strip()
+                    })
         except Exception:
             continue
     return jsonify(reps)
-
 
 @app.route('/api/messages', methods=['GET'])
 def get_messages():
@@ -495,34 +829,54 @@ def get_messages():
         if not m: continue
         try:
             with open(f, encoding='utf-8') as fh:
-                lines = fh.readlines()
-                if len(lines) < 3: continue
-                rsa_iv = lines[0].strip()
-                parts = rsa_iv.split('|')
-                iv = parts[1] if len(parts) >= 2 else ''
-                meta_msg = lines[1].strip()
-                aes_msg = ''.join(lines[2:]).strip()
-                msgs.append({
-                    'seq': m.group(1),
-                    'iv': iv,
-                    'meta_msg': meta_msg,
-                    'aes_msg': aes_msg
-                })
+                lines = [l.strip() for l in fh.readlines() if l.strip()]
+                if len(lines) < 2:
+                    continue
+                is_v2 = lines[0].startswith('v2|')
+                if is_v2:
+                    parts = lines[0].split('|')
+                    msgs.append({
+                        'seq': m.group(1),
+                        'iv': parts[2] if len(parts) >= 3 else '',
+                        'aes_msg': lines[1],
+                        'server_enc': lines[2] if len(lines) > 2 else ''
+                    })
+                else:
+                    if len(lines) < 3:
+                        continue
+                    parts = lines[0].split('|')
+                    msgs.append({
+                        'seq': m.group(1),
+                        'iv': parts[1] if len(parts) >= 2 else '',
+                        'meta_msg': lines[1],
+                        'aes_msg': ''.join(lines[2:]).strip()
+                    })
         except Exception:
             continue
     return jsonify(msgs)
-
 
 @app.route('/api/reply', methods=['POST'])
 @require_csrf
 def save_reply():
     if not is_admin(): return "未授权", 403
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     if not data.get('seq'): return "缺少序号", 400
-    content = f"{data['iv']}\n{data['aes_msg']}"
-    atomic_write(os.path.join(REPLY_DIR, f"回复_{data['seq']}.txt"), content)
-    return "ok"
+    seq = data['seq']
+    if not re.match(r'^\d+$', str(seq)): return "无效序号", 400
 
+    # 找出下一个编号
+    max_num = 0
+    for f in glob.glob(os.path.join(REPLY_DIR, f'回复_{seq}*.txt')):
+        m = re.search(r'回复_\d+_(\d+)\.txt', os.path.basename(f))
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+        elif os.path.basename(f) == f'回复_{seq}.txt':
+            max_num = max(max_num, 1)
+
+    next_num = max_num + 1
+    content = f"{data['iv']}\n{data['aes_msg']}"
+    atomic_write(os.path.join(REPLY_DIR, f"回复_{seq}_{next_num}.txt"), content)
+    return jsonify({"status": "ok", "num": next_num})
 
 @app.route('/admin/delete/<filename>', methods=['POST'])
 @require_csrf
@@ -532,10 +886,13 @@ def delete_msg(filename):
     if not path or not os.path.isfile(path): return "无效文件", 400
     os.remove(path)
     if m := re.search(r'(\d+)', os.path.basename(path)):
-        r_path = safe_resolve(REPLY_DIR, f"回复_{m.group(1)}.txt")
-        if r_path and os.path.isfile(r_path): os.remove(r_path)
+        # 删除所有相关回复（新旧格式）
+        for f in glob.glob(os.path.join(REPLY_DIR, f'回复_{m.group(1)}*.txt')):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
     return "ok"
-
 
 @app.route('/admin/delete_reply/<seq>', methods=['POST'])
 @require_csrf
@@ -547,6 +904,15 @@ def delete_reply(seq):
     os.remove(path)
     return "ok"
 
+@app.route('/admin/delete_reply_file/<filename>', methods=['POST'])
+@require_csrf
+def delete_reply_file(filename):
+    """删除单条回复（支持多条回复）"""
+    if not is_admin(): return "未授权", 403
+    path = safe_resolve(REPLY_DIR, filename)
+    if not path or not os.path.isfile(path): return "无效文件", 400
+    os.remove(path)
+    return "ok"
 
 @app.route('/api/footer', methods=['POST'])
 @require_csrf
@@ -555,21 +921,19 @@ def update_footer():
     atomic_write(UNDER_FILE, request.form.get('content', ''))
     return "ok"
 
-
 @app.route('/api/blacklist', methods=['GET', 'POST'])
 @require_csrf
 def manage_blacklist():
     if not is_admin(): return "未授权", 403
     bl = load_blacklist()
     if request.method == 'GET': return jsonify(list(bl))
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     ip = data.get('ip', '').strip()
     if not ip: return "IP无效", 400
     if data.get('action') == 'add': bl.add(ip)
     elif data.get('action') == 'remove': bl.discard(ip)
     atomic_write(BLACK_FILE, '\n'.join(bl) + '\n' if bl else '')
     return "ok"
-
 
 @app.route('/api/whitelist', methods=['GET', 'POST'])
 @require_csrf
@@ -579,7 +943,7 @@ def manage_whitelist():
     if rl: return rl
     wl = load_whitelist()
     if request.method == 'GET': return jsonify(list(wl))
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     ip = data.get('ip', '').strip()
     if not ip: return "IP无效", 400
     if data.get('action') == 'add': wl.add(ip)
@@ -587,12 +951,10 @@ def manage_whitelist():
     atomic_write(WHITE_FILE, '\n'.join(sorted(wl)) + '\n' if wl else '')
     return "ok"
 
-
-# === 12. 路由：群聊 ===
+# === 12. 路由：群聊（未改动，与原版一致）===
 @app.route('/qun')
 def qun_page():
     return render_template('qun.html')
-
 
 @app.route('/api/qun/status')
 def qun_status():
@@ -600,57 +962,206 @@ def qun_status():
     if rl: return rl
     return read_perm_file()
 
-
 @app.route('/api/qun', methods=['GET'])
 def get_qun():
     rl = check_rate_limit('read')
     if rl: return rl
     chat = load_chat()
-    normal = [m for m in chat if not m.get('pinned')]
-    pinned = [m for m in chat if m.get('pinned')]
-    ordered = normal + pinned
-    return jsonify([
-        {'nick': m['nick'], 'time': m['time'], 'content': m['content'], 'pinned': bool(m.get('pinned'))}
-        for m in ordered
-    ])
+    nick = request.args.get('nick', '').strip()
+    key_hash = request.args.get('key_hash', '').strip()
 
+    result = []
+    for i, m in enumerate(chat):
+        normalize_msg(m)
+        state = m.get('state', 'enabled')
+        if state == 'disabled':
+            if is_admin():
+                pass
+            elif nick and key_hash and m.get('nick') == nick and m.get('key_hash') == key_hash:
+                pass
+            else:
+                continue
+        result.append({
+            'index': i,
+            'nick': m['nick'],
+            'time': m['time'],
+            'content': m['content'],
+            'state': state,
+            'pinned': bool(m.get('pinned')),
+            'is_owner': bool(nick and key_hash and m.get('nick') == nick and m.get('key_hash') == key_hash),
+            'report_count': len(m.get('reports', []))
+        })
+    normal = [x for x in result if x['state'] in ('enabled', 'disabled') and not x['pinned']]
+    forced = [x for x in result if x['state'] == 'forced' and not x['pinned']]
+    pinned = [x for x in result if x['pinned']]
+    ordered = normal + forced + pinned
+    return jsonify(ordered)
 
 @app.route('/api/qun', methods=['POST'])
 def post_qun():
-    rl = check_rate_limit('write')
-    if rl: return rl
-    if read_perm_file() == '1': return "已开启全体禁言", 403
-    data = request.get_json()
-    if not data.get('nick') or not data.get('content'): return "数据不完整", 400
-    if data['nick'].strip().lower() == 'admin': return "禁止使用 admin 作为昵称", 400
+    ip = get_client_ip()
+    allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
+    if not allowed:
+        return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
+    if read_perm_file() == '1':
+        return rate_limit_json({"error": "已开启全体禁言"}, 403, in_wl, block_until)
+    data = request.get_json(silent=True) or {}
+    if not data.get('nick') or not data.get('content'):
+        return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
+    if not data.get('key'):
+        return rate_limit_json({"error": "请提供密钥"}, 400, in_wl, block_until)
+    if data['nick'].strip().lower() == 'admin':
+        return rate_limit_json({"error": "禁止使用 admin 作为昵称"}, 400, in_wl, block_until)
+
+    key_hash = sha512(data['key'].strip())
+    content = data['content'][:2048]
+    initial_state = 'disabled' if check_regex_disable(content) else 'enabled'
+
     msg = {
         'nick': data['nick'][:32],
         'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
-        'ip': get_client_ip(),
-        'content': data['content'][:2048],
-        'pinned': False
+        'ip': encrypt_ip(get_client_ip()),
+        'content': content,
+        'pinned': False,
+        'state': initial_state,
+        'key_hash': key_hash,
+        'reports': []
     }
     def updater(chat):
         chat.append(msg)
     atomic_chat_update(updater)
-    return {"status": "ok"}, 200
 
+    block_until = set_rate_limit_after(ip)
+    return rate_limit_json({"status": "ok", "state": initial_state}, 200, in_wl, block_until)
+
+@app.route('/api/qun/revoke/<int:index>', methods=['POST'])
+def revoke_qun_msg(index):
+    ip = get_client_ip()
+    allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
+    if not allowed:
+        return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
+    data = request.get_json(silent=True) or {}
+    nick = data.get('nick', '').strip()
+    key = data.get('key', '').strip()
+    if not nick or not key:
+        return rate_limit_json({"error": "请提供昵称和密钥"}, 400, in_wl, block_until)
+    key_hash = sha512(key)
+
+    with _file_lock:
+        with open(CHAT_FILE, 'r', encoding='utf-8') as f:
+            chat = json.load(f)
+        if not (0 <= index < len(chat)):
+            return rate_limit_json({"error": "消息不存在"}, 404, in_wl, block_until)
+        m = chat[index]
+        if m.get('nick') != nick or m.get('key_hash') != key_hash:
+            return rate_limit_json({"error": "身份校验失败，无权撤回此消息"}, 403, in_wl, block_until)
+        m['state'] = 'disabled'
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(CHAT_FILE), suffix='.tmp')
+        try:
+            os.write(fd, json.dumps(chat, ensure_ascii=False).encode('utf-8'))
+            os.close(fd)
+            os.replace(tmp_path, CHAT_FILE)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+    block_until = set_rate_limit_after(ip)
+    return rate_limit_json({"ok": True}, 200, in_wl, block_until)
+
+@app.route('/api/qun/report/<int:index>', methods=['POST'])
+def report_qun_msg(index):
+    ip = get_client_ip()
+    allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
+    if not allowed:
+        return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
+    data = request.get_json(silent=True) or {}
+    nick = data.get('nick', '').strip()
+    key = data.get('key', '').strip()
+
+    with _file_lock:
+        with open(CHAT_FILE, 'r', encoding='utf-8') as f:
+            chat = json.load(f)
+        if not (0 <= index < len(chat)):
+            return rate_limit_json({"error": "消息不存在"}, 404, in_wl, block_until)
+        m = chat[index]
+        if m.get('state') == 'forced':
+            return rate_limit_json({"error": "公告不可举报"}, 403, in_wl, block_until)
+
+        reporter_ip = get_client_ip()
+        ip_hash = sha512(reporter_ip)
+        m.setdefault('reports', [])
+        if any(r.get('ip_hash') == ip_hash for r in m['reports']):
+            return rate_limit_json({'error': '您已经举报过这条消息，请勿重复举报'}, 429, in_wl, block_until)
+
+        plaintext = f"{reporter_ip}|{nick}|{key}"
+        encrypted = rsa_encrypt_report(plaintext)
+
+        report = {
+            'ip_hash': ip_hash,
+            'encrypted': encrypted,
+            'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
+            'msg_index': index
+        }
+        m['reports'].append(report)
+        threshold = load_threshold()
+        total_reports = len(m['reports'])
+        if total_reports >= threshold:
+            m['state'] = 'disabled'
+
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(CHAT_FILE), suffix='.tmp')
+        try:
+            os.write(fd, json.dumps(chat, ensure_ascii=False).encode('utf-8'))
+            os.close(fd)
+            os.replace(tmp_path, CHAT_FILE)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+    block_until = set_rate_limit_after(ip)
+    return rate_limit_json({
+        'ok': True,
+        'auto_disabled': m['state'] == 'disabled' and total_reports >= threshold
+    }, 200, in_wl, block_until)
 
 @app.route('/admin/qun')
 def admin_qun_page():
     return render_template('admin_qun.html')
-
 
 @app.route('/api/admin/qun', methods=['GET'])
 @require_csrf
 def get_admin_qun():
     if not is_admin(): return "未授权", 403
     chat = load_chat()
-    return jsonify([
-        {'nick': m['nick'], 'time': m['time'], 'content': m['content'], 'ip': m.get('ip', ''), 'pinned': bool(m.get('pinned'))}
-        for m in chat
-    ])
-
+    result = []
+    for i, m in enumerate(chat):
+        normalize_msg(m)
+        raw_ip = m.get('ip', '')
+        # 兼容旧数据：如果 IP 不是 'RSA:' 或 'PLAIN:' 开头，则为历史明文，标记为 PLAIN
+        if raw_ip and not raw_ip.startswith(('RSA:', 'PLAIN:')):
+            raw_ip = 'PLAIN:' + raw_ip
+        result.append({
+            'index': i,
+            'nick': m['nick'],
+            'time': m['time'],
+            'content': m['content'],
+            'ip': raw_ip,
+            'state': m.get('state', 'enabled'),
+            'pinned': bool(m.get('pinned')),
+            'key_hash': m.get('key_hash', ''),
+            'reports': m.get('reports', []),
+            'report_count': len(m.get('reports', []))
+        })
+    return jsonify(result)
 
 @app.route('/api/admin/qun/delete/<int:index>', methods=['POST'])
 @require_csrf
@@ -662,26 +1173,42 @@ def delete_qun_msg(index):
     atomic_chat_update(updater)
     return "ok"
 
+@app.route('/api/admin/qun/state/<int:index>', methods=['POST'])
+@require_csrf
+def toggle_qun_state(index):
+    if not is_admin(): return "未授权", 403
+    data = request.get_json(silent=True) or {}
+    new_state = data.get('state', '').strip()
+    if new_state not in ('enabled', 'disabled', 'forced'):
+        return "无效状态（应为 enabled / disabled / forced）", 400
+    def updater(chat):
+        if 0 <= index < len(chat):
+            normalize_msg(chat[index])
+            chat[index]['state'] = new_state
+    atomic_chat_update(updater)
+    return jsonify({'ok': True, 'state': new_state})
 
 @app.route('/api/admin/qun/announce', methods=['POST'])
 @require_csrf
 def send_announce():
     if not is_admin(): return "未授权", 403
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     content = data.get('content', '').strip()
     if not content: return "内容不能为空", 400
     msg = {
         'nick': 'admin',
         'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
-        'ip': get_client_ip(),
+        'ip': encrypt_ip(get_client_ip()),
         'content': content,
-        'pinned': False
+        'pinned': False,
+        'state': 'forced',
+        'key_hash': '',
+        'reports': []
     }
     def updater(chat):
         chat.append(msg)
     atomic_chat_update(updater)
     return {"status": "ok"}, 200
-
 
 @app.route('/api/admin/qun/permission', methods=['GET', 'POST'])
 @require_csrf
@@ -691,7 +1218,6 @@ def manage_perm():
         atomic_write(PERM_FILE, '1' if request.form.get('val') == '1' else '0')
         return "ok"
     return read_perm_file()
-
 
 @app.route('/api/admin/qun/pin/<int:index>', methods=['POST'])
 @require_csrf
@@ -703,18 +1229,165 @@ def toggle_pin(index):
     atomic_chat_update(updater)
     return "ok"
 
+@app.route('/api/admin/qun/rule', methods=['GET', 'POST'])
+@require_csrf
+def manage_rule():
+    if not is_admin(): return "未授权", 403
+    if request.method == 'GET':
+        return jsonify({'rule': load_rule()})
+    data = request.get_json(silent=True) or {}
+    rule = data.get('rule', '').strip()
+    force = data.get('force', False)
+    if rule and _is_redos_dangerous(rule):
+        if not force:
+            return jsonify({
+                'error': '正则模式包含危险的嵌套量词，可能导致服务卡死。请修改正则或确认风险后强制保存。',
+                'dangerous': True
+            }), 400
+    try:
+        re.compile(rule)
+    except re.error as e:
+        return jsonify({'error': f'正则语法错误: {e}'}), 400
+    atomic_write(RULE_FILE, rule)
+    return jsonify({'ok': True, 'rule': rule})
+
+@app.route('/api/admin/qun/rule/apply', methods=['POST'])
+@require_csrf
+def apply_rule():
+    if not is_admin(): return "未授权", 403
+    rule = load_rule()
+    if not rule:
+        return "正则规则为空", 400
+    try:
+        re.compile(rule)
+    except re.error as e:
+        return f"正则语法错误: {e}", 400
+    count = 0
+    def updater(chat):
+        nonlocal count
+        for m in chat:
+            normalize_msg(m)
+            if m.get('state') == 'enabled':
+                try:
+                    if safe_regex_search(rule, m.get('content', '')):
+                        m['state'] = 'disabled'
+                        count += 1
+                except Exception:
+                    pass
+    atomic_chat_update(updater)
+    return jsonify({'ok': True, 'disabled_count': count})
+
+@app.route('/api/admin/qun/threshold', methods=['GET', 'POST'])
+@require_csrf
+def manage_threshold():
+    if not is_admin(): return "未授权", 403
+    if request.method == 'GET':
+        return jsonify({'threshold': load_threshold()})
+    data = request.get_json(silent=True) or {}
+    val = data.get('threshold', '5').strip()
+    try:
+        val_int = int(val)
+        if val_int < 1:
+            return "阈值必须 ≥ 1", 400
+    except ValueError:
+        return "阈值必须是整数", 400
+    atomic_write(THRESHOLD_FILE, str(val_int))
+    return jsonify({'ok': True, 'threshold': val_int})
+# ═══════════════════════════════════════════════════════════
+# 15. 路由：IP 访问记录管理
+# ═══════════════════════════════════════════════════════════
+@app.route('/admin/ip')
+def admin_ip_page():
+    return render_template('admin_ip.html')
+
+@app.route('/api/admin/ip/data', methods=['GET'])
+@require_csrf
+@require_private_key
+def get_ip_data():
+    """查询一段日期范围内的 IP 访问统计（含白名单标注）"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    start_str = request.args.get('start', '').strip()
+    end_str   = request.args.get('end',   '').strip()
+
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', start_str) or \
+       not re.match(r'^\d{4}-\d{2}-\d{2}$', end_str):
+        return jsonify({'error': '日期格式错误（YYYY-MM-DD）'}), 400
+
+    whitelist = load_whitelist()
+    wl_hashes = {sha512(ip) for ip in whitelist}
+
+    aggregated = {}
+    try:
+        for fname in os.listdir(IP_DIR):
+            m = re.match(r'^ip_(\d{4}-\d{2}-\d{2})$', fname)
+            if not m:
+                continue
+            date_str = m.group(1)
+            if date_str < start_str or date_str > end_str:
+                continue
+
+            filepath = os.path.join(IP_DIR, fname)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = line.split('|', 2)
+                        if len(parts) < 3:
+                            continue
+                        h = parts[0].strip()
+                        enc = parts[1].strip()
+                        try:
+                            cnt = int(parts[2].strip())
+                        except ValueError:
+                            cnt = 0
+                        if h not in aggregated:
+                            aggregated[h] = {'encrypted': enc, 'count': 0}
+                        aggregated[h]['count'] += cnt
+                        aggregated[h]['encrypted'] = enc
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    records = []
+    total_visits = 0
+    total_visits_non_wl = 0
+    unique_ips_non_wl = 0
+
+    for h, v in aggregated.items():
+        is_wl = h in wl_hashes
+        records.append({
+            'hash': h,
+            'encrypted': v['encrypted'],
+            'count': v['count'],
+            'whitelisted': is_wl
+        })
+        total_visits += v['count']
+        if not is_wl:
+            total_visits_non_wl += v['count']
+            unique_ips_non_wl += 1
+
+    records.sort(key=lambda x: x['count'], reverse=True)
+
+    return jsonify({
+        'records': records,
+        'total_visits': total_visits,
+        'unique_ips': len(records),
+        'total_visits_non_wl': total_visits_non_wl,
+        'unique_ips_non_wl': unique_ips_non_wl
+    })
 
 # ═══════════════════════════════════════════════════════════
-# 🆕 13. 路由：投票系统（v2 — 允许修改 + 编辑令牌）
+# 13. 路由：投票系统（v2 — 服务器独立加密 IP|时间）
 # ═══════════════════════════════════════════════════════════
-
-# ── 用户端页面 ──
 @app.route('/vote')
 def vote_page():
     return render_template('vote.html')
 
-
-# ── 用户 API：列出所有投票 ──
 @app.route('/api/votes', methods=['GET'])
 def list_votes():
     rl = check_rate_limit('read')
@@ -743,8 +1416,8 @@ def list_votes():
                 'custom': cfg.get('custom', False),
                 'customHint': cfg.get('customHint', ''),
                 'allowEdit': cfg.get('allowEdit', False),
-                'minSelect': cfg.get('minSelect', 1),     # ⬅ 新增
-                'maxSelect': cfg.get('maxSelect', 1),     # ⬅ 新增
+                'minSelect': cfg.get('minSelect', 1),
+                'maxSelect': cfg.get('maxSelect', 1),
                 'total_votes': len(vote_files),
                 'created_at': cfg.get('created_at', '')
             })
@@ -752,88 +1425,102 @@ def list_votes():
             continue
     return jsonify(polls)
 
-
-# ── 用户 API：提交投票 ──
 @app.route('/api/votes/<poll_id>', methods=['POST'])
+@require_csrf
 def submit_vote(poll_id):
-    rl = check_rate_limit('write')
-    if rl:
-        return rl
-
-    poll_dir = safe_vote_dir(poll_id)
-    if not poll_dir or not os.path.isdir(poll_dir):
-        return "投票不存在", 404
-
-    data = request.get_json()
-    if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv', 'meta_msg')):
-        return "数据不完整", 400
-
-    rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
-    iv = data['iv'].replace('\n', '').replace('\r', '').strip()
-    meta_msg = data['meta_msg'].replace('\n', '').replace('\r', '').strip()
-    aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
-    edit_token = data.get('edit_token', '').strip() or secrets.token_urlsafe(24)
-
-    content = f"{rsa_key}|{iv}\n{meta_msg}\n{aes_msg}\n{edit_token}"
-
-    with _file_lock:
-        seq = get_vote_seq_unlocked(poll_dir)
-        atomic_write_unlocked(os.path.join(poll_dir, f"投票_{seq}.txt"), content)
-
-    return jsonify({'status': 'ok', 'seq': seq, 'edit_token': edit_token}), 200
-
-
-# ── 用户 API：修改自己的投票 ──
-@app.route('/api/votes/<poll_id>/<int:seq>', methods=['PUT'])
-def modify_vote(poll_id, seq):
-    rl = check_rate_limit('write')
-    if rl:
-        return rl
-
-    poll_dir = safe_vote_dir(poll_id)
-    if not poll_dir or not os.path.isdir(poll_dir):
-        return "投票不存在", 404
-
-    filepath = safe_resolve(poll_dir, f"投票_{seq}.txt")
-    if not filepath or not os.path.isfile(filepath):
-        return "投票记录不存在", 404
-
+    ip = get_client_ip()
+    if not acquire_processing_lock(ip):
+        return rate_limit_json({"error": "请求处理中，请勿重复提交"}, 429, False, 0)
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            old_lines = f.readlines()
-        old_edit_token = old_lines[3].strip() if len(old_lines) >= 4 else ''
-    except Exception:
-        return "读取原投票失败", 500
+        allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
+        if not allowed:
+            return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
 
-    data = request.get_json()
-    provided_token = data.get('edit_token', '').strip()
+        poll_dir = safe_vote_dir(poll_id)
+        if not poll_dir or not os.path.isdir(poll_dir):
+            return rate_limit_json({"error": "投票不存在"}, 404, in_wl, block_until)
 
-    if not old_edit_token or old_edit_token != provided_token:
-        return "编辑令牌不匹配，无权修改此投票", 403
+        data = request.get_json(silent=True) or {}
+        if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv')):
+            return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
 
-    if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv', 'meta_msg')):
-        return "数据不完整", 400
+        rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
+        iv = data['iv'].replace('\n', '').replace('\r', '').strip()
+        aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+        edit_token = data.get('edit_token', '').strip() or secrets.token_urlsafe(24)
 
-    rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
-    iv = data['iv'].replace('\n', '').replace('\r', '').strip()
-    meta_msg = data['meta_msg'].replace('\n', '').replace('\r', '').strip()
-    aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+        server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
+        server_meta = f"{get_client_ip()} | {server_time}"
+        server_enc = rsa_encrypt_report(server_meta)
 
-    content = f"{rsa_key}|{iv}\n{meta_msg}\n{aes_msg}\n{old_edit_token}"
+        content = f"v2|{rsa_key}|{iv}\n{aes_msg}\n{server_enc}\n{edit_token}"
 
-    with _file_lock:
-        atomic_write_unlocked(filepath, content)
+        with _file_lock:
+            seq = get_vote_seq_unlocked(poll_dir)
+            atomic_write_unlocked(os.path.join(poll_dir, f"投票_{seq}.txt"), content)
 
-    return jsonify({'status': 'ok', 'seq': seq}), 200
+        block_until = set_rate_limit_after(ip)
+        return rate_limit_json({'status': 'ok', 'seq': seq, 'edit_token': edit_token}, 200, in_wl, block_until)
+    finally:
+        release_processing_lock(ip)
 
+@app.route('/api/votes/<poll_id>/<int:seq>', methods=['PUT'])
+@require_csrf
+def modify_vote(poll_id, seq):
+    ip = get_client_ip()
+    if not acquire_processing_lock(ip):
+        return rate_limit_json({"error": "请求处理中，请勿重复提交"}, 429, False, 0)
+    try:
+        allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
+        if not allowed:
+            return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
 
-# ── 管理端页面 ──
+        poll_dir = safe_vote_dir(poll_id)
+        if not poll_dir or not os.path.isdir(poll_dir):
+            return rate_limit_json({"error": "投票不存在"}, 404, in_wl, block_until)
+
+        filepath = safe_resolve(poll_dir, f"投票_{seq}.txt")
+        if not filepath or not os.path.isfile(filepath):
+            return rate_limit_json({"error": "投票记录不存在"}, 404, in_wl, block_until)
+
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                old_lines = [l.strip() for l in f.readlines() if l.strip()]
+            if len(old_lines) < 4:
+                return rate_limit_json({"error": "原文件格式异常"}, 500, in_wl, block_until)
+            old_edit_token = old_lines[3].strip()
+            old_server_enc = old_lines[2].strip() if len(old_lines) > 2 else ''
+        except Exception:
+            return rate_limit_json({"error": "读取原投票失败"}, 500, in_wl, block_until)
+
+        data = request.get_json(silent=True) or {}
+        provided_token = data.get('edit_token', '').strip()
+
+        if not old_edit_token or old_edit_token != provided_token:
+            return rate_limit_json({"error": "编辑令牌不匹配，无权修改此投票"}, 403, in_wl, block_until)
+
+        if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv')):
+            return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
+
+        rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
+        iv = data['iv'].replace('\n', '').replace('\r', '').strip()
+        aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+
+        # 保留原始 server_enc（原始提交时间/IP 不可被修改覆盖）
+        content = f"v2|{rsa_key}|{iv}\n{aes_msg}\n{old_server_enc}\n{old_edit_token}"
+
+        with _file_lock:
+            atomic_write_unlocked(filepath, content)
+
+        block_until = set_rate_limit_after(ip)
+        return rate_limit_json({'status': 'ok', 'seq': seq}, 200, in_wl, block_until)
+    finally:
+        release_processing_lock(ip)
+
 @app.route('/admin/vote')
 def admin_vote_page():
     return render_template('admin_vote.html')
 
-
-# ── 管理 API：创建投票 ──
 @app.route('/api/admin/votes/create', methods=['POST'])
 @require_csrf
 @require_private_key
@@ -841,7 +1528,7 @@ def create_vote():
     if not is_admin():
         return "未授权", 403
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     title = data.get('title', '').strip()
     options = data.get('options', [])
     custom = data.get('custom', False)
@@ -884,8 +1571,6 @@ def create_vote():
                  json.dumps(cfg, ensure_ascii=False))
     return jsonify({'ok': True, 'id': poll_id})
 
-
-# ── 管理 API：获取投票数据 ──
 @app.route('/api/admin/votes/<poll_id>/data', methods=['GET'])
 @require_csrf
 @require_private_key
@@ -898,7 +1583,10 @@ def get_poll_data(poll_id):
         return "投票不存在", 404
 
     cfg_path = os.path.join(poll_dir, 'config.json')
-    cfg = json.load(open(cfg_path, 'r', encoding='utf-8')) if os.path.exists(cfg_path) else {}
+    cfg = {}
+    if os.path.exists(cfg_path):
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
 
     votes = []
     for f in sorted(glob.glob(os.path.join(poll_dir, '投票_*.txt')),
@@ -908,19 +1596,30 @@ def get_poll_data(poll_id):
             continue
         try:
             with open(f, encoding='utf-8') as fh:
-                lines = fh.readlines()
+                lines = [l.strip() for l in fh.readlines() if l.strip()]
                 if len(lines) < 3:
                     continue
-                rsa_iv = lines[0].strip()
-                parts = rsa_iv.split('|')
-                votes.append({
-                    'seq': m.group(1),
-                    'rsa_key': parts[0] if len(parts) >= 1 else '',
-                    'iv': parts[1] if len(parts) >= 2 else '',
-                    'meta_enc': lines[1].strip(),
-                    'content_enc': lines[2].strip(),
-                    'edit_token': lines[3].strip() if len(lines) >= 4 else ''
-                })
+                is_v2 = lines[0].startswith('v2|')
+                if is_v2:
+                    parts = lines[0].split('|')
+                    votes.append({
+                        'seq': m.group(1),
+                        'rsa_key': parts[1] if len(parts) >= 2 else '',
+                        'iv': parts[2] if len(parts) >= 3 else '',
+                        'aes_msg': lines[1],
+                        'server_enc': lines[2] if len(lines) > 2 else '',
+                        'edit_token': lines[3].strip() if len(lines) >= 4 else ''
+                    })
+                else:
+                    parts = lines[0].split('|')
+                    votes.append({
+                        'seq': m.group(1),
+                        'rsa_key': parts[0] if len(parts) >= 1 else '',
+                        'iv': parts[1] if len(parts) >= 2 else '',
+                        'meta_enc': lines[1].strip(),
+                        'content_enc': lines[2].strip(),
+                        'edit_token': lines[3].strip() if len(lines) >= 4 else ''
+                    })
         except Exception:
             continue
 
@@ -929,26 +1628,477 @@ def get_poll_data(poll_id):
         'votes': votes
     })
 
+@app.route('/api/admin/votes/<poll_id>', methods=['DELETE'])
+@require_csrf
+@require_private_key
+def delete_poll(poll_id):
+    if not is_admin():
+        return "未授权", 403
+    poll_dir = safe_vote_dir(poll_id)
+    if not poll_dir or not os.path.isdir(poll_dir):
+        return "投票不存在", 404
+    shutil.rmtree(poll_dir)
+    return "ok"
 
-# ── 管理 API：删除单条投票 ──
 @app.route('/api/admin/votes/<poll_id>/<int:seq>', methods=['DELETE'])
 @require_csrf
 @require_private_key
 def delete_vote(poll_id, seq):
     if not is_admin():
         return "未授权", 403
-
     poll_dir = safe_vote_dir(poll_id)
     if not poll_dir or not os.path.isdir(poll_dir):
         return "投票不存在", 404
-
     filepath = safe_resolve(poll_dir, f"投票_{seq}.txt")
     if not filepath or not os.path.isfile(filepath):
         return "无效文件", 400
-
     os.remove(filepath)
     return "ok"
 
+# ═══════════════════════════════════════════════════════════
+# 14. 后台自动正则匹配（每2秒检查，匹配即禁用）
+# ═══════════════════════════════════════════════════════════
+# === 14. 后台自动正则匹配（增量扫描：仅检查上次之后新增的消息）===
+_last_regex_scan_index = 0
+_regex_scan_lock = threading.Lock()
+
+def auto_regex_check_loop():
+    global _last_regex_scan_index
+    while True:
+        time.sleep(2)
+        rule = load_rule()
+
+        with _regex_scan_lock:
+            chat = load_chat()
+            total = len(chat)
+
+            # 规则为空时：直接跳到最新，避免规则下次上线后回溯扫描全量旧消息
+            if not rule:
+                _last_regex_scan_index = total
+                continue
+
+            try:
+                re.compile(rule)
+            except re.error:
+                _last_regex_scan_index = total   # 规则非法也跳过，避免反复报错
+                continue
+
+            start = _last_regex_scan_index
+            if start >= total:
+                continue
+
+            changed = False
+            for i in range(start, total):
+                m = chat[i]
+                normalize_msg(m)
+                if m.get('state') == 'enabled':
+                    try:
+                        if safe_regex_search(rule, m.get('content', '')):
+                            m['state'] = 'disabled'
+                            changed = True
+                    except Exception:
+                        pass
+
+            if changed:
+                save_chat(chat)
+
+            _last_regex_scan_index = total
+
+auto_regex_thread = threading.Thread(target=auto_regex_check_loop, daemon=True)
+auto_regex_thread.start()
+
+# ═══════════════════════════════════════════════════════════
+# 16. 路由：公告板（群聊减配版 — 仅管理员可发/删，链接写在内容里）
+# ═══════════════════════════════════════════════════════════
+@app.route('/notice')
+def notice_page():
+    return render_template('notice.html')
+
+@app.route('/admin/notice')
+def admin_notice_page():
+    return render_template('admin_notice.html')
+
+@app.route('/api/notice', methods=['GET'])
+def get_notices():
+    """公开接口：获取所有公告（置顶优先，再按时间倒序）"""
+    # ★ 公开接口也要限流
+    rl = check_rate_limit('read')
+    if rl:
+        return rl
+
+    notices = load_notices()
+    pinned = [n for n in notices if n.get('pinned')]
+    unpinned = [n for n in notices if not n.get('pinned')]
+    pinned.sort(key=lambda x: x.get('time', ''), reverse=True)
+    unpinned.sort(key=lambda x: x.get('time', ''), reverse=True)
+    return jsonify(pinned + unpinned)
+
+@app.route('/api/admin/notice', methods=['POST'])
+@require_csrf
+@require_private_key
+def create_notice():
+    """管理员发公告"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    # ★ 写操作限流
+    rl = check_rate_limit('write')
+    if rl:
+        return rl
+
+    ip = get_client_ip()
+    # ★ 防连点重复提交
+    if not acquire_processing_lock(ip):
+        return rate_limit_json({"error": "请求处理中，请勿重复提交"}, 429, False, 0)
+
+    try:
+        data = request.get_json(silent=True) or {}
+        content = (data.get('content') or '').strip()
+        if not content:
+            return jsonify({'error': '内容不能为空'}), 400
+        if len(content) > 4096:
+            return jsonify({'error': '内容过长（最多4096字符）'}), 400
+
+        notice = {
+            'content': content,
+            'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
+            'pinned': False
+        }
+
+        notices = load_notices()
+        # ★ 公告数量上限（防止泛滥）
+        if len(notices) >= 200:
+            return jsonify({'error': '公告数量已达上限（200条），请先清理旧公告'}), 400
+
+        notices.append(notice)
+        save_notices(notices)
+
+        return jsonify({'ok': True, 'index': len(notices) - 1})
+    finally:
+        release_processing_lock(ip)
+
+@app.route('/api/admin/notice/delete/<int:index>', methods=['POST'])
+@require_csrf
+@require_private_key
+def delete_notice(index):
+    """管理员删除公告"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    # ★ 写操作限流
+    rl = check_rate_limit('write')
+    if rl:
+        return rl
+
+    ip = get_client_ip()
+    if not acquire_processing_lock(ip):
+        return rate_limit_json({"error": "请求处理中，请勿重复提交"}, 429, False, 0)
+
+    try:
+        notices = load_notices()
+        if not (0 <= index < len(notices)):
+            return jsonify({'error': '公告不存在'}), 404
+
+        notices.pop(index)
+        save_notices(notices)
+        return jsonify({'ok': True})
+    finally:
+        release_processing_lock(ip)
+
+@app.route('/api/admin/notice/pin/<int:index>', methods=['POST'])
+@require_csrf
+@require_private_key
+def toggle_notice_pin(index):
+    """管理员置顶/取消置顶"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    # ★ 写操作限流
+    rl = check_rate_limit('write')
+    if rl:
+        return rl
+
+    ip = get_client_ip()
+    if not acquire_processing_lock(ip):
+        return rate_limit_json({"error": "请求处理中，请勿重复提交"}, 429, False, 0)
+
+    try:
+        notices = load_notices()
+        if not (0 <= index < len(notices)):
+            return jsonify({'error': '公告不存在'}), 404
+
+        notices[index]['pinned'] = not notices[index].get('pinned', False)
+        save_notices(notices)
+        return jsonify({'ok': True, 'pinned': notices[index]['pinned']})
+    finally:
+        release_processing_lock(ip)
+# ═══════════════════════════════════════════════════════════
+# 17. 路由：端到端加密聊天
+# ═══════════════════════════════════════════════════════════
+def safe_chat_hash(h):
+    """校验公钥哈希格式：16位小写hex"""
+    if isinstance(h, str) and re.match(r'^[a-f0-9]{16}$', h):
+        return h
+    return None
+
+def get_chat_seq_unlocked(receiver_hash):
+    pattern = os.path.join(CHAT_DIR, f'{receiver_hash}_*.txt')
+    files = glob.glob(pattern)
+    seqs = []
+    for f in files:
+        m = re.search(r'_(\d+)\.txt$', os.path.basename(f))
+        if m:
+            seqs.append(int(m.group(1)))
+    return max(seqs) + 1 if seqs else 1
+
+def get_chat_seq(receiver_hash):
+    with _file_lock:
+        return get_chat_seq_unlocked(receiver_hash)
+
+@app.route('/chat')
+def chat_page():
+    return render_template('chat.html')
+
+@app.route('/admin/chat')
+def admin_chat_page():
+    return render_template('admin_chat.html')
+
+@app.route('/api/chat/send', methods=['POST'])
+def chat_send():
+    ip = get_client_ip()
+    if not acquire_processing_lock(ip):
+        return rate_limit_json({"error": "请求处理中，请勿重复提交"}, 429, False, 0)
+    try:
+        allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
+        if not allowed:
+            return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
+
+        data = request.get_json(silent=True) or {}
+        if not all(data.get(k) for k in ('sender_pub', 'receiver_hash', 'iv', 'wrapped_key', 'aes_content')):
+            return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
+
+        sender_pub = data['sender_pub'].replace('\n', '').replace('\r', '').strip()
+        receiver_hash = data['receiver_hash'].strip().lower()
+        iv = data['iv'].replace('\n', '').replace('\r', '').strip()
+        wrapped_key = data['wrapped_key'].replace('\n', '').replace('\r', '').strip()
+        aes_content = data['aes_content'].replace('\n', '').replace('\r', '').strip()
+
+        # 校验哈希格式
+        if not safe_chat_hash(receiver_hash):
+            return rate_limit_json({"error": "接收方哈希格式无效"}, 400, in_wl, block_until)
+
+        # 校验 sender_pub 基本格式（PEM RSA公钥）
+        if not (sender_pub.startswith('-----BEGIN') and 'PUBLIC KEY' in sender_pub):
+            return rate_limit_json({"error": "发送方公钥格式无效"}, 400, in_wl, block_until)
+
+        # 限制长度
+        if len(sender_pub) > 2048:
+            return rate_limit_json({"error": "公钥过长"}, 400, in_wl, block_until)
+        if len(wrapped_key) > 2048:
+            return rate_limit_json({"error": "包裹密钥过长"}, 400, in_wl, block_until)
+        if len(aes_content) > 32768:
+            return rate_limit_json({"error": "密文过长"}, 400, in_wl, block_until)
+
+        # 服务器添加 IP 和时间
+        server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
+        admin_ip_enc = rsa_encrypt_report(ip)
+
+        content = (
+            f"v2|{sender_pub}|{iv}\n"
+            f"{wrapped_key}\n"
+            f"{aes_content}\n"
+            f"{admin_ip_enc} | {server_time}"
+        )
+
+        with _file_lock:
+            seq = get_chat_seq_unlocked(receiver_hash)
+            filename = f"{receiver_hash}_{seq:04d}.txt"
+            atomic_write_unlocked(os.path.join(CHAT_DIR, filename), content)
+
+        block_until = set_rate_limit_after(ip)
+        return rate_limit_json({"status": "ok", "seq": seq, "filename": filename}, 200, in_wl, block_until)
+    finally:
+        release_processing_lock(ip)
+
+
+@app.route('/api/chat/poll', methods=['POST'])
+def chat_poll():
+    """轮询新消息：前端上传公钥哈希列表 + since时间戳"""
+    rl = check_rate_limit('read')
+    if rl:
+        return rl
+
+    data = request.get_json(silent=True) or {}
+    hashes = data.get('hashes', [])
+    since = data.get('since', '').strip()
+
+    # 校验每个哈希
+    valid_hashes = []
+    for h in hashes:
+        h = str(h).strip().lower()
+        if safe_chat_hash(h):
+            valid_hashes.append(h)
+        if len(valid_hashes) >= 4:
+            break
+
+    if not valid_hashes:
+        return jsonify({"messages": [], "server_time": datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')})
+
+    messages = []
+    try:
+        for fname in sorted(os.listdir(CHAT_DIR)):
+            if not fname.endswith('.txt'):
+                continue
+            m = re.match(r'^([a-f0-9]{16})_(\d+)\.txt$', fname)
+            if not m:
+                continue
+            fhash = m.group(1)
+            if fhash not in valid_hashes:
+                continue
+
+            filepath = os.path.join(CHAT_DIR, fname)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    lines = [l.strip() for l in f.readlines() if l.strip()]
+                if len(lines) < 4:
+                    continue
+                if not lines[0].startswith('v2|'):
+                    continue
+
+                parts = lines[0].split('|')
+                if len(parts) < 3:
+                    continue
+
+                # 解析服务器时间（第4行）
+                admin_parts = lines[3].split('|', 1)
+                server_time = admin_parts[1].strip() if len(admin_parts) >= 2 else ''
+
+                # 按 since 过滤
+                if since and server_time <= since:
+                    continue
+
+                messages.append({
+                    'filename': fname,
+                    'receiver_hash': fhash,
+                    'sender_pub': parts[1],
+                    'iv': parts[2] if len(parts) >= 3 else '',
+                    'wrapped_key': lines[1],
+                    'aes_content': lines[2],
+                    'admin_ip': admin_parts[0].strip(),
+                    'server_time': server_time,
+                    'time': server_time
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 限制返回数量（最新50条）
+    messages.sort(key=lambda x: x.get('time', ''))
+    if len(messages) > 50:
+        messages = messages[-50:]
+
+    return jsonify({
+        "messages": messages,
+        "server_time": datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
+    })
+
+
+@app.route('/api/admin/chat/messages', methods=['GET'])
+@require_csrf
+@require_private_key
+def admin_chat_messages():
+    """管理员查看聊天消息元数据（不含可解密内容）"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    filter_hash = request.args.get('hash', '').strip().lower()
+    filter_filename = request.args.get('filename', '').strip()
+
+    if filter_filename:
+        # 查看单个文件详情
+        path = safe_resolve(CHAT_DIR, filter_filename)
+        if not path or not os.path.isfile(path):
+            return jsonify({'messages': []})
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = [l.strip() for l in f.readlines() if l.strip()]
+            if len(lines) < 4 or not lines[0].startswith('v2|'):
+                return jsonify({'messages': []})
+            parts = lines[0].split('|')
+            admin_parts = lines[3].split('|', 1)
+            m = re.match(r'^([a-f0-9]{16})_(\d+)\.txt$', filter_filename)
+            return jsonify({'messages': [{
+                'filename': filter_filename,
+                'receiver_hash': m.group(1) if m else '',
+                'sender_pub': parts[1] if len(parts) >= 2 else '',
+                'iv': parts[2] if len(parts) >= 3 else '',
+                'wrapped_key': lines[1],
+                'aes_content': lines[2],
+                'admin_ip': admin_parts[0].strip() if len(admin_parts) >= 1 else '',
+                'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else ''
+            }]})
+        except Exception:
+            return jsonify({'messages': []})
+
+    messages = []
+    try:
+        for fname in sorted(os.listdir(CHAT_DIR), reverse=True):
+            if not fname.endswith('.txt'):
+                continue
+            m = re.match(r'^([a-f0-9]{16})_(\d+)\.txt$', fname)
+            if not m:
+                continue
+            fhash = m.group(1)
+            if filter_hash and fhash != filter_hash:
+                continue
+
+            filepath = os.path.join(CHAT_DIR, fname)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    first_line = f.readline().strip()
+                    # 只读第一行和最后一行，提高性能
+                    f.seek(0)
+                    lines = f.readlines()
+                    if len(lines) < 4:
+                        continue
+                    last_line = lines[3].strip() if len(lines) > 3 else ''
+            except Exception:
+                continue
+
+            if not first_line.startswith('v2|'):
+                continue
+            parts = first_line.split('|')
+            admin_parts = last_line.split('|', 1)
+
+            messages.append({
+                'filename': fname,
+                'receiver_hash': fhash,
+                'sender_pub': parts[1] if len(parts) >= 2 else '',
+                'admin_ip': admin_parts[0].strip() if len(admin_parts) >= 1 else '',
+                'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else ''
+            })
+
+            if len(messages) >= 200:
+                break
+    except Exception:
+        pass
+
+    return jsonify({'messages': messages})
+
+
+@app.route('/api/admin/chat/delete/<filename>', methods=['POST'])
+@require_csrf
+@require_private_key
+def admin_chat_delete(filename):
+    """管理员删除聊天文件"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+    path = safe_resolve(CHAT_DIR, filename)
+    if not path or not os.path.isfile(path):
+        return jsonify({'error': '文件不存在'}), 404
+    os.remove(path)
+    return jsonify({'ok': True})
 
 if __name__ == '__main__':
     print(f"[CONFIG] SESSION_COOKIE_SECURE = {app.config['SESSION_COOKIE_SECURE']}")
