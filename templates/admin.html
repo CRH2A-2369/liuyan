@@ -41,7 +41,6 @@
   </style>
 </head>
 <body>
-  <!-- ✅ 安全数据块：独立于所有JS，防止XSS -->
   <script id="raw-data" type="application/json">{{ messages | tojson }}</script>
 
   <div id="login-panel" class="login">
@@ -58,6 +57,9 @@
   <a href="javascript:logout()" style="font-size:14px">[退出登录]</a>
   <a href="/admin/qun" style="font-size:14px;margin-left:10px;color:#4CAF50;text-decoration:none;border:1px solid #4CAF50;padding:3px 10px;border-radius:4px">💬 群聊管理</a>
   <a href="/admin/vote" style="font-size:14px;margin-left:10px;color:#673AB7;text-decoration:none;border:1px solid #673AB7;padding:3px 10px;border-radius:4px">🗳️ 投票管理</a>
+  <a href="/admin/ip" style="font-size:14px;margin-left:10px;color:#009688;text-decoration:none;border:1px solid #009688;padding:3px 10px;border-radius:4px">🌐 IP记录</a>
+  <a href="/admin/notice" style="font-size:14px;margin-left:10px;color:#FF57FB;text-decoration:none;border:1px solid #FF57FB;padding:3px 10px;border-radius:4px">📢 公告管理</a>
+  <a href="/admin/chat" style="font-size:14px;margin-left:10px;color:#FF57FB;text-decoration:none;border:1px solid #FFBC00;padding:3px 10px;border-radius:4px"> 私聊管理</a>
 </h2>
     <div id="list"></div>
     <div id="reply-panel">
@@ -74,7 +76,6 @@
   </div>
   <footer id="footer"></footer>
 
-  <!-- ✅ JS脚本块：与数据块完全分离 -->
   <script>
     const rawData = JSON.parse(document.getElementById('raw-data').textContent);
     function loadWL(){
@@ -162,9 +163,8 @@ function removeWL(ip){
         fetch('/api/replies', {credentials:'same-origin'}).then(function(r){return r.json();}).then(function(rps){allReplies=rps;render();});
         fetch('/api/footer', {credentials:'same-origin'}).then(function(r){return r.text();}).then(function(t){document.getElementById('footInput').value=t;});
         loadBL();
-        loadWL(); // 🔑 新增
+        loadWL();
     }
-
 
     function render(){
         const list = document.getElementById('list');
@@ -172,28 +172,59 @@ function removeWL(ip){
         if(!rawData.length){ list.innerHTML='<p style="color:#888;text-align:center">暂无留言</p>'; return; }
 
         rawData.forEach(m => {
-            const parts = m.rsa_iv.split('|');
-            const rk = parts[0].replace(/\s+/g, '');
-            const ivStr = (parts[1]||'').replace(/\s+/g, '');
-            const metaEnc = m.meta_enc.replace(/\s+/g, '');
-            const contentEnc = m.content_enc.replace(/\s+/g, '');
+            const isV2 = m.is_v2;
+            let rk, ivStr, aesEnc, serverEnc, metaEnc, contentEnc;
 
-            let meta = '解密失败', txt = '解密失败', rawAES = '';
+            if (isV2) {
+                const parts = m.rsa_iv.split('|');
+                rk = (parts[1] || '').replace(/\s+/g, '');
+                ivStr = (parts[2] || '').replace(/\s+/g, '');
+                aesEnc = (m.aes_msg || '').replace(/\s+/g, '');
+                serverEnc = (m.server_enc || '').replace(/\s+/g, '');
+            } else {
+                const parts = m.rsa_iv.split('|');
+                rk = parts[0].replace(/\s+/g, '');
+                ivStr = (parts[1] || '').replace(/\s+/g, '');
+                metaEnc = (m.meta_enc || '').replace(/\s+/g, '');
+                contentEnc = (m.content_enc || '').replace(/\s+/g, '');
+            }
+
+            let meta = '解密失败', txt = '解密失败', rawAES = '', serverMeta = '', nick = '匿名';
             try {
                 rawAES = jse.decrypt(rk);
                 if (!rawAES) throw new Error('RSA解密失败，请检查私钥');
                 const key32 = deriveKey(rawAES);
                 const ivW = CryptoJS.enc.Base64.parse(ivStr);
                 const opts = { iv: ivW, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 };
-                meta = CryptoJS.AES.decrypt(metaEnc, key32, opts).toString(CryptoJS.enc.Utf8);
-                txt  = CryptoJS.AES.decrypt(contentEnc, key32, opts).toString(CryptoJS.enc.Utf8);
-                if (!meta || !txt) throw new Error('AES解密结果为空');
+
+                if (isV2) {
+                    const plain = CryptoJS.AES.decrypt(aesEnc, key32, opts).toString(CryptoJS.enc.Utf8);
+                    if (!plain) throw new Error('AES解密结果为空');
+                    const p = plain.indexOf(' | ');
+                    if (p !== -1) {
+                        nick = plain.substring(0, p);
+                        txt = plain.substring(p + 3);
+                        meta = '👤 ' + nick;
+                    } else {
+                        txt = plain;
+                        meta = '（格式异常）';
+                    }
+                    if (serverEnc) {
+                        const sm = jse.decrypt(serverEnc);
+                        if (sm) serverMeta = ' | 🌐🕒 ' + sm;
+                    }
+                } else {
+                    meta = CryptoJS.AES.decrypt(metaEnc, key32, opts).toString(CryptoJS.enc.Utf8);
+                    txt  = CryptoJS.AES.decrypt(contentEnc, key32, opts).toString(CryptoJS.enc.Utf8);
+                    if (!meta || !txt) throw new Error('AES解密结果为空');
+                    const mp = meta.split(' | ');
+                    nick = mp[2] || '匿名';
+                }
             } catch(e) {
                 console.warn(`[留言${m.seq}]`, e.message);
                 meta = txt = `❌ ${e.message}`;
             }
 
-            const nick = meta.split(' | ')[2] || '匿名';
             const card = document.createElement('div');
             card.className = 'card';
 
@@ -205,7 +236,7 @@ function removeWL(ip){
 
             const metaDiv = document.createElement('div');
             metaDiv.className = 'meta';
-            metaDiv.textContent = '📦 ' + meta;
+            metaDiv.textContent = isV2 ? (meta + serverMeta) : ('📦 ' + meta);
             card.appendChild(metaDiv);
 
             const keySpan = document.createElement('span');
@@ -225,11 +256,18 @@ function removeWL(ip){
             copyBtn.dataset.copy = txt;
             card.appendChild(copyBtn);
 
-            const rep = allReplies.find(r => r.seq == m.seq);
-            if (rep) {
+            // ★ 渲染该留言的所有回复（允许多条）
+            const reps = allReplies.filter(r => r.seq == m.seq);
+            reps.sort((a, b) => (a.num || 1) - (b.num || 1));
+            reps.forEach(rep => {
                 try {
                     const rKey = deriveKey(rawAES);
-                    const rTxt = CryptoJS.AES.decrypt(rep.aes_msg.replace(/\s+/g,''), rKey, {iv:CryptoJS.enc.Base64.parse(rep.iv.replace(/\s+/g,'')), mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString(CryptoJS.enc.Utf8);
+                    const rTxt = CryptoJS.AES.decrypt(
+                        rep.aes_msg.replace(/\s+/g, ''),
+                        rKey,
+                        { iv: CryptoJS.enc.Base64.parse(rep.iv.replace(/\s+/g, '')),
+                          mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+                    ).toString(CryptoJS.enc.Utf8);
                     if (rTxt) {
                         const p = rTxt.split(' | ');
                         const replyBox = document.createElement('div');
@@ -238,12 +276,12 @@ function removeWL(ip){
                         const rDelBtn = document.createElement('button');
                         rDelBtn.className = 'reply-del';
                         rDelBtn.textContent = '删除回复';
-                        rDelBtn.dataset.seq = m.seq;
+                        rDelBtn.dataset.file = `回复_${m.seq}_${rep.num || 1}.txt`;
                         replyBox.appendChild(rDelBtn);
 
                         const rMeta = document.createElement('div');
                         rMeta.className = 'reply-meta';
-                        rMeta.textContent = `📝 回复 ${p[0]} | 🕒 ${p[1]||''}`;
+                        rMeta.textContent = `📝 回复 #${rep.num || 1} ${p[0]} | 🕒 ${p[1] || ''}`;
                         replyBox.appendChild(rMeta);
 
                         const rContent = document.createElement('div');
@@ -260,27 +298,34 @@ function removeWL(ip){
 
                         card.appendChild(replyBox);
                     }
-                } catch(e) { console.warn(`[回复${m.seq}]`, e.message); }
-            } else {
-                const replyBtn = document.createElement('button');
-                replyBtn.className = 'reply-btn';
-                replyBtn.textContent = '回复';
-                replyBtn.dataset.seq = m.seq;
-                replyBtn.dataset.nick = nick;
-                replyBtn.dataset.key = rawAES;
-                card.appendChild(replyBtn);
-            }
+                } catch(e) { console.warn(`[回复${m.seq}#${rep.num}]`, e.message); }
+            });
+
+            // ★ 回复按钮始终可见（允许多次回复）
+            const replyBtn = document.createElement('button');
+            replyBtn.className = 'reply-btn';
+            replyBtn.textContent = '回复';
+            replyBtn.dataset.seq = m.seq;
+            replyBtn.dataset.nick = nick;
+            replyBtn.dataset.key = rawAES;
+            card.appendChild(replyBtn);
 
             list.appendChild(card);
-        });
+        }); // ← 关闭 rawData.forEach
 
+        // ★ 事件委托
         list.onclick = e => {
             const t = e.target;
             if (t.matches('.del')) { if(confirm('确定？')) authFetch(`/admin/delete/${t.dataset.file}`, {method:'POST'}).then(()=>location.reload()); }
             if (t.matches('.reply-btn')) { openReply(t.dataset.seq, t.dataset.nick, t.dataset.key); }
-            if (t.matches('.reply-del')) { if(confirm('确定？')) authFetch(`/admin/delete_reply/${t.dataset.seq}`, {method:'POST'}).then(()=>location.reload()); }
+            if (t.matches('.reply-del')) {
+                if (confirm('确定删除这条回复？')) {
+                    authFetch(`/admin/delete_reply_file/${t.dataset.file}`, { method: 'POST' })
+                        .then(() => location.reload());
+                }
+            }
         };
-    }
+    } // ← 关闭 render
 
     function openReply(s,n,k){
         document.getElementById('reply-panel').style.display='block';
@@ -301,24 +346,24 @@ function removeWL(ip){
     function logout(){ sessionStorage.removeItem('admin_has_key'); sessionStorage.removeItem('admin_priv_key'); authFetch('/api/admin/logout').then(()=>location.reload()); }
     function loadBL(){ authFetch('/api/blacklist').then(r=>r.json()).then(list=>{ document.getElementById('bl-list').innerHTML=list.length?list.map(ip=>`<div class="bl-item"><span>${esc(ip)}</span><button class="bl-del" onclick="removeBL('${esc(ip)}')">移除</button></div>`).join(''):'<div style="color:#888;padding:4px">暂无</div>'; }); }
     function addBL(){
-  const ip=document.getElementById('bl-ip').value.trim();
-  if(!ip)return;
-  authFetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',ip})}).then(async r=>{
-    if(r.ok){document.getElementById('bl-ip').value='';loadBL();}else{
-      try { const d=await r.json(); alert(d.error||'失败'); }catch(e){ alert('失败'); }
+        const ip=document.getElementById('bl-ip').value.trim();
+        if(!ip)return;
+        authFetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',ip})}).then(async r=>{
+            if(r.ok){document.getElementById('bl-ip').value='';loadBL();}else{
+                try { const d=await r.json(); alert(d.error||'失败'); }catch(e){ alert('失败'); }
+            }
+        });
     }
-  });
-}
     function removeBL(ip){ authFetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',ip})}).then(r=>r.ok?loadBL():alert('失败')); }
 
     document.addEventListener('click', e => {
-      if (!e.target.matches('.copy-btn')) return;
-      const text = e.target.dataset.copy;
-      navigator.clipboard.writeText(text).then(() => {
-        e.target.textContent = '已复制';
-        e.target.classList.add('copied');
-        setTimeout(() => { e.target.textContent = '复制'; e.target.classList.remove('copied'); }, 1500);
-      }).catch(() => alert('复制失败，请手动选择'));
+        if (!e.target.matches('.copy-btn')) return;
+        const text = e.target.dataset.copy;
+        navigator.clipboard.writeText(text).then(() => {
+            e.target.textContent = '已复制';
+            e.target.classList.add('copied');
+            setTimeout(() => { e.target.textContent = '复制'; e.target.classList.remove('copied'); }, 1500);
+        }).catch(() => alert('复制失败，请手动选择'));
     });
   </script>
 </body>

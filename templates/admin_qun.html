@@ -5,24 +5,35 @@
   <title>群管理</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
   <style>
-    body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px}
-    #controls{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+    body{font-family:sans-serif;max-width:960px;margin:40px auto;padding:20px}
+    #controls{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
     #announce-panel{background:#fff3cd;padding:10px;border-radius:6px;margin-bottom:15px;border-left:4px solid #ffc107}
-    #chat{max-height:600px;overflow-y:auto;border:1px solid #ddd;padding:12px;background:#f9f9f9;border-radius:6px}
+    #rule-panel{background:#e8eaf6;padding:10px;border-radius:6px;margin-bottom:15px;border-left:4px solid #3F51B5}
+    #chat{max-height:550px;overflow-y:auto;border:1px solid #ddd;padding:12px;background:#f9f9f9;border-radius:6px}
     .msg{margin:6px 0;padding:10px;background:#fff;border-radius:6px;position:relative;border-left:3px solid #4CAF50}
     .msg.pinned{background:#fff8e1;border-left-color:#FF9800;border:1px solid #FFE0B2;border-left:3px solid #FF9800}
-    .msg.pinned .pin-label{display:inline-block}
+    .msg.disabled{background:#f5f5f5;border-left-color:#9E9E9E;opacity:0.65}
+    .msg.forced{background:#e8f5e9;border-left-color:#4CAF50;border:1px solid #c8e6c9;border-left:3px solid #4CAF50}
+    .state-badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;margin-right:6px;font-weight:bold}
+    .state-enabled{background:#e8f5e9;color:#2e7d32}
+    .state-disabled{background:#fce4ec;color:#c62828}
+    .state-forced{background:#e3f2fd;color:#1565c0}
     .pin-label{display:none;font-size:11px;color:#E65100;font-weight:bold;margin-right:8px}
+    .msg.pinned .pin-label{display:inline-block}
     .meta{font-size:12px;color:#666;margin-bottom:4px}
     .md-content{line-height:1.6;font-size:14px;word-break:break-all}
     .md-content img{max-width:100%;border-radius:4px;margin:4px 0;cursor:pointer}
     .md-content a{color:#2196F3;text-decoration:none;word-break:break-all}
     .md-content pre{background:#f5f5f5;padding:8px;border-radius:4px;overflow-x:auto;font-size:12px;margin:4px 0}
     .md-content code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:13px}
-    .del{position:absolute;top:8px;right:8px;background:#f44336;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px}
-    .pin-btn{position:absolute;top:8px;right:70px;background:#FF9800;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px}
+    .btn-row{position:absolute;top:8px;right:8px;display:flex;gap:4px;flex-wrap:wrap}
+    .btn-row button{padding:4px 8px;font-size:11px;border:none;border-radius:3px;cursor:pointer;color:#fff}
+    .del-btn{background:#f44336}
+    .pin-btn{background:#FF9800}
     .pin-btn.is-pinned{background:#9E9E9E}
+    .state-btn{background:#607D8B}
     button{padding:8px 16px;cursor:pointer;border:none;border-radius:4px}
     .muted{background:#f44336;color:#fff}.unmuted{background:#4CAF50;color:#fff}
     textarea{width:100%;min-height:60px;padding:8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}
@@ -30,47 +41,55 @@
     .copy-btn{background:#eee;border:1px solid #ddd;border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer;color:#555;margin-left:8px;vertical-align:middle}
     .copy-btn:hover{background:#ddd}
     .copy-btn.copied{background:#4CAF50;color:#fff;border-color:#4CAF50}
-
-    /* 🤖 AI 面板 */
-    #ai-toggle-btn{background:none;border:1px solid #ccc;border-radius:50%;width:32px;height:32px;font-size:18px;cursor:pointer;padding:0;color:#666;line-height:1;vertical-align:middle;margin-left:8px}
-    #ai-toggle-btn.active{background:#e3f2fd;border-color:#2196F3;color:#2196F3}
-    #ai-panel{display:none;background:#e3f2fd;padding:12px;border-radius:8px;margin-bottom:12px;border:1px solid #90caf9}
-    #ai-panel h4{margin:0 0 8px;display:flex;justify-content:space-between;align-items:center}
-    #ai-panel label{display:block;margin:6px 0;font-size:13px}
-    #ai-panel input[type="text"],#ai-panel input[type="password"],#ai-panel textarea{width:100%;margin:4px 0;font-size:13px;box-sizing:border-box}
-    #ai-panel textarea{min-height:60px;resize:vertical}
-    #ai-status{font-size:12px;color:#666;margin-top:4px}
-    #cooldown-bar{display:none;height:3px;background:#ff9800;border-radius:2px;margin-top:4px;transition:width 0.1s linear}
-    #ai-close-btn{background:none;border:none;font-size:18px;cursor:pointer;color:#888;padding:0 4px;line-height:1}
-    #ai-close-btn:hover{color:#333}
+    .report-detail{font-size:11px;color:#555;margin:2px 0;padding:4px 6px;background:#fff5f5;border-radius:3px;border-left:2px solid #E91E63}
+    .report-detail code{font-size:10px;word-break:break-all}
+    .decrypted-id{color:#1565c0;font-weight:bold}
   </style>
 </head>
 <body>
-<h2>🛡️ 群聊管理 <a href="/admin" style="font-size:14px;margin-left:10px;color:#666;text-decoration:none;border:1px solid #ccc;padding:3px 10px;border-radius:4px">← 返回管理员主页</a><a href="/admin/vote" style="font-size:14px;margin-left:8px;color:#673AB7;text-decoration:none;border:1px solid #673AB7;padding:3px 10px;border-radius:4px">🗳️ 投票管理</a>
-  <button id="ai-toggle-btn" onclick="toggleAiPanel()" title="AI设置">🤖</button>
+<h2>🛡️ 群聊管理
+  <a href="/admin" style="font-size:14px;margin-left:10px;color:#666;text-decoration:none;border:1px solid #ccc;padding:3px 10px;border-radius:4px">← 返回管理员主页</a>
+  <a href="/admin/vote" style="font-size:14px;margin-left:8px;color:#673AB7;text-decoration:none;border:1px solid #673AB7;padding:3px 10px;border-radius:4px">🗳️ 投票管理</a>
+  <a href="/admin/ip" style="font-size:14px;margin-left:10px;color:#009688;text-decoration:none;border:1px solid #009688;padding:3px 10px;border-radius:4px">🌐 IP记录</a>
+  <a href="/admin/notice" style="font-size:14px;margin-left:10px;color:#FF57FB;text-decoration:none;border:1px solid #FF57FB;padding:3px 10px;border-radius:4px">📢 公告管理</a>
+  <a href="/admin/chat" style="font-size:14px;margin-left:10px;color:#FF57FB;text-decoration:none;border:1px solid #FFBC00;padding:3px 10px;border-radius:4px"> 私聊管理</a>
 </h2>
 
-<!-- 🤖 AI 设置面板 -->
-<div id="ai-panel">
-  <h4>🤖 AI 自动回复 <button id="ai-close-btn" onclick="toggleAiPanel()" title="关闭">✕</button></h4>
-  <span id="ai-status"></span>
-  <label><input type="checkbox" id="ai-enabled" onchange="saveAiConfig()"> 启用AI自动回复</label>
-  <input type="text" id="ai-url" placeholder="API地址 (如 https://api.deepseek.com)" onchange="saveAiConfig()">
-  <input type="password" id="ai-key" placeholder="API Key (仅存本地，不上传)" onchange="saveAiConfig()">
-  <input type="text" id="ai-model" placeholder="模型名 (默认 gpt-3.5-turbo)" onchange="saveAiConfig()">
-  <input type="text" id="ai-nick" placeholder="AI显示昵称 (≤32字)" maxlength="32" onchange="saveAiConfig()">
-  <textarea id="ai-prompt" placeholder="系统提示词，例如：你是一个友善的群聊成员，在有人提问或讨论有趣话题时适当发言…" onchange="saveAiConfig()"></textarea>
-  <div id="cooldown-bar"></div>
+<div id="login-wall" style="text-align:center;margin-top:60px">
+  <h2>🔒 请先通过管理员验证</h2>
+  <p><a href="/admin">→ 前往管理员登录</a></p>
 </div>
 
-<div id="controls"><button id="mute-btn" class="unmuted" onclick="toggleMute()">加载中...</button></div>
+<div id="main-content" style="display:none">
+
+<div id="controls">
+  <button id="mute-btn" class="unmuted" onclick="toggleMute()">加载中...</button>
+</div>
+
 <div id="announce-panel">
-  <strong>📢 发布公告（支持 Markdown）</strong><br>
+  <strong>📢 发布公告（支持 Markdown）— 自动设为强制启用</strong><br>
   <button type="button" onclick="insertAnnounceLink()" style="background:#FF9800;font-size:12px;height:28px;padding:0 10px;margin:6px 0;border:none;border-radius:4px;color:#fff;cursor:pointer">🔗 插入文件外链</button>
   <textarea id="ann-content" placeholder="输入公告内容，支持 Markdown 语法"></textarea>
-  <button onclick="sendAnnounce()" style="background:#ffc107;color:#000;margin-top:8px;width:100%">发送公告</button>
+  <button onclick="sendAnnounce()" style="background:#ffc107;color:#000;margin-top:8px;width:100%">发送公告（强制启用）</button>
 </div>
+
+<div id="rule-panel">
+  <strong>🔍 正则规则管理</strong> <span style="font-size:12px;color:#4CAF50">（后台每2秒自动扫描匹配并禁用）</span>
+  <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+    <input type="text" id="rule-input" placeholder="正则表达式，如：广告|spam|违规" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px">
+    <button onclick="saveRule()" style="background:#3F51B5;color:#fff">💾 保存</button>
+  </div>
+  <div style="margin-top:6px;display:flex;gap:12px;align-items:center">
+    <span style="font-size:13px">📊 举报阈值：</span>
+    <input type="number" id="threshold-input" value="5" min="1" style="width:60px;padding:6px;border:1px solid #ccc;border-radius:4px">
+    <button onclick="saveThreshold()" style="background:#3F51B5;color:#fff;font-size:12px;padding:6px 12px">保存阈值</button>
+    <span style="font-size:11px;color:#888">（举报数达阈值自动禁用）</span>
+  </div>
+</div>
+
 <div id="chat"></div>
+</div>
+
 <footer id="footer"></footer>
 
 <script>
@@ -88,138 +107,52 @@ var authFetch = function(url, opts) {
   return fetch(url, Object.assign({credentials: 'same-origin'}, opts, {headers: headers}));
 };
 
-// ── 🤖 AI ──
-var aiConfig = {};
-var aiCooldown = false;
-var aiCheckTimer = null;
-var lastKnownMsgCount = 0;
+var stateLabels = {enabled:'✅ 启用', disabled:'🚫 禁用', forced:'📢 强制'};
+var stateClasses = {enabled:'state-enabled', disabled:'state-disabled', forced:'state-forced'};
+var stateOptions = {
+  enabled:  ['disabled', 'forced'],
+  disabled: ['enabled',  'forced'],
+  forced:   ['enabled',  'disabled']
+};
 
-function loadAiConfig() {
-  try { aiConfig = JSON.parse(localStorage.getItem('admin_qun_ai_config') || '{}'); } catch(e) { aiConfig = {}; }
-  document.getElementById('ai-enabled').checked = !!aiConfig.enabled;
-  document.getElementById('ai-url').value = aiConfig.apiUrl || '';
-  document.getElementById('ai-key').value = aiConfig.apiKey || '';
-  document.getElementById('ai-model').value = aiConfig.model || '';
-  document.getElementById('ai-nick').value = aiConfig.nickname || '';
-  document.getElementById('ai-prompt').value = aiConfig.systemPrompt || '';
-  updateAiStatus();
-}
+// ── 管理员 RSA 私钥（用于解密举报身份） ──
+var adminJse = null;
+try {
+  var savedPriv = sessionStorage.getItem('admin_priv_key');
+  if (savedPriv) {
+    adminJse = new JSEncrypt();
+    adminJse.setPrivateKey(savedPriv);
+  }
+} catch(e) { console.error('私钥初始化失败', e); }
 
-function saveAiConfig() {
-  aiConfig = {
-    enabled: document.getElementById('ai-enabled').checked,
-    apiUrl: document.getElementById('ai-url').value.trim(),
-    apiKey: document.getElementById('ai-key').value.trim(),
-    model: document.getElementById('ai-model').value.trim() || 'gpt-3.5-turbo',
-    nickname: document.getElementById('ai-nick').value.trim(),
-    systemPrompt: document.getElementById('ai-prompt').value.trim()
-  };
-  localStorage.setItem('admin_qun_ai_config', JSON.stringify(aiConfig));
-  updateAiStatus();
-}
-
-function updateAiStatus() {
-  var s = document.getElementById('ai-status');
-  var btn = document.getElementById('ai-toggle-btn');
-  if (aiConfig.enabled && aiConfig.apiUrl && aiConfig.apiKey && aiConfig.nickname) {
-    s.textContent = aiCooldown ? '⏳ 冷却中…' : '🟢 已就绪';
-    s.style.color = aiCooldown ? '#ff9800' : '#4CAF50';
-    btn.classList.add('active');
-  } else if (aiConfig.enabled) {
-    s.textContent = '⚠️ 配置不完整（需填写API地址、Key、昵称）';
-    s.style.color = '#f44336';
-    btn.classList.add('active');
-  } else {
-    s.textContent = '已关闭';
-    s.style.color = '#888';
-    btn.classList.remove('active');
+function decryptIdentity(cipherText) {
+  if (!cipherText) return '（空）';
+  if (!adminJse) return '（私钥未加载）';
+  try {
+    var plain = adminJse.decrypt(cipherText);
+    return plain || '（解密失败，密文或密钥不匹配）';
+  } catch(e) {
+    return '（解密出错）';
   }
 }
 
-function toggleAiPanel() {
-  var p = document.getElementById('ai-panel');
-  p.style.display = p.style.display === 'none' ? 'block' : 'none';
-}
-
-function buildApiEndpoint(baseUrl) {
-  var u = baseUrl.replace(/\/+$/, '');
-  if (/\/v1$/.test(u)) return u + '/chat/completions';
-  return u + '/v1/chat/completions';
-}
-
-function scheduleAiCheck(data) {
-  if (!aiConfig.enabled || aiCooldown) return;
-  if (!aiConfig.apiUrl || !aiConfig.apiKey || !aiConfig.nickname) return;
-  if (data.length && data[data.length-1].nick === aiConfig.nickname) return;
-  clearTimeout(aiCheckTimer);
-  aiCheckTimer = setTimeout(function(){ doAiCheck(data); }, 3000);
-}
-
-async function doAiCheck(data) {
-  if (aiCooldown || !aiConfig.enabled) return;
-  try {
-    var messages = [{
-      role: 'system',
-      content: (aiConfig.systemPrompt || '你是一个群聊成员。请判断是否该发言。如果应该，直接回复内容；如果不该，只回复 NO_RESPONSE。')
-        + '\n\n重要规则：如果决定不发言，必须只回复 NO_RESPONSE，不要有任何其他文字。'
-    }];
-    var recent = data.slice(-30);
-    for (var i = 0; i < recent.length; i++) {
-      var m = recent[i];
-      messages.push({
-        role: (m.nick === aiConfig.nickname) ? 'assistant' : 'user',
-        content: '[' + m.nick + '] ' + m.time + ': ' + m.content
-      });
+// ── IP 解密（RSA 加密 / PLAIN 降级） ──
+function decryptIp(raw) {
+  if (!raw) return '—';
+  if (raw.startsWith('RSA:')) {
+    if (!adminJse) return '(私钥未加载)';
+    try {
+      var plain = adminJse.decrypt(raw.slice(4));
+      return plain || '(解密失败)';
+    } catch(e) {
+      return '(解密出错)';
     }
-
-    var endpoint = buildApiEndpoint(aiConfig.apiUrl);
-    var resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + aiConfig.apiKey },
-      body: JSON.stringify({ model: aiConfig.model || 'gpt-3.5-turbo', messages: messages, max_tokens: 600, temperature: 0.7 })
-    });
-    if (!resp.ok) { console.error('AI API error:', resp.status, await resp.text()); return; }
-    var j = await resp.json();
-    var reply = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content || '').trim();
-    if (!reply || reply.toUpperCase() === 'NO_RESPONSE') return;
-
-    startCooldown();
-    await fetch('/api/qun', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nick: aiConfig.nickname, content: reply })
-    });
-    loadMsgs();
-  } catch(e) { console.error('AI check error:', e); }
-}
-
-function startCooldown() {
-  aiCooldown = true;
-  updateAiStatus();
-  var bar = document.getElementById('cooldown-bar');
-  bar.style.display = 'block';
-  bar.style.width = '100%';
-  var start = Date.now(), duration = 7000;
-  var tick = setInterval(function() {
-    var pct = Math.max(0, 100 - ((Date.now() - start) / duration * 100));
-    bar.style.width = pct + '%';
-    if (Date.now() - start >= duration) {
-      clearInterval(tick);
-      aiCooldown = false;
-      bar.style.display = 'none';
-      updateAiStatus();
-    }
-  }, 100);
-}
-// ── 🤖 END ──
-
-function insertAnnounceLink() {
-  var url = prompt('请输入文件URL:');
-  if (!url) return;
-  var name = prompt('请输入显示名称:', url.split('/').pop() || '文件') || '文件';
-  var ext = url.split('.').pop().toLowerCase();
-  var md = ['jpg','jpeg','png','gif','webp','svg'].indexOf(ext) !== -1 ? '![' + name + '](' + url + ')' : '[📎 ' + name + '](' + url + ')';
-  var ta = document.getElementById('ann-content'); ta.value += (ta.value ? '\n' : '') + md; ta.focus();
+  }
+  if (raw.startsWith('PLAIN:')) {
+    return raw.slice(6);
+  }
+  // 纯明文兜底（历史数据）
+  return raw;
 }
 
 async function init() {
@@ -229,17 +162,63 @@ async function init() {
     var statusRes = await fetch('/api/admin/status', {credentials:'same-origin'});
     var status = await statusRes.json();
     if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
-      loadPerm(); loadMsgs(); loadAiConfig();
+      document.getElementById('login-wall').style.display = 'none';
+      document.getElementById('main-content').style.display = 'block';
+      loadPerm(); loadMsgs(); loadRule(); loadThreshold();
       fetch('/api/footer').then(function(r){return r.text();}).then(function(t){document.getElementById('footer').textContent=t;});
     } else if (status.logged_in) {
       await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
       sessionStorage.clear(); location.reload();
     } else {
-      document.body.innerHTML = '<h2 style="text-align:center;margin-top:50px">请先<a href="/admin">通过管理员验证</a></h2>';
+      document.getElementById('login-wall').style.display = 'block';
     }
   } catch(e) { console.error('Init:', e); }
 }
 init();
+
+async function saveRule() {
+  var rule = document.getElementById('rule-input').value.trim();
+  try {
+    var resp = await authFetch('/api/admin/qun/rule', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rule:rule, force:false})
+    });
+
+    if (resp.ok) {
+      alert('✅ 规则已保存');
+      return;
+    }
+
+    var data = await resp.json();
+    if (data.dangerous) {
+      var confirmed = confirm(
+        '⚠️ 该正则包含危险模式（如嵌套量词），可能导致服务卡死。\n\n' +
+        '• 强烈建议修改为更安全的正则\n' +
+        '• 超时保护（1秒）仍然生效，但可能影响性能\n\n' +
+        '确认要强制保存吗？'
+      );
+      if (!confirmed) return;
+
+      resp = await authFetch('/api/admin/qun/rule', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({rule:rule, force:true})
+      });
+
+      if (resp.ok) {
+        alert('✅ 规则已保存');
+      } else {
+        var errText = await resp.text();
+        alert('保存失败：' + errText);
+      }
+    } else {
+      alert('保存失败：' + (data.error || '未知错误'));
+    }
+  } catch(e) {
+    alert('保存失败：' + e.message);
+  }
+}
 
 function loadPerm() {
   fetch('/api/admin/qun/permission').then(function(r){return r.text();}).then(function(v){
@@ -256,39 +235,119 @@ function toggleMute() {
     .then(function(r){if(r.ok){loadPerm();}else{alert('失败');}});
 }
 
+function loadRule() {
+  authFetch('/api/admin/qun/rule').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('rule-input').value = d.rule || '';
+  }).catch(function(){});
+}
+
+function applyRule() {
+  if (!confirm('确定对所有已启用的消息应用正则规则吗？匹配的消息将被禁用。')) return;
+  authFetch('/api/admin/qun/rule/apply', {method:'POST'})
+    .then(function(r){return r.json();}).then(function(d){
+      alert('✅ 已禁用 ' + d.disabled_count + ' 条消息');
+      loadMsgs();
+    }).catch(function(e){alert('失败: '+e);});
+}
+
+function loadThreshold() {
+  authFetch('/api/admin/qun/threshold').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('threshold-input').value = d.threshold || 5;
+  }).catch(function(){});
+}
+
+function saveThreshold() {
+  var val = document.getElementById('threshold-input').value;
+  authFetch('/api/admin/qun/threshold', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({threshold:val})})
+    .then(function(r){if(r.ok){alert('✅ 阈值已保存');}else{r.text().then(alert);}});
+}
+
 function loadMsgs() {
-  fetch('/api/admin/qun').then(function(r){return r.json();}).then(function(data){
+  authFetch('/api/admin/qun').then(function(r){return r.json();}).then(function(data){
     var c = document.getElementById('chat');
     c.innerHTML = '';
     if (!data.length) { c.innerHTML = '<p style="color:#888;text-align:center;padding:20px">暂无消息</p>'; return; }
-    data.forEach(function(m, i) {
+    data.forEach(function(m) {
       var safeHtml = DOMPurify.sanitize(marked.parse(m.content));
+      var state = m.state || 'enabled';
       var pinnedClass = m.pinned ? ' pinned' : '';
+      var stateClass = ' ' + state;
       var pinBtnText = m.pinned ? '取消置底' : '📌 置底';
       var pinBtnClass = m.pinned ? 'pin-btn is-pinned' : 'pin-btn';
 
       var div = document.createElement('div');
-      div.className = 'msg' + pinnedClass;
+      div.className = 'msg' + pinnedClass + stateClass;
 
+      // 按钮行
+      var btnRow = document.createElement('div');
+      btnRow.className = 'btn-row';
+
+      // 删除（管理员可删除任何消息，包括 forced）
       var delBtn = document.createElement('button');
-      delBtn.className = 'del'; delBtn.textContent = '删除'; delBtn.dataset.index = i;
-      div.appendChild(delBtn);
+      delBtn.className = 'del-btn'; delBtn.textContent = '删除';
+      delBtn.onclick = (function(idx){return function(){deleteMsg(idx);};})(m.index);
+      btnRow.appendChild(delBtn);
 
+      // 置底
       var pinBtn = document.createElement('button');
-      pinBtn.className = pinBtnClass; pinBtn.textContent = pinBtnText; pinBtn.dataset.index = i;
-      div.appendChild(pinBtn);
+      pinBtn.className = pinBtnClass; pinBtn.textContent = pinBtnText;
+      pinBtn.onclick = (function(idx){return function(){togglePin(idx);};})(m.index);
+      btnRow.appendChild(pinBtn);
 
+      // 状态切换
+      var targets = stateOptions[state] || ['enabled','disabled'];
+      targets.forEach(function(target){
+        var sBtn = document.createElement('button');
+        sBtn.className = 'state-btn';
+        sBtn.textContent = stateLabels[target];
+        sBtn.onclick = (function(idx, t){return function(){setStateDirect(idx, t);};})(m.index, target);
+        btnRow.appendChild(sBtn);
+      });
+
+      div.appendChild(btnRow);
+
+      // 元数据
       var metaDiv = document.createElement('div');
       metaDiv.className = 'meta';
+      var stateBadge = document.createElement('span');
+      stateBadge.className = 'state-badge ' + (stateClasses[state] || '');
+      stateBadge.textContent = stateLabels[state] || state;
+      metaDiv.appendChild(stateBadge);
+
       var pinLabel = document.createElement('span');
       pinLabel.className = 'pin-label'; pinLabel.textContent = '📌 已置底';
       metaDiv.appendChild(pinLabel);
-      metaDiv.appendChild(document.createTextNode('👤 ' + m.nick + ' | 🌐 ' + m.ip + ' | 🕒 ' + m.time));
+
+      metaDiv.appendChild(document.createTextNode('👤 ' + m.nick + ' | 🌐 ' + decryptIp(m.ip) + ' | 🕒 ' + m.time));
+      if (m.key_hash) {
+        metaDiv.appendChild(document.createTextNode(' | 🔑 ' + m.key_hash.substring(0, 12) + '…'));
+      }
+
       var copyBtn = document.createElement('button');
       copyBtn.className = 'copy-btn'; copyBtn.textContent = '复制'; copyBtn.dataset.copy = m.content;
       metaDiv.appendChild(copyBtn);
       div.appendChild(metaDiv);
 
+      // 举报详情（自动解密身份）
+      if (m.reports && m.reports.length > 0) {
+        var reportDiv = document.createElement('div');
+        reportDiv.style.cssText = 'margin:6px 0;padding:8px;background:#fff5f5;border-radius:4px;font-size:11px';
+        reportDiv.innerHTML = '<strong style="color:#E91E63">⚠️ 举报记录（' + m.reports.length + ' 次）：</strong>';
+        m.reports.forEach(function(r, ri){
+          var decryptedId = decryptIdentity(r.encrypted || '');
+          var shortCipher = esc((r.encrypted || '').slice(-12));
+          reportDiv.innerHTML +=
+            '<div class="report-detail">' +
+            '#' + (ri+1) + ' 🕒 ' + esc(r.time) +
+            ' | IP-SHA512: <code>' + esc((r.ip_hash || '').substring(0,16)) + '…</code>' +
+            ' | 👤 身份: <span class="decrypted-id">' + esc(decryptedId) + '</span>' +
+            ' <span style="color:#aaa">(密文尾:' + shortCipher + ')</span>' +
+            '</div>';
+        });
+        div.appendChild(reportDiv);
+      }
+
+      // 内容
       var contentDiv = document.createElement('div');
       contentDiv.className = 'md-content';
       contentDiv.innerHTML = safeHtml;
@@ -296,31 +355,46 @@ function loadMsgs() {
 
       c.appendChild(div);
     });
-
-    if (data.length > lastKnownMsgCount) {
-      var cleanData = data.map(function(m){ return {nick:m.nick, time:m.time, content:m.content}; });
-      scheduleAiCheck(cleanData);
-    }
-    lastKnownMsgCount = data.length;
   }).catch(function(e){console.error('加载群聊失败:', e);});
 }
 
 document.getElementById('chat').onclick = function(e) {
   var t = e.target;
-  if (t.matches('.del')) {
-    if (confirm('确定删除此消息？')) authFetch('/api/admin/qun/delete/' + t.dataset.index, {method:'POST'}).then(function(){loadMsgs();});
-  }
-  if (t.matches('.pin-btn')) {
-    authFetch('/api/admin/qun/pin/' + t.dataset.index, {method:'POST'}).then(function(r){if(r.ok){loadMsgs();}else{alert('操作失败');}});
-  }
   if (t.matches('.copy-btn')) {
     var text = t.dataset.copy;
     navigator.clipboard.writeText(text).then(function() {
       t.textContent = '已复制'; t.classList.add('copied');
       setTimeout(function(){ t.textContent = '复制'; t.classList.remove('copied'); }, 1500);
-    }).catch(function(){ alert('复制失败，请手动选择'); });
+    }).catch(function(){ alert('复制失败'); });
   }
 };
+
+function deleteMsg(index) {
+  if (!confirm('确定删除此消息？')) return;
+  authFetch('/api/admin/qun/delete/' + index, {method:'POST'}).then(function(){loadMsgs();});
+}
+
+function togglePin(index) {
+  authFetch('/api/admin/qun/pin/' + index, {method:'POST'}).then(function(r){if(r.ok){loadMsgs();}else{alert('操作失败');}});
+}
+
+function setStateDirect(index, newState) {
+  authFetch('/api/admin/qun/state/' + index, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({state: newState})
+  }).then(function(r){
+    if(r.ok){loadMsgs();}else{r.text().then(alert);}
+  });
+}
+
+function insertAnnounceLink() {
+  var url = prompt('请输入文件URL:');
+  if (!url) return;
+  var name = prompt('请输入显示名称:', url.split('/').pop() || '文件') || '文件';
+  var ext = url.split('.').pop().toLowerCase();
+  var md = ['jpg','jpeg','png','gif','webp','svg'].indexOf(ext) !== -1 ? '![' + name + '](' + url + ')' : '[📎 ' + name + '](' + url + ')';
+  var ta = document.getElementById('ann-content'); ta.value += (ta.value ? '\n' : '') + md; ta.focus();
+}
 
 function sendAnnounce() {
   var c = document.getElementById('ann-content').value.trim();

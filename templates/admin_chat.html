@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>聊天审计</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js" integrity="sha512-E8QSvWZ0eCLGk4km3hxSsNmGWbLtSCSUcewDQPQWZF6pEU8GlT8a5fF32wOl1i8ftdMhssTrF/OhyGWwonTcXA==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
+  <style>
+    body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px;color:#333}
+    h2{margin:0 0 16px}
+    a.back-link{font-size:14px;color:#666;text-decoration:none;border:1px solid #ccc;padding:3px 10px;border-radius:4px;margin-left:8px}
+    table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+    th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}
+    th{background:#f5f5f5;font-weight:bold}
+    tr:hover{background:#fafafa}
+    .mono{font-family:monospace;font-size:11px;word-break:break-all}
+    button{padding:6px 14px;cursor:pointer;border:none;border-radius:4px;color:#fff;font-size:12px}
+    .btn-red{background:#f44336}
+    .btn-blue{background:#2196F3}
+    .btn-gray{background:#ccc;color:#333}
+    .filter-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+    .filter-row input{padding:6px;border:1px solid #ccc;border-radius:4px;font-size:13px}
+    .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);align-items:center;justify-content:center;z-index:999}
+    .modal-box{background:#fff;padding:24px;border-radius:8px;max-width:600px;width:90%;max-height:80vh;overflow-y:auto}
+    .close-btn{position:absolute;top:8px;right:8px;width:28px;height:28px;background:#f44336;color:#fff;border:none;border-radius:50%;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+    #login-wall{text-align:center;margin-top:60px}
+    .hidden{display:none}
+    footer{margin-top:30px;text-align:center;color:#888;font-size:12px;border-top:1px solid #eee;padding:15px 0}
+  </style>
+</head>
+<body>
+
+<!-- ★ 登录墙：校验不通过时显示 -->
+<div id="login-wall">
+  <h2>🔒 请先通过管理员验证</h2>
+  <p><a href="/admin">→ 前往管理员登录</a></p>
+</div>
+
+<!-- ★ 主内容：校验通过后才显示 -->
+<div id="main-content" class="hidden">
+  <h2>🔍 聊天审计 
+    <a href="/admin" style="font-size:14px;margin-left:10px;color:#666;text-decoration:none;border:1px solid #ccc;padding:3px 10px;border-radius:4px">← 返回管理员主页</a>
+    <a href="/admin/vote" style="font-size:14px;margin-left:8px;color:#673AB7;text-decoration:none;border:1px solid #673AB7;padding:3px 10px;border-radius:4px">🗳️ 投票管理</a>
+    <a href="/admin/ip" style="font-size:14px;margin-left:10px;color:#009688;text-decoration:none;border:1px solid #009688;padding:3px 10px;border-radius:4px">🌐 IP记录</a>
+    <a href="/admin/notice" style="font-size:14px;margin-left:10px;color:#FF57FB;text-decoration:none;border:1px solid #FF57FB;padding:3px 10px;border-radius:4px">📢 公告管理</a>
+    <a href="/admin/qun" style="font-size:14px;margin-left:10px;color:#D500FF;text-decoration:none;border:1px solid #FF57FB;padding:3px 10px;border-radius:4px">💬 群聊管理</a>
+
+  </h2>
+
+  <div class="filter-row">
+    <input type="text" id="filter-hash" placeholder="按公钥哈希筛选（16位hex）" maxlength="16" style="font-family:monospace">
+    <button class="btn-blue" onclick="loadMessages()">🔍 搜索</button>
+    <button class="btn-gray" onclick="document.getElementById('filter-hash').value='';loadMessages()">清除</button>
+  </div>
+
+  <div id="table-container"></div>
+
+  <div class="modal" id="detail-modal">
+    <div class="modal-box" style="position:relative">
+      <button class="close-btn" onclick="document.getElementById('detail-modal').style.display='none'">✕</button>
+      <h3>消息详情</h3>
+      <div id="detail-content"></div>
+    </div>
+  </div>
+
+  <footer id="footer"></footer>
+</div>
+
+<script>
+// ========== 工具函数 ==========
+function esc(s){ return String(s||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+
+// ========== 鉴权初始化（与 admin_vote.html 一致） ==========
+var adminJse = null;
+try {
+  var savedKey = sessionStorage.getItem('admin_priv_key');
+  if (savedKey) {
+    adminJse = new JSEncrypt();
+    adminJse.setPrivateKey(savedKey);
+  }
+} catch(e) {}
+
+var csrfToken = '';
+var authFetch = function(url, opts) {
+  opts = opts || {};
+  var headers = opts.headers || {};
+  if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+  return fetch(url, Object.assign({credentials:'same-origin'}, opts, {headers:headers}));
+};
+
+async function init() {
+  try {
+    var csrfRes = await fetch('/api/csrf', {credentials:'same-origin'});
+    csrfToken = (await csrfRes.json()).token;
+    var statusRes = await fetch('/api/admin/status', {credentials:'same-origin'});
+    var status = await statusRes.json();
+    if (status.logged_in && status.has_key) {
+      document.getElementById('login-wall').style.display = 'none';
+      document.getElementById('main-content').classList.remove('hidden');
+      loadMessages();
+      fetch('/api/footer').then(function(r){return r.text();}).then(function(t){
+        document.getElementById('footer').textContent = t;
+      });
+    } else {
+      document.getElementById('login-wall').style.display = 'block';
+      document.getElementById('main-content').classList.add('hidden');
+      if (status.logged_in && !status.has_key) {
+        fetch('/api/admin/logout', {credentials:'same-origin'}).then(function(){
+          window.location.href = '/admin';
+        });
+      }
+    }
+  } catch(e) {
+    console.error('Init:', e);
+    document.getElementById('login-wall').innerHTML = '<h2>⚠️ 连接失败</h2><p>请刷新页面重试</p>';
+  }
+}
+init();
+
+// ========== 业务逻辑 ==========
+
+function loadMessages(){
+  var hash = document.getElementById('filter-hash').value.trim();
+  var url = '/api/admin/chat/messages';
+  if(hash) url += '?hash=' + encodeURIComponent(hash);
+
+  authFetch(url).then(function(r){ return r.json(); }).then(function(data){
+    var container = document.getElementById('table-container');
+    if(!data.messages || data.messages.length === 0){
+      container.innerHTML = '<p style="color:#888;text-align:center;padding:30px">暂无消息</p>';
+      return;
+    }
+
+    var html = '<table><thead><tr><th>文件名</th><th>接收方哈希</th><th>发送方公钥</th><th>管理员加密IP</th><th>服务器时间</th><th>操作</th></tr></thead><tbody>';
+    data.messages.forEach(function(m){
+      html += '<tr>';
+      html += '<td class="mono">'+esc(m.filename)+'</td>';
+      html += '<td class="mono">'+esc(m.receiver_hash)+'</td>';
+      html += '<td class="mono" style="max-width:150px;overflow:hidden;text-overflow:ellipsis">'+esc((m.sender_pub||'').substring(0,80)+'...')+'</td>';
+      html += '<td class="mono">'+esc(m.admin_ip)+'</td>';
+      html += '<td>'+esc(m.server_time)+'</td>';
+      html += '<td>';
+      html += '<button class="btn-blue" onclick="viewDetail(\''+esc(m.filename)+'\')">详情</button> ';
+      html += '<button class="btn-red" onclick="deleteMsg(\''+esc(m.filename)+'\')">删除</button>';
+      html += '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }).catch(function(e){
+    document.getElementById('table-container').innerHTML = '<p style="color:red">加载失败: '+esc(e.message)+'</p>';
+  });
+}
+
+function viewDetail(filename){
+  authFetch('/api/admin/chat/messages?filename=' + encodeURIComponent(filename))
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var msgs = data.messages || [];
+      if(msgs.length === 0){ alert('未找到'); return; }
+      var m = msgs[0];
+      var html = '';
+      html += '<p><b>文件名:</b> <span class="mono">'+esc(m.filename)+'</span></p>';
+      html += '<p><b>接收方公钥哈希:</b> <span class="mono">'+esc(m.receiver_hash)+'</span></p>';
+      html += '<p><b>发送方公钥 (v2头部):</b></p><pre class="mono" style="max-height:100px;overflow-y:auto">'+esc(m.sender_pub)+'</pre>';
+      html += '<p><b>AES IV:</b> <span class="mono">'+esc(m.iv)+'</span></p>';
+      html += '<p><b>RSA包裹的AES密钥:</b></p><pre class="mono" style="max-height:80px;overflow-y:auto">'+esc(m.wrapped_key)+'</pre>';
+      html += '<p><b>AES密文:</b></p><pre class="mono" style="max-height:100px;overflow-y:auto">'+esc(m.aes_content)+'</pre>';
+      html += '<p><b>管理员加密IP:</b> <span class="mono">'+esc(m.admin_ip)+'</span></p>';
+      html += '<p><b>服务器时间:</b> '+esc(m.server_time)+'</p>';
+      document.getElementById('detail-content').innerHTML = html;
+      document.getElementById('detail-modal').style.display = 'flex';
+    });
+}
+
+function deleteMsg(filename){
+  if(!confirm('确定删除 '+filename+' 吗？此操作不可恢复。')) return;
+  authFetch('/api/admin/chat/delete/' + encodeURIComponent(filename), {method:'POST'})
+    .then(function(r){ if(r.ok){ loadMessages(); } else { alert('删除失败'); } });
+}
+</script>
+</body>
+</html>
