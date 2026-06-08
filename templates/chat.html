@@ -19,6 +19,7 @@
     .slot-1{border-color:#4CAF50;background:#e8f5e9}
     .slot-2{border-color:#FF9800;background:#fff3e0}
     .slot-3{border-color:#9C27B0;background:#f3e5f5}
+    .slot-gray{border-color:#888;background:#f5f5f5}
     .slot-row input{flex:1;min-width:100px;padding:6px;border:1px solid #ccc;border-radius:4px;font-size:12px}
     .slot-row input[type="text"]{font-family:monospace;font-size:11px}
     .slot-row label{font-size:12px;font-weight:bold;white-space:nowrap;min-width:50px}
@@ -27,6 +28,8 @@
     .btn-blue{background:#2196F3;color:#fff}
     .btn-red{background:#f44336;color:#fff}
     .btn-gray{background:#ccc;color:#333}
+    .btn-green{background:#4CAF50;color:#fff}
+    .btn-orange{background:#FF9800;color:#fff}
     #chat-box{height:420px;overflow-y:auto;border:1px solid #ddd;padding:10px;background:#f9f9f9;border-radius:6px;margin-bottom:10px}
     .chat-msg{margin:4px 0;padding:6px 10px;border-radius:6px;border-left:3px solid #999;background:#fff;font-size:13px}
     .chat-msg.sent{margin-left:60px;border-left:none;border-right:3px solid #999;background:#f1f8e9}
@@ -47,15 +50,15 @@
     .link-btn{background:#FF9800;font-size:12px;height:35px;padding:0 12px}
     .hint{font-size:11px;color:#888;margin:2px 0}
     footer{margin-top:20px;text-align:center;color:#888;font-size:12px;border-top:1px solid #eee;padding:10px 0}
-    #poll-status{font-size:11px;color:#aaa;text-align:right;margin-bottom:4px}
+    #poll-status{font-size:11px;color:#aaa;flex:1}
     .modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);align-items:center;justify-content:center;z-index:999}
     .modal-box{background:#fff;padding:24px 20px;border-radius:8px;max-width:450px;width:90%;position:relative;max-height:85vh;overflow-y:auto;text-align:center}
     .close-btn{position:absolute;top:8px;right:8px;width:28px;height:28px;background:#f44336;color:#fff;border:none;border-radius:50%;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
     .contact-row{display:flex;gap:6px;align-items:center;margin:6px 0;padding:6px;background:#f0f0f0;border-radius:4px}
     .contact-row span{flex:1;font-family:monospace;font-size:11px;word-break:break-all;text-align:left}
-.copy-msg-btn{background:#eee;border:1px solid #ddd;border-radius:3px;padding:1px 7px;font-size:10px;cursor:pointer;color:#666;margin-left:6px;vertical-align:middle;line-height:1.4}
-.copy-msg-btn:hover{background:#ddd}
-.copy-msg-btn.copied{background:#4CAF50;color:#fff;border-color:#4CAF50}
+    .copy-msg-btn{background:#eee;border:1px solid #ddd;border-radius:3px;padding:1px 7px;font-size:10px;cursor:pointer;color:#666;margin-left:6px;vertical-align:middle;line-height:1.4}
+    .copy-msg-btn:hover{background:#ddd}
+    .copy-msg-btn.copied{background:#4CAF50;color:#fff;border-color:#4CAF50}
   </style>
 </head>
 <body>
@@ -69,21 +72,33 @@
 
 <!-- 身份槽位 -->
 <div class="section">
-  <h3>🔑 我的身份（最多4个，各自独立的 RSA + AES）</h3>
+  <h3>🔑 我的身份（各自独立的 RSA + AES，第5个起灰黑色）
+    <button class="small-btn btn-green" onclick="downloadAllSlots()" style="margin-left:6px">⬇ 全部身份</button>
+    <button class="small-btn btn-orange" onclick="uploadSlots()">⬆ 导入身份</button>
+    <input type="file" id="upload-slots-file" accept=".json" style="display:none">
+  </h3>
   <div id="slots"></div>
-  <button class="small-btn btn-blue" onclick="addSlot()" id="add-slot-btn" style="margin-top:6px">+ 添加身份</button>
+  <button class="small-btn btn-blue" onclick="addSlot()" style="margin-top:6px">+ 添加身份</button>
   <p class="hint">⚠️ 重新生成 RSA 密钥将无法解密旧消息。请先下载备份旧密钥。</p>
 </div>
 
 <!-- 联系人 -->
 <div class="section">
-  <h3>📇 联系人（保存接收方公钥，最多4个）</h3>
+  <h3>📇 联系人（保存接收方公钥，第5个起灰黑色）
+    <button class="small-btn btn-green" onclick="downloadAllContacts()" style="margin-left:6px">⬇ 全部</button>
+    <button class="small-btn btn-orange" onclick="uploadContacts()">⬆ 导入联系人</button>
+    <input type="file" id="upload-contacts-file" accept=".json" style="display:none">
+  </h3>
   <div id="contacts"></div>
-  <button class="small-btn btn-blue" onclick="addContact()" id="add-contact-btn">+ 添加联系人</button>
+  <button class="small-btn btn-blue" onclick="addContact()">+ 添加联系人</button>
 </div>
 
 <!-- 聊天框 -->
-<div id="poll-status">🔄 等待轮询...</div>
+<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+  <span id="poll-status">🔄 等待轮询...</span>
+  <button class="small-btn btn-red" onclick="clearMessageCache()">🗑 清空本地缓存</button>
+  <button class="small-btn btn-green" onclick="downloadChatHistory()">⬇ 聊天记录</button>
+</div>
 <div id="chat-box"></div>
 
 <!-- 发送区 -->
@@ -116,10 +131,36 @@
 function esc(s){ return String(s||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
 function deriveAESKey(str){ return CryptoJS.enc.Hex.parse(CryptoJS.SHA256(str).toString()); }
 function sha256hex(str){ return CryptoJS.SHA256(str).toString(); }
-// ★ 注意：pubKeyHash 里用 /[\r\n\s]+/g 是没问题的——这里是对公钥做 SHA256 取指纹，
-//    空格不影响哈希结果的一致性
-function pubKeyHash(pub){ return sha256hex((pub||'').replace(/[\r\n\s]+/g,'')).substring(0,16); }
+function pubKeyHash(pub){ return sha256hex((pub||'').replace(/[\r\n]+/g,'')).substring(0,16); }
+/**
+ * 规范化 PEM 格式：将单行 Base64 自动换成每 64 字符一行的标准格式
+ * 如果已经是多行或是非 PEM 字符串，则原样返回（去首尾空白）
+ */
+function normalizePem(pemStr){
+  if(!pemStr || typeof pemStr !== 'string') return pemStr || '';
 
+  pemStr = pemStr.trim();
+  if(!pemStr) return pemStr;
+
+  // 不是 PEM 格式 → 原样返回
+  if(!/^-----BEGIN /.test(pemStr)) return pemStr;
+
+  // 提取头部 / Base64 体 / 尾部
+  var match = pemStr.match(/^(-----BEGIN [^-]+-----)\s*([\s\S]*?)\s*(-----END [^-]+-----)$/);
+  if(!match) return pemStr;   // 匹配失败，原样返回
+
+  var header = match[1];
+  var body   = match[2].replace(/[\r\n\s]+/g, '');   // 把所有空白干掉
+  var footer = match[3];
+
+  // 按 64 字符重新断行
+  var lines = [];
+  for(var i = 0; i < body.length; i += 64){
+    lines.push(body.substring(i, i + 64));
+  }
+
+  return header + '\n' + lines.join('\n') + '\n' + footer;
+}
 var SLOT_COLORS = ['#2196F3','#4CAF50','#FF9800','#9C27B0'];
 var SLOT_NAMES = ['蓝色','绿色','橙色','紫色'];
 
@@ -129,7 +170,10 @@ var SLOT_NAMES = ['蓝色','绿色','橙色','紫色'];
 var STORAGE_KEY   = 'chat_identities_v1';
 var CONTACTS_KEY  = 'chat_contacts_v1';
 var SENT_KEY      = 'chat_sent_v1';
-var RECEIVED_KEY  = 'chat_received_v1';  // ★ 新增：持久化收到的消息
+var RECEIVED_KEY  = 'chat_received_v1';
+var REPORT_MAP_KEY = 'chat_report_map_v1';
+var REPLIES_KEY = 'chat_replies_v1';
+var REPORTED_FILES_KEY = 'chat_reported_files_v1';
 var LAST_POLL_KEY = 'chat_last_poll_v1';
 
 function loadIdentities(){
@@ -150,7 +194,6 @@ function saveSent(data){
   localStorage.setItem(SENT_KEY, JSON.stringify(data));
 }
 
-// ★ 新增
 function loadReceived(){
   try{ return JSON.parse(localStorage.getItem(RECEIVED_KEY) || '[]'); }catch(e){ return []; }
 }
@@ -161,6 +204,12 @@ function saveReceived(data){
 
 function getLastPoll(){ return localStorage.getItem(LAST_POLL_KEY) || ''; }
 function setLastPoll(v){ localStorage.setItem(LAST_POLL_KEY, v); }
+function loadReportMap(){ try{ return JSON.parse(localStorage.getItem(REPORT_MAP_KEY) || '{}'); }catch(e){ return {}; } }
+function saveReportMap(data){ localStorage.setItem(REPORT_MAP_KEY, JSON.stringify(data)); }
+function loadAdminReplies(){ try{ return JSON.parse(localStorage.getItem(REPLIES_KEY) || '{}'); }catch(e){ return {}; } }
+function saveAdminReplies(data){ localStorage.setItem(REPLIES_KEY, JSON.stringify(data)); }
+function loadReportedFiles(){ try{ return JSON.parse(localStorage.getItem(REPORTED_FILES_KEY) || '[]'); }catch(e){ return []; } }
+function saveReportedFiles(data){ localStorage.setItem(REPORTED_FILES_KEY, JSON.stringify(data)); }
 
 // ═══════════════════════════════════════════
 // RSA 密钥生成
@@ -178,16 +227,20 @@ function generateRSAKeypair(){
 var identities = loadIdentities();
 var contacts = loadContacts();
 var sentMessages = loadSent();
-var receivedMessages = loadReceived();   // ★ 新增
+var receivedMessages = loadReceived();
+var reportMap = loadReportMap();
+var adminReplies = loadAdminReplies();
+var reportedFiles = new Set(loadReportedFiles());
 var displayedMsgKeys = {};
 
 function renderSlots(){
   var container = document.getElementById('slots');
   var html = '';
   identities.forEach(function(id, i){
-    var color = SLOT_COLORS[i] || '#999';
-    var name = SLOT_NAMES[i] || ('身份'+(i+1));
-    html += '<div class="slot-row slot-'+i+'">';
+    var color = i < 4 ? (SLOT_COLORS[i] || '#999') : '#555';
+    var name = i < 4 ? (SLOT_NAMES[i] || ('身份'+(i+1))) : ('身份'+(i+1));
+    var slotClass = i < 4 ? ('slot-'+i) : 'slot-gray';
+    html += '<div class="slot-row '+slotClass+'">';
     html += '<label><span class="color-dot" style="background:'+color+'"></span>'+name+'</label>';
     html += '<input type="text" placeholder="昵称" value="'+esc(id.nick||'')+'" onchange="updateSlot('+i+',\'nick\',this.value)" maxlength="32">';
     html += '<input type="password" placeholder="AES密钥" value="'+esc(id.aes||'')+'" onchange="updateSlot('+i+',\'aes\',this.value)" maxlength="64">';
@@ -200,18 +253,20 @@ function renderSlots(){
     html += '</div>';
   });
   container.innerHTML = html || '<p style="color:#888">暂无身份，请添加</p>';
-  document.getElementById('add-slot-btn').style.display = identities.length >= 4 ? 'none' : '';
   updateSendSelects();
 }
 
 function updateSlot(i, field, value){
+  // ★ pub / priv 字段自动规范化 PEM 格式
+  if(field === 'pub' || field === 'priv'){
+    value = normalizePem(value);
+  }
   identities[i][field] = value;
   saveIdentities(identities);
   updateSendSelects();
 }
 
 function addSlot(){
-  if(identities.length >= 4){ alert('最多4个身份'); return; }
   identities.push({nick:'', aes:'', pub:'', priv:''});
   saveIdentities(identities);
   renderSlots();
@@ -238,10 +293,16 @@ function genRSAKeypair(i){
 
 function downloadSlot(i){
   var id = identities[i];
-  var blob = new Blob(['昵称: '+id.nick+'\nAES密钥: '+id.aes+'\n\n--- RSA 公钥 ---\n'+id.pub+'\n\n--- RSA 私钥 ---\n'+id.priv], {type:'text/plain'});
+  var exportData = {
+    nick: id.nick || '',
+    aes: id.aes || '',
+    pub: id.pub || '',
+    priv: id.priv || ''
+  };
+  var blob = new Blob([JSON.stringify(exportData, null, 2)], {type:'application/json'});
   var a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'chat_identity_'+(i+1)+'.txt';
+  a.download = 'chat_identity_' + (i+1) + '.json';
   a.click();
 }
 
@@ -262,23 +323,32 @@ function renderContacts(){
   var html = '';
   contacts.forEach(function(c, i){
     html += '<div class="contact-row">';
-    html += '<span title="'+esc(c.pub)+'">'+esc(c.name)+' ('+esc(pubKeyHash(c.pub))+')</span>';
+    html += '<span title="'+esc(c.pub)+'" style="color:'+(i<4?'':'#666')+'">'+esc(c.name)+' ('+esc(pubKeyHash(c.pub))+')</span>';
+    html += '<button class="small-btn btn-green" onclick="downloadContact('+i+')">⬇</button>';
     html += '<button class="small-btn btn-red" onclick="deleteContact('+i+')">✕</button>';
     html += '</div>';
   });
   container.innerHTML = html || '<p style="color:#888">暂无联系人，请添加</p>';
-  document.getElementById('add-contact-btn').style.display = contacts.length >= 4 ? 'none' : '';
   updateSendSelects();
 }
 
 function addContact(){
-  if(contacts.length >= 4){ alert('最多4个联系人'); return; }
   var name = prompt('联系人名称:') || '联系人'+(contacts.length+1);
   var pub = prompt('粘贴联系人RSA公钥:');
   if(!pub) return;
+  pub = normalizePem(pub);   // ★ 规范化后再存储
   contacts.push({name: name.substring(0,20), pub: pub});
   saveContacts(contacts);
   renderContacts();
+}
+
+function downloadContact(i){
+  var c = contacts[i];
+  var blob = new Blob([JSON.stringify(c, null, 2)], {type:'application/json'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'contact_' + (c.name || 'unnamed') + '.json';
+  a.click();
 }
 
 function deleteContact(i){
@@ -294,7 +364,7 @@ function updateSendSelects(){
   var selSlot = document.getElementById('send-slot');
   selSlot.innerHTML = '';
   identities.forEach(function(id, i){
-    var color = SLOT_COLORS[i] || '#999';
+    var color = i < 4 ? (SLOT_COLORS[i] || '#999') : '#666';
     var label = (id.nick || '身份'+(i+1));
     selSlot.innerHTML += '<option value="'+i+'" style="color:'+color+'">'+esc(label)+'</option>';
   });
@@ -341,18 +411,16 @@ function sendChatMsg(){
   var msg = document.getElementById('chat-msg').value.trim();
   if(!msg){ alert('请输入消息'); return; }
 
-  // 确定接收方公钥
-  var recvPub = document.getElementById('recv-pub-input').value.trim();
+  var recvPub = normalizePem(document.getElementById('recv-pub-input').value.trim());  // ★ 规范化
   var contactSel = document.getElementById('send-contact').value;
 
   if(!recvPub && contactSel && contactSel.startsWith('contact_')){
     var ci = parseInt(contactSel.replace('contact_',''));
-    if(contacts[ci]) recvPub = contacts[ci].pub;
+    if(contacts[ci]) recvPub = contacts[ci].pub;   // 存储时已规范化，直接用
   }
 
   if(!recvPub){ alert('请选择联系人或粘贴接收方公钥'); return; }
 
-  // 生成 per-message IV
   var iv = CryptoJS.lib.WordArray.random(16);
   var ivB64 = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g,'');
   var key32 = deriveAESKey(id.aes);
@@ -369,32 +437,30 @@ function sendChatMsg(){
   var payload = id.nick + '|' + timeStr + '|' + msg + '|' + nonce;
   var aesContent = CryptoJS.AES.encrypt(payload, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString().replace(/[\r\n\s]+/g,'');
 
-  // RSA 包裹 AES 密钥
   var jse = new JSEncrypt();
-  jse.setPublicKey(recvPub);
+  jse.setPublicKey(recvPub);   // ★ 此时 recvPub 已经是标准多行 PEM
   var wrappedKey = jse.encrypt(id.aes);
   if(!wrappedKey){ alert('RSA加密失败（接收方公钥无效）'); return; }
   wrappedKey = wrappedKey.replace(/[\r\n\s]+/g,'');
 
   var recvHash = pubKeyHash(recvPub);
 
-  // ★ FIX: sender_pub 只去掉换行，保留 PEM 头中的空格
   fetch('/api/chat/send', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      sender_pub: id.pub.replace(/[\r\n]+/g,''),   // ← 只去换行，保留 "-----BEGIN PUBLIC KEY-----" 中的空格
+      sender_pub: id.pub.replace(/[\r\n]+/g,''),
       receiver_hash: recvHash,
       iv: ivB64,
       wrapped_key: wrappedKey,
-      aes_content: aesContent
+      aes_content: aesContent,
+      nonce: nonce
     })
   }).then(function(r){
     window.handleRateLimitResponse(r);
     if(r.ok) return r.json();
     else return r.text().then(function(t){ throw new Error(t); });
   }).then(function(data){
-    // 存入本地已发送
     sentMessages.push({
       nick: id.nick,
       time: timeStr,
@@ -402,7 +468,9 @@ function sendChatMsg(){
       recvHash: recvHash,
       slotIdx: slotIdx,
       seq: data.seq,
-      filename: data.filename
+      filename: data.filename,
+      wrappedKey: wrappedKey,
+      iv: ivB64
     });
     saveSent(sentMessages);
     document.getElementById('chat-msg').value = '';
@@ -411,7 +479,6 @@ function sendChatMsg(){
     alert('发送失败: ' + err.message);
   });
 }
-
 // ═══════════════════════════════════════════
 // 轮询接收消息
 // ═══════════════════════════════════════════
@@ -420,11 +487,10 @@ var pollTimer = null;
 function startPolling(){
   if(pollTimer) return;
   doPoll();
-  pollTimer = setInterval(doPoll, 2000);
+  pollTimer = setInterval(doPoll, 3000);
 }
 
 function doPoll(){
-  // 收集所有身份的公钥哈希
   var hashes = [];
   identities.forEach(function(id){
     if(id.pub){
@@ -443,7 +509,11 @@ function doPoll(){
   fetch('/api/chat/poll', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({hashes: hashes, since: since})
+    body: JSON.stringify({
+      hashes: hashes,
+      sender_hashes: hashes,  // ← 新增：也查自己发的消息
+      since: since
+    })
   }).then(function(r){ return r.json(); }).then(function(data){
     var newTime = data.server_time || '';
     if(newTime) setLastPoll(newTime);
@@ -460,7 +530,6 @@ function doPoll(){
 }
 
 function decryptAndDisplay(messages){
-  // ★ 限制内存去重表大小
   var keys = Object.keys(displayedMsgKeys);
   if(keys.length > 2000){
     keys.slice(0, 1000).forEach(function(k){ delete displayedMsgKeys[k]; });
@@ -472,15 +541,15 @@ function decryptAndDisplay(messages){
     if(displayedMsgKeys[key]) return;
     displayedMsgKeys[key] = true;
 
-    // ★ 跳过已持久化过的消息（页面刷新后 displayedMsgKeys 为空，但 receivedMessages 还在）
     var alreadyHave = receivedMessages.some(function(rm){
       return rm.timeSort === m.time && rm.content && rm.nick;
     });
     if(alreadyHave) return;
 
-    // 尝试用每个身份的私钥解密
     var decrypted = null;
     var slotIdx = -1;
+
+    // ★ 第一轮：RSA 私钥解密 wrapped_key → 得到 AES 密钥 → 解密
     for(var i = 0; i < identities.length; i++){
       var id = identities[i];
       if(!id.priv) continue;
@@ -498,18 +567,37 @@ function decryptAndDisplay(messages){
           if(plain){
             var parts = plain.split('|');
             if(parts.length >= 3){
-              decrypted = {
-                nick: parts[0],
-                time: parts[1],
-                content: parts.slice(2, parts.length - 1).join('|'),
-                nonce: parts[parts.length - 1]
-              };
+              decrypted = { nick: parts[0], time: parts[1], content: parts.slice(2, parts.length - 1).join('|'), nonce: parts[parts.length - 1] };
               slotIdx = i;
               break;
             }
           }
         }
       }catch(e){}
+    }
+
+    // ★ 回退：直接用本地 AES 密钥解密（双方共享对称密钥或自己发给自己）
+    if(!decrypted){
+      for(var j = 0; j < identities.length; j++){
+        var id2 = identities[j];
+        if(!id2.aes) continue;
+        try {
+          var key32b = deriveAESKey(id2.aes);
+          var plain2 = CryptoJS.AES.decrypt(m.aes_content, key32b, {
+            iv: CryptoJS.enc.Base64.parse(m.iv),
+            mode: CryptoJS.mode.CBC,
+            padding: CryptoJS.pad.Pkcs7
+          }).toString(CryptoJS.enc.Utf8);
+          if(plain2){
+            var parts2 = plain2.split('|');
+            if(parts2.length >= 3){
+              decrypted = { nick: parts2[0], time: parts2[1], content: parts2.slice(2, parts2.length - 1).join('|'), nonce: parts2[parts2.length - 1] };
+              slotIdx = j;
+              break;
+            }
+          }
+        }catch(e){}
+      }
     }
 
     if(decrypted){
@@ -519,14 +607,16 @@ function decryptAndDisplay(messages){
         content: decrypted.content,
         slotIdx: slotIdx,
         timeSort: m.time,
-        senderPub: m.sender_pub || ''
+        senderPub: m.sender_pub || '',
+        filename: m.filename || '',
+        wrappedKey: m.wrapped_key || '',
+        iv: m.iv || '',
+        isReceived: true
       });
     }
   });
 
   if(newMsgs.length > 0){
-    // ★ 持久化到 receivedMessages
-// ✅ 修复
     newMsgs.forEach(function(nm){
       var dup = receivedMessages.some(function(rm){
         return rm.timeSort === nm.timeSort && rm.content === nm.content;
@@ -538,8 +628,11 @@ function decryptAndDisplay(messages){
           content: nm.content,
           slotIdx: nm.slotIdx,
           isReceived: true,
-          timeSort: nm.timeSort,         // ← 加逗号
-          senderPub: nm.senderPub || ''
+          timeSort: nm.timeSort,
+          senderPub: nm.senderPub || '',
+          filename: nm.filename || '',
+          wrappedKey: nm.wrappedKey || '',
+          iv: nm.iv || ''
         });
       }
     });
@@ -551,8 +644,6 @@ function decryptAndDisplay(messages){
 // ═══════════════════════════════════════════
 // 渲染聊天
 // ═══════════════════════════════════════════
-
-// ★ 无参版本：合并已发送 + 已收到
 function renderChat(){
   var all = sentMessages.concat(receivedMessages);
   renderChatWithData(all);
@@ -563,7 +654,6 @@ function renderChatWithData(allMsgs){
   var wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
   var prevScrollTop = box.scrollTop;
 
-  // 去重排序
   var seen = {};
   var uniq = [];
   allMsgs.forEach(function(m){
@@ -576,7 +666,6 @@ function renderChatWithData(allMsgs){
     return ta < tb ? -1 : ta > tb ? 1 : 0;
   });
 
-  // 一次性构建 HTML
   var html = '';
   uniq.forEach(function(m){
     var color = SLOT_COLORS[m.slotIdx] || '#999';
@@ -588,8 +677,6 @@ function renderChatWithData(allMsgs){
 
     html += '<div class="chat-msg' + cls + '" style="' + border + '">';
 
-    // 自己发的：时间在左、昵称在右
-    // 收到的：昵称在左、时间在右
     var header;
     if(isSent){
       header = '<span class="c-time">' + esc(m.time) + '</span>'
@@ -599,8 +686,21 @@ function renderChatWithData(allMsgs){
              + '<span class="c-time">' + esc(m.time) + '</span>';
     }
     html += '<div>' + header
-         + '<button class="copy-msg-btn" data-copy="' + esc(m.content) + '">📋复制</button>'
-         + '</div>';
+         + '<button class="copy-msg-btn" data-copy="' + esc(m.content) + '">📋复制</button>';
+
+    // 收到的消息：举报按钮
+    if (!isSent && m.filename) {
+      html += '<button class="copy-msg-btn" style="background:#fff3e0;color:#e65100;border-color:#ffcc80;margin-left:4px" '
+           + 'onclick="reportMessage(\'' + esc(m.filename) + '\',\'' + esc(m.wrappedKey||'') + '\',\'' + esc(m.iv||'') + '\',\'' + esc(m.slotIdx) + '\')">🚨举报</button>';
+    }
+
+    // 自己发的消息：撤回按钮
+    if (isSent && m.filename) {
+      html += '<button class="copy-msg-btn" style="background:#ffebee;color:#c62828;border-color:#ef9a9a;margin-left:4px" '
+           + 'onclick="revokeMessage(\'' + esc(m.filename) + '\',\'' + esc(m.slotIdx) + '\')">↩撤回</button>';
+    }
+
+    html += '</div>';
 
     html += '<div class="c-body">';
     try {
@@ -610,10 +710,18 @@ function renderChatWithData(allMsgs){
     }
     html += '</div>';
 
-    // ★ 收到的消息显示发送方公钥指纹
+    if (!isSent && m.filename && adminReplies[m.filename]) {
+      html += '<div style="margin-top:8px;padding:8px 10px;background:#e8f5e9;border-left:3px solid #4CAF50;border-radius:4px;font-size:12px">';
+      html += '<div style="font-weight:bold;color:#2e7d32;margin-bottom:4px">👮 管理员回复：</div>';
+      html += '<div style="white-space:pre-wrap;line-height:1.5">' + esc(adminReplies[m.filename]) + '</div>';
+      html += '</div>';
+    }
+    // ★ 已举报等待中
+    if (!isSent && m.filename && reportedFiles.has(m.filename) && !adminReplies[m.filename]) {
+      html += '<div style="margin-top:6px;font-size:11px;color:#e65100">⚠️ 已举报，等待管理员处理...</div>';
+    }
     if (!isSent && m.senderPub) {
       var fp = pubKeyHash(m.senderPub);
-      var preview = m.senderPub.substring(0, 40) + '...';
       html += '<div style="font-size:10px;color:#aaa;margin-top:4px;word-break:break-all" title="' + esc(m.senderPub) + '">';
       html += '🔑 发送方公钥指纹: <span style="font-family:monospace;color:#888">' + esc(fp) + '</span>';
       html += ' <span style="cursor:pointer;text-decoration:underline" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==\'none\'?\'block\':\'none\'">展开</span>';
@@ -626,7 +734,6 @@ function renderChatWithData(allMsgs){
 
   box.innerHTML = html;
 
-  // 滚动位置恢复
   if(wasAtBottom){
     box.scrollTop = box.scrollHeight;
   }else{
@@ -646,6 +753,129 @@ function insertFileLink(){
   var ta = document.getElementById('chat-msg');
   ta.value += (ta.value ? '\n' : '') + md;
   ta.focus();
+}
+
+// ═══════════════════════════════════════════
+// 清空本地消息缓存
+// ═══════════════════════════════════════════
+function clearMessageCache(){
+  showConfirm('确定清空所有本地聊天记录缓存？（服务器数据不受影响）', function(){
+    sentMessages = [];
+    receivedMessages = [];
+    displayedMsgKeys = {};
+    adminReplies = {};
+    reportMap = {};
+    reportedFiles = new Set();
+    saveSent(sentMessages);
+    saveReceived(receivedMessages);
+    saveAdminReplies(adminReplies);
+    saveReportMap(reportMap);
+    saveReportedFiles([]);
+    setLastPoll('');
+    renderChat();
+    doPoll();
+  });
+}
+
+// ═══════════════════════════════════════════
+// 下载聊天记录
+// ═══════════════════════════════════════════
+function downloadChatHistory(){
+  var all = sentMessages.concat(receivedMessages);
+  var blob = new Blob([JSON.stringify(all, null, 2)], {type:'application/json'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'chat_history_' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+}
+
+// ═══════════════════════════════════════════
+// 下载全部身份
+// ═══════════════════════════════════════════
+function downloadAllSlots(){
+  var blob = new Blob([JSON.stringify(identities, null, 2)], {type:'application/json'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'all_identities.json';
+  a.click();
+}
+
+// ═══════════════════════════════════════════
+// 导入身份（自动识别单个/数组）
+// ═══════════════════════════════════════════
+function uploadSlots(){
+  var input = document.getElementById('upload-slots-file');
+  input.onchange = function(){
+    var file = input.files[0];
+    if(!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e){
+      try {
+        var data = JSON.parse(e.target.result);
+        if(Array.isArray(data)){
+          showConfirm('检测到数组（' + data.length + '个身份），将替换全部。确定？', function(){
+            identities = data;
+            saveIdentities(identities);
+            renderSlots();
+            renderChat();
+          });
+        } else if(data.nick !== undefined || data.aes !== undefined || data.pub !== undefined){
+          identities.push({nick:data.nick||'', aes:data.aes||'', pub:data.pub||'', priv:data.priv||''});
+          saveIdentities(identities);
+          renderSlots();
+        } else {
+          alert('格式无效：需要 {nick, aes, pub, priv} 或数组');
+        }
+      }catch(ex){ alert('解析失败: ' + ex.message); }
+      input.value = '';
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+// ═══════════════════════════════════════════
+// 下载全部联系人
+// ═══════════════════════════════════════════
+function downloadAllContacts(){
+  var blob = new Blob([JSON.stringify(contacts, null, 2)], {type:'application/json'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'all_contacts.json';
+  a.click();
+}
+
+// ═══════════════════════════════════════════
+// 导入联系人（自动识别单个/数组）
+// ═══════════════════════════════════════════
+function uploadContacts(){
+  var input = document.getElementById('upload-contacts-file');
+  input.onchange = function(){
+    var file = input.files[0];
+    if(!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e){
+      try {
+        var data = JSON.parse(e.target.result);
+        if(Array.isArray(data)){
+          showConfirm('检测到数组（' + data.length + '个联系人），将替换全部。确定？', function(){
+            contacts = data;
+            saveContacts(contacts);
+            renderContacts();
+          });
+        } else if(data.name && data.pub){
+          contacts.push({name: data.name.substring(0,20), pub: data.pub});
+          saveContacts(contacts);
+          renderContacts();
+        } else {
+          alert('格式无效：需要 {name, pub} 或数组');
+        }
+      }catch(ex){ alert('解析失败: ' + ex.message); }
+      input.value = '';
+    };
+    reader.readAsText(file);
+  };
+  input.click();
 }
 
 // ═══════════════════════════════════════════
@@ -708,10 +938,12 @@ startPolling();
   if(!state.whitelisted && state.blockUntil > Date.now()/1000) start();
   else updateUI();
 })();
+
 // 消息内容一键复制
 document.addEventListener('click', function(e){
   var btn = e.target.closest('.copy-msg-btn');
   if (!btn) return;
+  if (!btn.dataset.copy) return;
   var text = btn.dataset.copy;
   navigator.clipboard.writeText(text).then(function(){
     btn.textContent = '✅已复制';
@@ -722,6 +954,144 @@ document.addEventListener('click', function(e){
     }, 1500);
   }).catch(function(){ alert('复制失败，请手动选择'); });
 });
+// ═══════════════════════════════════════════
+// 举报 / 撤回 / 举报状态查询
+// ═══════════════════════════════════════════
+
+var ADMIN_PUB_KEY = '';
+fetch('/gongyao.txt').then(function(r){ return r.text(); }).then(function(pub){
+  ADMIN_PUB_KEY = pub.trim();
+}).catch(function(){
+  console.warn('无法加载管理员公钥，举报功能不可用');
+});
+
+function reportMessage(filename, wrappedKeyB64, ivB64, slotIdxStr){
+  var slotIdx = parseInt(slotIdxStr) || 0;
+  var id = identities[slotIdx];
+  if(!id || !id.priv){
+    alert('该身份的RSA私钥未设置，无法解密AES密钥进行举报');
+    return;
+  }
+
+  if(!ADMIN_PUB_KEY){
+    alert('管理员公钥尚未加载，请刷新页面后重试');
+    return;
+  }
+
+  var aesKey = '';
+  try {
+    var jsePriv = new JSEncrypt();
+    jsePriv.setPrivateKey(id.priv);
+    aesKey = jsePriv.decrypt(wrappedKeyB64);
+  } catch(e){}
+  if(!aesKey){
+    alert('无法解密该消息的AES密钥（可能不是发给你的）');
+    return;
+  }
+
+  var reason = prompt('请输入举报理由（会被加密传输）：');
+  if(!reason || !reason.trim()) return;
+  reason = reason.trim().substring(0, 500);
+
+  var jsePub = new JSEncrypt();
+  jsePub.setPublicKey(ADMIN_PUB_KEY);
+  var aesKeyEnc = jsePub.encrypt(aesKey);
+  var reasonEnc = jsePub.encrypt(reason);
+
+  if(!aesKeyEnc || !reasonEnc){
+    alert('加密失败，请检查管理员公钥');
+    return;
+  }
+
+  fetch('/api/chat/report', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      filename: filename,
+      reporter_pub: id.pub.replace(/[\r\n]+/g,''),
+      aes_key_enc: aesKeyEnc.replace(/[\r\n\s]+/g,''),
+      reason_enc: reasonEnc.replace(/[\r\n\s]+/g,'')
+    })
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if(d.status === 'ok'){
+      alert('✅ 举报已提交。\n编号: ' + d.report_id);
+            reportMap[d.report_id] = {filename: filename, slotIdx: slotIdx};
+            reportedFiles.add(filename);
+            saveReportMap(reportMap);
+            saveReportedFiles(Array.from(reportedFiles));
+            renderChat();
+    } else {
+      alert('❌ ' + (d.error||'举报失败'));
+    }
+  }).catch(function(e){
+    alert('请求失败: ' + e.message);
+  });
+}
+
+function revokeMessage(filename, slotIdxStr){
+  var slotIdx = parseInt(slotIdxStr) || 0;
+  var id = identities[slotIdx];
+  if(!id || !id.aes || !id.nick || !id.pub){
+    alert('AES密钥、昵称或公钥未设置');
+    return;
+  }
+
+  showConfirm('确定撤回此消息？服务器上的文件将被真正删除。', function(){
+    fetch('/api/chat/revoke', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        filename: filename,
+        aes_key: id.aes,
+        nick: id.nick,
+        sender_pub: id.pub.replace(/[\r\n]+/g,'')   // ★ 新增
+      })
+    }).then(function(r){ return r.json(); }).then(function(d){
+      if(d.status === 'ok'){
+        alert('✅ 已撤回');
+        sentMessages = sentMessages.filter(function(m){ return m.filename !== filename; });
+        saveSent(sentMessages);
+        receivedMessages = receivedMessages.filter(function(m){ return m.filename !== filename; });
+        saveReceived(receivedMessages);
+        renderChat();
+      } else {
+        alert('❌ ' + (d.error||'撤回失败'));
+      }
+    });
+  });
+}
+
+// 每3秒查询举报回复
+setInterval(function(){
+  identities.forEach(function(id){
+    if(!id.pub) return;
+    var h = pubKeyHash(id.pub);
+    fetch('/api/chat/report/status?reporter_hash=' + h)
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        var changed = false;
+        (data.reports||[]).forEach(function(r){
+          if(r.filename && !reportedFiles.has(r.filename)){
+            reportedFiles.add(r.filename);
+            saveReportedFiles(Array.from(reportedFiles));
+            changed = true;
+          }
+          if(r.admin_reply && r.filename){
+            var old = adminReplies[r.filename] || '';
+            if(r.admin_reply !== old){
+              adminReplies[r.filename] = r.admin_reply;
+              saveAdminReplies(adminReplies);
+              changed = true;
+              if(!sessionStorage.getItem('rpt_alert_'+r.report_id)){
+                sessionStorage.setItem('rpt_alert_'+r.report_id,'1');
+              }
+            }
+          }
+        });
+        if(changed) renderChat();
+      }).catch(function(){});
+  });
+}, 3000);
 </script>
 </body>
 </html>
