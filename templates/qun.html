@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>讨论群</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js" integrity="sha512-E8QSvWZ0eCLGk4km3hxSsNmGWbLtSCSUcewDQPQWZF6pEU8GlT8a5fF32wOl1i8ftdMhssTrF/OhyGWwonTcXA==" crossorigin="anonymous"></script>
+  <style>
+    body{font-family:sans-serif;max-width:700px;margin:40px auto;padding:20px}
+    #chat{height:450px;overflow-y:auto;border:1px solid #ddd;padding:12px;background:#f9f9f9;margin-bottom:10px;border-radius:6px}
+    .msg{margin:6px 0;padding:8px 12px;background:#fff;border-radius:4px;border-left:3px solid #2196F3;position:relative}
+    .msg.pinned{background:#fff8e1;border-left-color:#FF9800;border:1px solid #FFE0B2;border-left:3px solid #FF9800}
+    .msg.pinned::before{content:'📌 置底';font-size:11px;color:#E65100;font-weight:bold;display:block;margin-bottom:2px}
+    .msg.disabled{background:#f5f5f5;border-left-color:#9E9E9E;opacity:0.6}
+    .msg.disabled::before{content:'🚫 已撤回/禁用';font-size:11px;color:#9E9E9E;display:block;margin-bottom:2px}
+    .msg.forced{border-left-color:#999}
+    .msg.forced::before{content:'[强制]';font-size:11px;color:#999;display:block;margin-bottom:2px}
+    .msg-actions{position:absolute;top:6px;right:8px;display:flex;gap:4px}
+    .msg-actions button{font-size:11px;padding:2px 8px;border:none;border-radius:3px;cursor:pointer}
+    .revoke-btn{background:#ff9800;color:#fff}
+    .report-btn{background:#f44336;color:#fff}
+    .meta{font-size:12px;color:#888;margin-bottom:3px;padding-right:80px}
+    .md-content{line-height:1.6;font-size:14px;word-break:break-all}
+    .md-content img{max-width:100%;border-radius:4px;margin:4px 0;cursor:pointer}
+    .md-content a{color:#2196F3;text-decoration:none;word-break:break-all}
+    .md-content pre{background:#f5f5f5;padding:8px;border-radius:4px;overflow-x:auto;font-size:12px;margin:4px 0}
+    .md-content code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:13px}
+    .rand-btn{background:#f5f5f5;color:#333;border:1px solid #ccc;height:36px;white-space:nowrap}
+    #input-area{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap}
+    input,textarea{padding:8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}
+    #nick{flex:0 0 100px}
+    #key-input{flex:0 0 120px}
+    textarea{flex:1;min-height:40px}
+    button{padding:8px 16px;cursor:pointer;border:none;border-radius:4px;background:#2196F3;color:#fff;white-space:nowrap}
+    .link-btn{background:#FF9800;font-size:12px;height:36px;padding:0 12px}
+    #status{font-size:13px;margin-bottom:8px;color:#666}
+    footer{margin-top:20px;text-align:center;color:#888;font-size:12px;border-top:1px solid #eee;padding:10px 0}
+    #identity-box{background:#f0f4ff;border-radius:6px;padding:10px 14px;margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    #identity-box span{font-size:13px;color:#555;white-space:nowrap}
+    #identity-box input{flex:1;min-width:100px}
+    .key-hint{font-size:11px;color:#888;width:100%}
+  </style>
+</head>
+<body>
+<h2> 👥 讨论群
+  <a href="/" style="color:#666;text-decoration:none;font-size:inherit;margin-right:8px">← 返回主界面</a>
+  <a href="/vote" style="font-size:14px;margin-left:8px;color:#673AB7;text-decoration:none;border:1px solid #673AB7;padding:3px 10px;border-radius:4px">🗳️ 投票</a>
+  <a href="/notice">📢 公告板</a>
+  <a href="/chat" style="font-size:14px;margin-left:10px;color:#D500FF;text-decoration:none;border:1px solid #FF57FB;padding:3px 10px;border-radius:4px">💬 私聊</a>
+</h2>
+
+<div id="identity-box">
+  <span>🔑 身份校验</span>
+  <input type="text" id="nick" placeholder="昵称（≤32字）" maxlength="32">
+  <input type="password" id="key-input" placeholder="AES密钥（用于身份校验）" maxlength="64">
+  <button type="button" class="rand-btn" onclick="genRandomKey()">🎲 随机32位</button>
+  <span class="key-hint">密钥经 SHA-512 哈希后用于身份识别，不传输原文</span>
+</div>
+
+<div id="status">加载中...</div>
+<div id="chat"></div>
+<div id="input-area">
+  <textarea id="msg" placeholder="支持 Markdown 语法" maxlength="2048" style="min-height:40px;flex:2"></textarea>
+  <button type="button" class="link-btn" onclick="insertFileLink()">🔗 外链</button>
+  <button id="send-btn" class="rate-limited-btn" onclick="send()">发送</button>
+</div>
+<footer id="footer"></footer>
+
+<script>
+var esc = function(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+};
+var LS_NICK = 'msg_nick';
+var LS_AES = 'msg_aes';
+function getLS(k){ return localStorage.getItem(k) || ''; }
+function setLS(k, v){ localStorage.setItem(k, v); }
+
+// 迁移旧 Cookie
+(function(){
+  var m = document.cookie.match('(^|;)\\s*msg_nick=([^;]*)');
+  if(m && !localStorage.getItem(LS_NICK)) localStorage.setItem(LS_NICK, decodeURIComponent(m[2]));
+  m = document.cookie.match('(^|;)\\s*msg_aes=([^;]*)');
+  if(m && !localStorage.getItem(LS_AES)) localStorage.setItem(LS_AES, decodeURIComponent(m[2]));
+  document.cookie = 'msg_nick=;max-age=0;path=/';
+  document.cookie = 'msg_aes=;max-age=0;path=/';
+})();
+
+document.getElementById('nick').value = getLS(LS_NICK);
+document.getElementById('key-input').value = getLS(LS_AES);
+
+var muted = false;
+var lastKnownMsgCount = 0;
+
+function sha512(str) {
+  return CryptoJS.SHA512(str).toString();
+}
+
+function genRandomKey() {
+  var chars = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ,./?;:><|]}[{=-+_!@#$%^&*()~';
+  var key = '';
+  for (var i = 0; i < 32; i++) {
+    key += chars[Math.floor(Math.random() * chars.length)];
+  }
+  document.getElementById('key-input').value = key;
+}
+
+function currentIdentity() {
+  return {
+    nick: document.getElementById('nick').value.trim(),
+    key: document.getElementById('key-input').value.trim(),
+    key_hash: document.getElementById('key-input').value.trim() ? sha512(document.getElementById('key-input').value.trim()) : ''
+  };
+}
+
+// ── 文件外链 ──
+function insertFileLink() {
+  var url = prompt('请输入文件URL:');
+  if (!url) return;
+  var name = prompt('请输入显示名称:', url.split('/').pop() || '文件') || '文件';
+  var ext = url.split('.').pop().toLowerCase();
+  var md = ['jpg','jpeg','png','gif','webp','svg'].indexOf(ext) !== -1 ? '![' + name + '](' + url + ')' : '[📎 ' + name + '](' + url + ')';
+  var ta = document.getElementById('msg'); ta.value += (ta.value ? '\n' : '') + md; ta.focus();
+}
+
+// ── 状态 ──
+function loadStatus() {
+  fetch('/api/qun/status').then(function(r){return r.text();}).then(function(v){
+    muted = v === '1';
+    document.getElementById('status').textContent = muted ? '🔒 管理员已开启全体禁言' : '🔓 发言已开放（支持 Markdown）';
+    document.getElementById('send-btn').disabled = muted;
+    document.getElementById('send-btn').style.background = muted ? '#ccc' : '#2196F3';
+  }).catch(function(){});
+}
+
+// ── 加载消息 ──
+function loadMsgs() {
+  var id = currentIdentity();
+  var url = '/api/qun';
+  if (id.nick && id.key_hash) {
+    url += '?nick=' + encodeURIComponent(id.nick) + '&key_hash=' + encodeURIComponent(id.key_hash);
+  }
+  fetch(url).then(function(r){return r.json();}).then(function(data){
+    var c = document.getElementById('chat');
+    var wasAtBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 30;
+    c.innerHTML = '';
+    data.forEach(function(m) {
+      var stateClass = '';
+      if (m.state === 'disabled') stateClass = ' disabled';
+      else if (m.state === 'forced') stateClass = ' forced';
+      var pinnedClass = m.pinned ? ' pinned' : '';
+
+      var safeHtml = DOMPurify.sanitize(marked.parse(m.content));
+
+      var div = document.createElement('div');
+      div.className = 'msg' + stateClass + pinnedClass;
+
+      // 操作按钮
+      var actionsDiv = document.createElement('div');
+      actionsDiv.className = 'msg-actions';
+
+      // 撤回按钮（仅消息主人可见）
+      if (m.is_owner && m.state !== 'disabled' && m.state !== 'forced') {
+        var revokeBtn = document.createElement('button');
+        revokeBtn.className = 'revoke-btn rate-limited-btn';
+        revokeBtn.textContent = '撤回';
+        revokeBtn.onclick = (function(idx){return function(){revokeMsg(idx);};})(m.index);
+        actionsDiv.appendChild(revokeBtn);
+      }
+
+      // 举报按钮（非强制消息、非自己的消息）
+      var id2 = currentIdentity();
+      if (m.state !== 'forced' && !m.is_owner) {
+        var reportBtn = document.createElement('button');
+        reportBtn.className = 'report-btn rate-limited-btn';
+        reportBtn.textContent = '举报';
+        reportBtn.onclick = (function(idx){return function(){reportMsg(idx);};})(m.index);
+        actionsDiv.appendChild(reportBtn);
+      }
+
+      div.appendChild(actionsDiv);
+
+      // 元数据
+      var metaDiv = document.createElement('div');
+      metaDiv.className = 'meta';
+      metaDiv.textContent = '👤 ' + m.nick + ' | 🕒 ' + m.time;
+      if (m.report_count > 0) {
+        metaDiv.textContent += ' | ⚠️ 被举报 ' + m.report_count + ' 次';
+      }
+      div.appendChild(metaDiv);
+
+      // 内容
+      var contentDiv = document.createElement('div');
+      contentDiv.className = 'md-content';
+      contentDiv.innerHTML = safeHtml;
+      div.appendChild(contentDiv);
+
+      c.appendChild(div);
+    });
+    if (wasAtBottom) c.scrollTop = c.scrollHeight;
+    lastKnownMsgCount = data.length;
+  }).catch(function(){console.error('加载消息失败');});
+}
+
+// ── 发送 ──
+function send() {
+  var id = currentIdentity();
+  var msg = document.getElementById('msg').value.trim();
+  if (!id.nick || !id.key) { alert('请填写昵称和密钥'); return; }
+  if (!msg) { alert('请输入内容'); return; }
+  if (muted) { alert('已禁言'); return; }
+  if (id.nick.toLowerCase() === 'admin') { alert('系统保留昵称'); return; }
+  setLS(LS_NICK, id.nick);
+  setLS(LS_AES, id.key);
+  fetch('/api/qun', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({nick:id.nick, content:msg, key:id.key})
+  }).then(function(r){
+    window.handleRateLimitResponse(r);
+    if(r.ok){ document.getElementById('msg').value=''; loadMsgs(); }
+    else r.text().then(alert);
+  });
+}
+
+// ── 撤回 ──
+function revokeMsg(index) {
+  var id = currentIdentity();
+  if (!id.nick || !id.key) {
+    alert('请先设置昵称和密钥');
+    return;
+  }
+  fetch('/api/qun/revoke/' + index, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({nick:id.nick, key:id.key})
+  }).then(function(r){
+    window.handleRateLimitResponse(r);
+    if(r.ok){ loadMsgs(); }
+    else r.text().then(alert);
+  });
+}
+
+// ── 举报 ──
+function reportMsg(index) {
+  var id = currentIdentity();
+  if (!id.nick || !id.key) { alert('请先填写昵称和密钥（用于举报记录）'); return; }
+  if (!confirm('确定举报此消息吗？')) return;
+  fetch('/api/qun/report/' + index, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({nick:id.nick, key:id.key})
+  }).then(function(r){
+    window.handleRateLimitResponse(r);
+    return r.json().then(function(data){ return {ok:r.ok, data:data}; });
+  }).then(function(result){
+    if(result.ok){
+      var msg = '✅ 举报已提交';
+      if(result.data.auto_disabled) msg += '\n该消息举报数已达阈值，已自动禁用';
+      alert(msg);
+      loadMsgs();
+    } else {
+      alert('举报失败');
+    }
+  });
+}
+
+// ── 定时刷新 ──
+setInterval(loadMsgs, 2000);
+setInterval(loadStatus, 5000);
+loadStatus(); loadMsgs();
+fetch('/api/footer').then(function(r){return r.text();}).then(function(t){document.getElementById('footer').textContent=t;});
+
+// 昵称/密钥变化时刷新
+document.getElementById('nick').addEventListener('input', function(){ loadMsgs(); });
+document.getElementById('key-input').addEventListener('input', function(){ loadMsgs(); });
+
+// ═══════ 7秒缓冲倒计时模块 ═══════
+(function(){
+  var STORAGE_KEY = 'rate_limit_state_v1';
+  var state = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{"blockUntil":0,"whitelisted":false}');
+  var timer = null;
+
+  function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+
+  function updateUI(){
+    var now = Date.now() / 1000;
+    var remaining = Math.ceil(state.blockUntil - now);
+    var disabled = !state.whitelisted && remaining > 0;
+
+    document.querySelectorAll('.rate-limited-btn').forEach(function(btn){
+      btn.disabled = disabled;
+      if(disabled){
+        if(!btn.dataset.origText) btn.dataset.origText = btn.textContent;
+        btn.textContent = btn.dataset.origText + ' (' + remaining + 's)';
+      }else{
+        if(btn.dataset.origText) btn.textContent = btn.dataset.origText;
+      }
+    });
+  }
+
+  function start(){
+    if(timer) clearInterval(timer);
+    updateUI();
+    timer = setInterval(function(){
+      var remaining = Math.ceil(state.blockUntil - Date.now()/1000);
+      if(remaining <= 0){
+        clearInterval(timer); timer = null;
+        state.blockUntil = 0;
+      }
+      updateUI(); save();
+    }, 200);
+  }
+
+  window.handleRateLimitResponse = function(response){
+    var wl = response.headers.get('X-RateLimit-Whitelisted') === '1';
+    var bu = parseFloat(response.headers.get('X-RateLimit-BlockUntil') || '0');
+    state.whitelisted = wl;
+    state.blockUntil = bu || 0;
+    save();
+    if(!wl && state.blockUntil > Date.now()/1000) start();
+    else updateUI();
+  };
+
+  if(!state.whitelisted && state.blockUntil > Date.now()/1000){
+    start();
+  }else{
+    updateUI();
+  }
+})();
+</script>
+</body>
+</html>

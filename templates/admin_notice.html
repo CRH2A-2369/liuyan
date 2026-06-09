@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>公告管理</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f5f5; color: #333; min-height: 100vh;
+    }
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #fff; padding: 20px 24px; text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .header h1 { font-size: 22px; font-weight: 600; }
+    .container { max-width: 720px; margin: 0 auto; padding: 16px; }
+
+    .form-card {
+      background: #fff; border-radius: 10px; padding: 18px 20px;
+      margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .form-card label {
+      display: block; font-size: 13px; font-weight: 600; color: #666; margin-bottom: 4px;
+    }
+    .form-card textarea {
+      width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px;
+      font-size: 14px; font-family: inherit; resize: vertical; min-height: 80px;
+      transition: border-color 0.2s; box-sizing: border-box;
+    }
+    .form-card textarea:focus { outline: none; border-color: #667eea; }
+    .btn-row { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .btn {
+      padding: 8px 20px; border: none; border-radius: 6px; font-size: 14px;
+      cursor: pointer; transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #667eea; color: #fff; }
+    .btn-link { background: #FF9800; color: #fff; font-size: 12px; padding: 6px 14px; }
+    .btn-danger { background: #f56c6c; color: #fff; font-size: 12px; padding: 4px 12px; }
+    .btn-warning { background: #e6a23c; color: #fff; font-size: 12px; padding: 4px 12px; }
+    .btn-sm { font-size: 12px; padding: 4px 12px; }
+
+    .notice-card {
+      background: #fff; border-radius: 10px; padding: 16px 20px;
+      margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); position: relative;
+    }
+    .notice-card.pinned { border-left: 4px solid #e6a23c; background: #fffdf6; }
+    .pin-badge {
+      display: inline-block; background: #e6a23c; color: #fff;
+      font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-bottom: 8px;
+    }
+    .md-content { line-height: 1.7; font-size: 15px; word-break: break-word; }
+    .md-content img { max-width: 100%; border-radius: 4px; margin: 4px 0; cursor: pointer; }
+    .md-content a { color: #2196F3; text-decoration: none; word-break: break-all; }
+    .md-content pre { background: #f5f5f5; padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 13px; margin: 4px 0; }
+    .md-content code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+    .notice-time {
+      font-size: 12px; color: #999; margin-top: 8px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .notice-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .empty-state { text-align: center; padding: 40px 20px; color: #bbb; font-size: 15px; }
+    .nav-link {
+      display: block; text-align: center; margin-top: 24px; color: #667eea;
+      text-decoration: none; font-size: 13px;
+    }
+    .nav-link:hover { text-decoration: underline; }
+    .status-msg {
+      padding: 8px 12px; border-radius: 6px; font-size: 13px; margin-bottom: 12px; display: none;
+    }
+    .status-msg.success { background: #e1f3d8; color: #67c23a; display: block; }
+    .status-msg.error { background: #fde2e2; color: #f56c6c; display: block; }
+    .top-bar {
+      position: sticky; top: 0; z-index: 100;
+      background: #fff; border-bottom: 1px solid #eee;
+      padding: 0 16px; height: 44px;
+      display: flex; align-items: center; gap: 16px;
+    }
+    .top-bar a { color: #667eea; text-decoration: none; font-size: 13px; }
+    .top-bar a:hover { text-decoration: underline; }
+
+    .copy-btn {
+      background: #eee; border: 1px solid #ddd; border-radius: 3px;
+      padding: 2px 8px; font-size: 11px; cursor: pointer; color: #555;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { background: #ddd; }
+    .copy-btn.copied { background: #4CAF50; color: #fff; border-color: #4CAF50; }
+  </style>
+</head>
+<body>
+  <!-- ★ 登录墙 -->
+  <div id="login-wall" style="text-align:center;margin-top:60px">
+    <h2>🔒 请先通过管理员验证</h2>
+    <p><a href="/admin">→ 前往管理员登录</a></p>
+  </div>
+
+  <!-- ★ 主内容（默认隐藏） -->
+  <div id="main-content" style="display:none">
+    <div class="header"><h1>📢 公告管理</h1></div>
+
+    <!-- ★ 快捷导航栏 -->
+    <div class="top-bar">
+      <a href="/admin">← 管理面板</a>
+      <a href="/admin/qun">💬 群聊</a>
+      <a href="/admin/vote">🗳️ 投票</a>
+      <a href="/admin/ip">🌐 IP</a>
+      <a href="/admin/chat">私聊管理</a>
+    </div>
+
+    <div class="container">
+      <div id="statusMsg" class="status-msg"></div>
+
+      <!-- 发公告表单 -->
+      <div class="form-card">
+        <label for="noticeContent">公告内容（支持 Markdown）</label>
+        <textarea id="noticeContent" placeholder="输入公告内容，支持 Markdown 语法"></textarea>
+        <div class="btn-row">
+          <button type="button" class="btn-link" onclick="insertFileLink()">🔗 插入文件外链</button>
+          <button class="btn btn-primary" onclick="postNotice()">📨 发布公告</button>
+        </div>
+      </div>
+
+      <!-- 公告列表 -->
+      <div id="noticeList"><div class="empty-state">加载中...</div></div>
+    </div>
+  </div>
+
+  <script>
+    var csrfToken = '';
+
+    // ★ authFetch：自动带 CSRF token 和 credentials
+    var authFetch = function(url, opts) {
+      opts = opts || {};
+      var headers = opts.headers || {};
+      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      return fetch(url, Object.assign({credentials: 'same-origin'}, opts, {headers: headers}));
+    };
+
+    // ★ init：鉴权流程（与 admin_qun.html 一致）
+    async function init() {
+      try {
+        // 1. 拿 CSRF token
+        var csrfRes = await fetch('/api/csrf', {credentials: 'same-origin'});
+        csrfToken = (await csrfRes.json()).token;
+
+        // 2. 检查登录状态
+        var statusRes = await fetch('/api/admin/status', {credentials: 'same-origin'});
+        var status = await statusRes.json();
+
+        if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
+          // 已登录且已加载私钥 → 显示管理界面
+          document.getElementById('login-wall').style.display = 'none';
+          document.getElementById('main-content').style.display = 'block';
+          loadNotices();
+        } else if (status.logged_in) {
+          // 已登录但无 key → 登出重来
+          await fetch('/api/admin/logout', {
+            credentials: 'same-origin', method: 'POST',
+            headers: { 'X-CSRF-Token': csrfToken }
+          });
+          sessionStorage.clear();
+          location.reload();
+        }
+        // 未登录 → login-wall 保持显示
+      } catch(e) {
+        console.error('Init:', e);
+      }
+    }
+
+    // ── 插入文件外链 ──
+    function insertFileLink() {
+      var url = prompt('请输入文件URL:');
+      if (!url) return;
+      var name = prompt('请输入显示名称:', url.split('/').pop() || '文件') || '文件';
+      var ext = url.split('.').pop().toLowerCase();
+      var md = ['jpg','jpeg','png','gif','webp','svg'].indexOf(ext) !== -1
+        ? '![' + name + '](' + url + ')'
+        : '[📎 ' + name + '](' + url + ')';
+      var ta = document.getElementById('noticeContent');
+      ta.value += (ta.value ? '\n' : '') + md;
+      ta.focus();
+    }
+
+    async function loadNotices() {
+      try {
+        var res = await authFetch('/api/notice');
+        var notices = await res.json();
+        var container = document.getElementById('noticeList');
+        if (!notices.length) {
+          container.innerHTML = '<div class="empty-state">📭 暂无公告</div>';
+          return;
+        }
+        container.innerHTML = notices.map(function(n, i) {
+          var safeHtml = DOMPurify.sanitize(marked.parse(n.content));
+          return '<div class="notice-card' + (n.pinned ? ' pinned' : '') + '" data-index="' + i + '">' +
+            (n.pinned ? '<span class="pin-badge">📌 置顶</span>' : '') +
+            '<div class="md-content">' + safeHtml + '</div>' +
+            '<div class="notice-time">' +
+              '<span>' + esc(n.time) + '</span>' +
+              '<button class="copy-btn" data-copy="' + esc(n.content).replace(/"/g, '&quot;') + '" onclick="copyNotice(this)">复制</button>' +
+            '</div>' +
+            '<div class="notice-actions">' +
+              '<button class="btn btn-warning btn-sm" onclick="togglePin(' + i + ')">' + (n.pinned ? '📌 取消置顶' : '📌 置顶') + '</button>' +
+              '<button class="btn btn-danger btn-sm" onclick="deleteNotice(' + i + ')">🗑 删除</button>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+      } catch(e) { console.error('加载公告失败', e); }
+    }
+
+    async function postNotice() {
+      var content = document.getElementById('noticeContent').value.trim();
+      if (!content) return showStatus('请输入公告内容', 'error');
+
+      try {
+        var res = await authFetch('/api/admin/notice', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: content })
+        });
+        var data = await res.json();
+        if (data.ok) {
+          showStatus('发布成功！', 'success');
+          document.getElementById('noticeContent').value = '';
+          loadNotices();
+        } else {
+          showStatus(data.error || '发布失败', 'error');
+        }
+      } catch(e) { showStatus('网络错误', 'error'); }
+    }
+
+    async function deleteNotice(index) {
+      if (!confirm('确定删除这条公告吗？')) return;
+      try {
+        var res = await authFetch('/api/admin/notice/delete/' + index, {
+          method: 'POST'
+        });
+        var data = await res.json();
+        if (data.ok) { showStatus('已删除', 'success'); loadNotices(); }
+        else { showStatus(data.error || '删除失败', 'error'); }
+      } catch(e) { showStatus('网络错误', 'error'); }
+    }
+
+    async function togglePin(index) {
+      try {
+        var res = await authFetch('/api/admin/notice/pin/' + index, {
+          method: 'POST'
+        });
+        if ((await res.json()).ok) loadNotices();
+      } catch(e) { showStatus('操作失败', 'error'); }
+    }
+
+    function showStatus(msg, type) {
+      var el = document.getElementById('statusMsg');
+      el.textContent = msg;
+      el.className = 'status-msg ' + type;
+      setTimeout(function() { el.className = 'status-msg'; }, 3000);
+    }
+
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, function(c) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+      });
+    }
+
+    function copyNotice(btn) {
+      navigator.clipboard.writeText(btn.dataset.copy).then(function() {
+        btn.textContent = '已复制';
+        btn.classList.add('copied');
+        setTimeout(function() {
+          btn.textContent = '复制';
+          btn.classList.remove('copied');
+        }, 1500);
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>
