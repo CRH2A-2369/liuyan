@@ -247,13 +247,17 @@ function submit() {
             mode: CryptoJS.mode.CBC,
             padding: CryptoJS.pad.Pkcs7
           }).toString(CryptoJS.enc.Utf8);
-          if (d && d.indexOf(nick + ' | ') === 0) {
-            var parts = d.split(' | ');
-            found.push({
-                time: m.server_time || '未知时间',
-                content: content,
-                seq: m.seq
-            });
+                if (d && d.indexOf(nick + ' | ') === 0) {
+                        var parts = d.split(' | ');
+                        // 回复格式：nick | 时间 | 内容...
+                        var replyTime = parts[1] || '未知时间';
+                        var replyContent = parts.slice(2).join(' | ');
+                        found.push({
+                            time: replyTime,
+                            content: replyContent,
+                            seq: r.seq
+                        });
+                      }
           }
         } catch(e) {}
       });
@@ -296,7 +300,7 @@ function submit() {
           if (!content) return;
 
           found.push({
-            time: '服务器时间已独立加密存储',
+            time: m.server_time || '未知时间',
             content: content,
             seq: m.seq
           });
