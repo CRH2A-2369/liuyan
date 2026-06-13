@@ -977,26 +977,34 @@ def qun_status():
 def get_qun():
     rl = check_rate_limit('read')
     if rl: return rl
+
     chat = load_chat()
     nick = request.args.get('nick', '').strip()
     key_hash = request.args.get('key_hash', '').strip()
-    
-    # 调试信息
     is_admin_user = is_admin()
-    print(f"[QUN DEBUG] nick='{nick}', key_hash='{key_hash[:8] if key_hash else ''}', is_admin={is_admin_user}")
+
+    # 预先计算"我是谁"（用于 is_owner 判断）
+    my_identity = (nick, key_hash) if nick and key_hash else None
 
     result = []
     for i, m in enumerate(chat):
         normalize_msg(m)
         state = m.get('state', 'enabled')
-        
-        # ⭐★⭐ 禁用消息：绝对过滤 ⭐★⭐
+
+        # ── 白名单：谁有权看到这条消息？ ──
+        allowed = True                           # 默认允许
+
         if state == 'disabled':
-            is_owner = bool(nick and key_hash and m.get('nick') == nick and m.get('key_hash') == key_hash)
-            if not (is_admin_user or is_owner):
-                print(f"[QUN FILTER] 过滤掉 disabled 消息 #{i}: nick='{m.get('nick')}'")
-                continue
-        
+            allowed = False                       # ★ 先全部拒绝
+            if is_admin_user:                     # 管理员 → 放行
+                allowed = True
+            elif my_identity:                     # 消息主人 → 放行
+                if m.get('nick') == nick and m.get('key_hash') == key_hash:
+                    allowed = True
+
+        if not allowed:
+            continue
+
         result.append({
             'index': i,
             'nick': m['nick'],
@@ -1004,33 +1012,17 @@ def get_qun():
             'content': m['content'],
             'state': state,
             'pinned': bool(m.get('pinned')),
-            'is_owner': bool(nick and key_hash and m.get('nick') == nick and m.get('key_hash') == key_hash),
+            'is_owner': bool(my_identity and m.get('nick') == nick and m.get('key_hash') == key_hash),
             'report_count': len(m.get('reports', []))
         })
-    
-    # ★ 在排序之前，再过滤一次：确保非管理员的 normal 列表中不含 disabled
-    # （这层是兜底，防止上面逻辑有遗漏）
-    if not is_admin_user:
-        result = [x for x in result if x['state'] != 'disabled' or x['is_owner']]
-    
-    # ★★★ 最终绝对过滤：非管理员、非主人的 disabled 消息，一个都不许出去 ★★★
-    if not is_admin_user:
-        filtered_result = []
-        for x in result:
-            if x['state'] == 'disabled' and not x['is_owner']:
-                print(f"[QUN FINAL FILTER] 拦截 disabled 消息 #{x['index']}: nick='{x['nick']}'")
-                continue
-            filtered_result.append(x)
-        result = filtered_result
-    
-    # 排序 - 注意 normal 不再包含 disabled（因为上面已经全过滤了）
-    normal   = [x for x in result if x['state'] == 'enabled'  and not x['pinned']]
-    forced   = [x for x in result if x['state'] == 'forced'   and not x['pinned']]
-    pinned   = [x for x in result if x['pinned']]
-    ordered  = normal + forced + pinned
-    
-    print(f"[QUN DEBUG] 最终返回 {len(ordered)} 条（原始 {len(chat)} 条，过滤 {len(chat)-len(ordered)} 条）")
+
+    normal  = [x for x in result if x['state'] in ('enabled', 'disabled') and not x['pinned']]
+    forced  = [x for x in result if x['state'] == 'forced' and not x['pinned']]
+    pinned  = [x for x in result if x['pinned']]
+    ordered = normal + forced + pinned
+
     return jsonify(ordered)
+
 @app.route('/api/qun', methods=['POST'])
 @require_csrf
 def post_qun():
@@ -1053,7 +1045,7 @@ def post_qun():
     initial_state = 'disabled' if check_regex_disable(content) else 'enabled'
 
     msg = {
-        'nick': data['nick'][:32],
+        'nick': data['nick'].strip()[:32],
         'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
         'ip': encrypt_ip(get_client_ip()),
         'content': content,
@@ -2671,4 +2663,4 @@ if __name__ == '__main__':
     print(f"[CONFIG] SESSION_COOKIE_SECURE = {app.config['SESSION_COOKIE_SECURE']}")
     print(f"[CONFIG] TRUSTED_PROXIES = {TRUSTED_PROXIES}")
     print(f"[CONFIG] RSA_PUB exists = {os.path.exists(RSA_PUB)}")
-    app.run(debug=False, host='0.0.0.0', port=5033)
+    app.run(debug=False, host='::', port=5033)
