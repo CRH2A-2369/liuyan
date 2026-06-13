@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>群管理</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
+  <style>
+    body{font-family:sans-serif;max-width:960px;margin:40px auto;padding:20px}
+    #controls{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+    #announce-panel{background:#fff3cd;padding:10px;border-radius:6px;margin-bottom:15px;border-left:4px solid #ffc107}
+    #rule-panel{background:#e8eaf6;padding:10px;border-radius:6px;margin-bottom:15px;border-left:4px solid #3F51B5}
+    #chat{max-height:550px;overflow-y:auto;border:1px solid #ddd;padding:12px;background:#f9f9f9;border-radius:6px}
+    .msg{margin:6px 0;padding:10px;background:#fff;border-radius:6px;position:relative;border-left:3px solid #4CAF50}
+    .msg.pinned{background:#fff8e1;border-left-color:#FF9800;border:1px solid #FFE0B2;border-left:3px solid #FF9800}
+    .msg.disabled{background:#f5f5f5;border-left-color:#9E9E9E;opacity:0.65}
+    .msg.forced{background:#e8f5e9;border-left-color:#4CAF50;border:1px solid #c8e6c9;border-left:3px solid #4CAF50}
+    .state-badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;margin-right:6px;font-weight:bold}
+    .state-enabled{background:#e8f5e9;color:#2e7d32}
+    .state-disabled{background:#fce4ec;color:#c62828}
+    .state-forced{background:#e3f2fd;color:#1565c0}
+    .pin-label{display:none;font-size:11px;color:#E65100;font-weight:bold;margin-right:8px}
+    .msg.pinned .pin-label{display:inline-block}
+    .meta{font-size:12px;color:#666;margin-bottom:4px}
+    .md-content{line-height:1.6;font-size:14px;word-break:break-all}
+    .md-content img{max-width:100%;border-radius:4px;margin:4px 0;cursor:pointer}
+    .md-content a{color:#2196F3;text-decoration:none;word-break:break-all}
+    .md-content pre{background:#f5f5f5;padding:8px;border-radius:4px;overflow-x:auto;font-size:12px;margin:4px 0}
+    .md-content code{background:#f0f0f0;padding:1px 4px;border-radius:3px;font-size:13px}
+    .btn-row{position:absolute;top:8px;right:8px;display:flex;gap:4px;flex-wrap:wrap}
+    .btn-row button{padding:4px 8px;font-size:11px;border:none;border-radius:3px;cursor:pointer;color:#fff}
+    .del-btn{background:#f44336}
+    .pin-btn{background:#FF9800}
+    .pin-btn.is-pinned{background:#9E9E9E}
+    .state-btn{background:#607D8B}
+    button{padding:8px 16px;cursor:pointer;border:none;border-radius:4px}
+    .muted{background:#f44336;color:#fff}.unmuted{background:#4CAF50;color:#fff}
+    textarea{width:100%;min-height:60px;padding:8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}
+    footer{margin-top:20px;text-align:center;color:#888;font-size:12px;border-top:1px solid #eee;padding:10px 0}
+    .copy-btn{background:#eee;border:1px solid #ddd;border-radius:3px;padding:2px 8px;font-size:11px;cursor:pointer;color:#555;margin-left:8px;vertical-align:middle}
+    .copy-btn:hover{background:#ddd}
+    .copy-btn.copied{background:#4CAF50;color:#fff;border-color:#4CAF50}
+    .report-detail{font-size:11px;color:#555;margin:2px 0;padding:4px 6px;background:#fff5f5;border-radius:3px;border-left:2px solid #E91E63}
+    .report-detail code{font-size:10px;word-break:break-all}
+    .decrypted-id{color:#1565c0;font-weight:bold}
+    /* AI 面板 */
+    #admin-ai-panel{background:#f8f0ff;border-radius:6px;padding:10px 14px;margin-bottom:12px;border:1px solid #e0d0f0}
+    #ai-toggle-row{display:flex;gap:8px;align-items:center;margin-bottom:6px}
+    #ai-toggle-row label{font-size:13px;cursor:pointer;user-select:none;color:#7B1FA2}
+    #ai-settings{display:none;margin-top:8px;padding:8px 12px;background:#fff;border-radius:6px;border:1px solid #e0d0f0}
+    #ai-settings .ai-row{display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap}
+    #ai-settings .ai-row label{font-size:12px;color:#555;min-width:55px}
+    #ai-settings .ai-row input,#ai-settings .ai-row textarea{flex:1;font-size:12px;padding:5px 8px}
+    #ai-settings .ai-row textarea{min-height:40px;resize:vertical}
+    .ai-btn-row{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+    .ai-btn-row button{font-size:12px;padding:5px 12px}
+    .ai-btn-row .ai-save-btn{background:#7B1FA2}
+    .ai-btn-row .ai-export-btn{background:#607D8B}
+    .ai-btn-row .ai-import-btn{background:#009688}
+    .msg.ai-msg{border-left-color:#9C27B0;background:#faf5ff}
+    .msg.ai-msg .meta::after{content:' 🤖AI';color:#9C27B0;font-size:11px}
+  </style>
+</head>
+<body>
+<h2>🛡️ 群聊管理
+  <a href="/admin" style="font-size:14px;margin-left:10px;color:#666;text-decoration:none;border:1px solid #ccc;padding:3px 10px;border-radius:4px">← 返回管理员主页</a>
+  <a href="/admin/vote" style="font-size:14px;margin-left:8px;color:#673AB7;text-decoration:none;border:1px solid #673AB7;padding:3px 10px;border-radius:4px">🗳️ 投票管理</a>
+  <a href="/admin/ip" style="font-size:14px;margin-left:10px;color:#009688;text-decoration:none;border:1px solid #009688;padding:3px 10px;border-radius:4px">🌐 IP记录</a>
+  <a href="/admin/notice" style="font-size:14px;margin-left:10px;color:#FF57FB;text-decoration:none;border:1px solid #FF57FB;padding:3px 10px;border-radius:4px">📢 公告管理</a>
+  <a href="/admin/chat" style="font-size:14px;margin-left:10px;color:#FF57FB;text-decoration:none;border:1px solid #FFBC00;padding:3px 10px;border-radius:4px"> 私聊管理</a>
+</h2>
+
+<div id="login-wall" style="text-align:center;margin-top:60px">
+  <h2>🔒 请先通过管理员验证</h2>
+  <p><a href="/admin">→ 前往管理员登录</a></p>
+</div>
+
+<div id="main-content" style="display:none">
+
+<div id="controls">
+  <button id="mute-btn" class="unmuted" onclick="toggleMute()">加载中...</button>
+</div>
+
+<div id="announce-panel">
+  <strong>📢 发布公告（支持 Markdown）— 自动设为强制启用</strong><br>
+  <button type="button" onclick="insertAnnounceLink()" style="background:#FF9800;font-size:12px;height:28px;padding:0 10px;margin:6px 0;border:none;border-radius:4px;color:#fff;cursor:pointer">🔗 插入文件外链</button>
+  <textarea id="ann-content" placeholder="输入公告内容，支持 Markdown 语法"></textarea>
+  <button onclick="sendAnnounce()" style="background:#ffc107;color:#000;margin-top:8px;width:100%">发送公告（强制启用）</button>
+</div>
+
+<div id="rule-panel">
+  <strong>🔍 正则规则管理</strong> <span style="font-size:12px;color:#4CAF50">（后台每2秒自动扫描匹配并禁用）</span>
+  <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+    <input type="text" id="rule-input" placeholder="正则表达式，如：广告|spam|违规" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px">
+    <button onclick="saveRule()" style="background:#3F51B5;color:#fff">💾 保存</button>
+  </div>
+  <div style="margin-top:6px;display:flex;gap:12px;align-items:center">
+    <span style="font-size:13px">📊 举报阈值：</span>
+    <input type="number" id="threshold-input" value="5" min="1" style="width:60px;padding:6px;border:1px solid #ccc;border-radius:4px">
+    <button onclick="saveThreshold()" style="background:#3F51B5;color:#fff;font-size:12px;padding:6px 12px">保存阈值</button>
+    <span style="font-size:11px;color:#888">（举报数达阈值自动禁用）</span>
+  </div>
+</div>
+
+<div id="admin-ai-panel">
+  <div id="ai-toggle-row">
+    <label><input type="checkbox" id="ai-enable" onchange="toggleAiPanel()"> 🤖 启用 AI 自动回复</label>
+    <span style="font-size:11px;color:#888">（使用 OpenAI 兼容 API，调用仅在本地进行）</span>
+  </div>
+  <div id="ai-settings">
+    <div class="ai-row"><label>API 网址</label><input type="text" id="ai-url" placeholder="https://api.openai.com/v1"></div>
+    <div class="ai-row"><label>API Key</label><input type="password" id="ai-key" placeholder="sk-..."></div>
+    <div class="ai-row"><label>模型</label><input type="text" id="ai-model" placeholder="gpt-4o-mini"></div>
+    <div class="ai-row"><label>昵称</label><input type="text" id="ai-nick" placeholder="助手" maxlength="16"></div>
+    <div class="ai-row"><label>提示词</label><textarea id="ai-prompt" placeholder="你是一个友好的群聊助手..." maxlength="1024"></textarea></div>
+    <div class="ai-row"><label>AES 密钥</label><input type="password" id="ai-aes-key" placeholder="AI发消息用的AES密钥（与普通用户相同权限）" maxlength="64"></div>
+    <div class="ai-btn-row">
+      <button class="ai-save-btn" onclick="saveAdminAiConfig()">💾 保存</button>
+      <button class="ai-export-btn" onclick="exportAdminAiConfig()">📤 导出</button>
+      <button class="ai-import-btn" onclick="importAdminAiConfig()">📥 导入</button>
+    </div>
+  </div>
+</div>
+<div id="chat"></div>
+</div>
+
+<footer id="footer"></footer>
+
+<script>
+var esc = function(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+};
+var csrfToken = '';
+
+// ═══════ AI 模块（管理员端） ═══════
+// ═══════ 限流状态共享（与用户端共用 localStorage）═══════
+var RATE_LS_KEY = 'rate_limit_state_v1';
+function isRateLimited() {
+  try {
+    var state = JSON.parse(localStorage.getItem(RATE_LS_KEY) || '{"blockUntil":0,"whitelisted":false}');
+    if (state.whitelisted) return false;
+    return state.blockUntil > Date.now() / 1000;
+  } catch(e) { return false; }
+}
+function handleRateLimitResponse(response) {
+  var wl = response.headers.get('X-RateLimit-Whitelisted') === '1';
+  var bu = parseFloat(response.headers.get('X-RateLimit-BlockUntil') || '0');
+  try {
+    var state = JSON.parse(localStorage.getItem(RATE_LS_KEY) || '{"blockUntil":0,"whitelisted":false}');
+    state.whitelisted = wl;
+    state.blockUntil = bu || 0;
+    localStorage.setItem(RATE_LS_KEY, JSON.stringify(state));
+  } catch(e) {}
+}
+var LS_ADMIN_AI = 'qun_admin_ai_config_v1';
+var adminAiConfig = null;
+var adminAiLastCheckedIndex = -1;
+var adminAiPending = false;
+
+function loadAdminAiConfig() {
+  try {
+    var raw = localStorage.getItem(LS_ADMIN_AI);
+    adminAiConfig = raw ? JSON.parse(raw) : null;
+  } catch(e) { adminAiConfig = null; }
+  if (!adminAiConfig || !adminAiConfig.url || !adminAiConfig.key || !adminAiConfig.model) {
+    adminAiConfig = null;
+  }
+  var panel = document.getElementById('admin-ai-panel');
+  if (!panel) return;
+  document.getElementById('ai-url').value = (adminAiConfig && adminAiConfig.url) || '';
+  document.getElementById('ai-key').value = (adminAiConfig && adminAiConfig.key) || '';
+  document.getElementById('ai-model').value = (adminAiConfig && adminAiConfig.model) || '';
+  document.getElementById('ai-nick').value = (adminAiConfig && adminAiConfig.nick) || '';
+  document.getElementById('ai-prompt').value = (adminAiConfig && adminAiConfig.prompt) || '';
+  document.getElementById('ai-aes-key').value = (adminAiConfig && adminAiConfig.aes_key) || '';
+  document.getElementById('ai-enable').checked = !!(adminAiConfig && adminAiConfig.enabled);
+  toggleAiPanel();
+  adminAiLastCheckedIndex = -1;
+}
+
+function saveAdminAiConfig() {
+  var cfg = {
+    url: document.getElementById('ai-url').value.trim(),
+    key: document.getElementById('ai-key').value.trim(),
+    model: document.getElementById('ai-model').value.trim(),
+    nick: document.getElementById('ai-nick').value.trim() || '助手',
+    prompt: document.getElementById('ai-prompt').value.trim(),
+    enabled: document.getElementById('ai-enable').checked,
+    aes_key: document.getElementById('ai-aes-key').value.trim()
+  };
+  if (!cfg.url || !cfg.key || !cfg.model || !cfg.aes_key) {
+    alert('请填写 API 网址、Key、模型名称和 AES 密钥');
+    return false;
+  }
+  adminAiConfig = cfg;
+  localStorage.setItem(LS_ADMIN_AI, JSON.stringify(adminAiConfig));
+  adminAiLastCheckedIndex = -1;
+  alert('✅ AI 配置已保存');
+  return true;
+}
+
+function toggleAiPanel() {
+  var panel = document.getElementById('ai-settings');
+  if (!panel) return;
+  panel.style.display = document.getElementById('ai-enable').checked ? 'block' : 'none';
+}
+
+function exportAdminAiConfig() {
+  if (!adminAiConfig) { alert('请先保存配置'); return; }
+  var blob = new Blob([JSON.stringify(adminAiConfig, null, 2)], {type:'application/json'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'qun-admin-ai-config.json';
+  a.click();
+}
+
+function importAdminAiConfig() {
+  var input = document.createElement('input');
+  input.type = 'file'; input.accept = '.json';
+  input.onchange = function() {
+    var f = input.files[0]; if (!f) return;
+    var r = new FileReader();
+    r.onload = function() {
+      try {
+        var cfg = JSON.parse(r.result);
+        if (!cfg.url || !cfg.key || !cfg.model) { alert('配置文件不完整'); return; }
+        adminAiConfig = cfg;
+        localStorage.setItem(LS_ADMIN_AI, JSON.stringify(adminAiConfig));
+        document.getElementById('ai-url').value = cfg.url || '';
+        document.getElementById('ai-key').value = cfg.key || '';
+        document.getElementById('ai-model').value = cfg.model || '';
+        document.getElementById('ai-nick').value = cfg.nick || '';
+        document.getElementById('ai-prompt').value = cfg.prompt || '';
+        document.getElementById('ai-enable').checked = !!cfg.enabled;
+        toggleAiPanel();
+        adminAiLastCheckedIndex = -1;
+        alert('✅ 配置已导入');
+      } catch(e) { alert('导入失败：格式错误'); }
+    };
+    r.readAsText(f);
+  };
+  input.click();
+}
+
+async function adminCallAI(recentMessages) {
+  if (!adminAiConfig || !adminAiConfig.enabled) return null;
+  if (adminAiPending) return null;
+
+  var msgs = [];
+  if (adminAiConfig.prompt) msgs.push({ role: 'system', content: adminAiConfig.prompt });
+  msgs.push({ role: 'system', content: '你正在一个群聊中。以成员身份自然简短回复。如果不需要回复，输出一个字"无"。' });
+  for (var i = 0; i < recentMessages.length; i++) {
+    var m = recentMessages[i];
+    var role = (m.nick === ('AI:' + adminAiConfig.nick)) ? 'assistant' : 'user';
+    msgs.push({ role: role, content: '[' + m.nick + ']: ' + m.content });
+  }
+  adminAiPending = true;
+  try {
+    var resp = await fetch(adminAiConfig.url.replace(/\/+$/, '') + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminAiConfig.key },
+      body: JSON.stringify({ model: adminAiConfig.model, messages: msgs, max_tokens: 512, temperature: 0.7 })
+    });
+    if (!resp.ok) { console.error('Admin AI error:', resp.status); return null; }
+    var data = await resp.json();
+    var reply = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '').trim();
+    if (!reply || reply === '无' || reply === '无。') return null;
+    return reply;
+  } catch(e) { console.error('Admin AI failed:', e); return null; }
+  finally { adminAiPending = false; }
+}
+
+function adminAiCheckAndReply(data) {
+  if (!adminAiConfig || !adminAiConfig.enabled) return;
+  if (adminAiPending) return;
+  if (!adminAiConfig.aes_key) return;              // 未配置密钥不触发
+  if (isRateLimited()) return;                     // 被限流时不触发
+  if (!data || data.length === 0) return;
+
+  var maxIdx = -1;
+  for (var i = 0; i < data.length; i++) { if (data[i].index > maxIdx) maxIdx = data[i].index; }
+  if (adminAiLastCheckedIndex === -1) { adminAiLastCheckedIndex = maxIdx; return; }
+  if (maxIdx <= adminAiLastCheckedIndex) return;
+  adminAiLastCheckedIndex = maxIdx;
+
+  var aiNick = 'AI:' + (adminAiConfig.nick || '助手');
+  for (var j = data.length - 1; j >= 0; j--) {
+    if (data[j].state === 'disabled') continue;
+    if (data[j].nick === aiNick) return;            // 最新消息是自己，不回复
+    break;
+  }
+
+  var ctx = [];
+  for (var k = Math.max(0, data.length - 20); k < data.length; k++) {
+    if (data[k].state !== 'disabled') ctx.push(data[k]);
+  }
+
+  adminCallAI(ctx).then(function(reply) {
+    if (!reply || !adminAiConfig || !adminAiConfig.enabled) return;
+    if (isRateLimited()) return;                   // API 调用完成后再次检查
+    var nick = 'AI:' + (adminAiConfig.nick || '助手');
+    authFetch('/api/qun', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nick: nick, content: reply, key: adminAiConfig.aes_key })
+    }).then(function(r) {
+      handleRateLimitResponse(r);                  // 把后端限流头写进 localStorage
+      if (r.ok) loadMsgs();
+    });
+  });
+}
+
+var authFetch = function(url, opts) {
+  opts = opts || {};
+  var headers = opts.headers || {};
+  if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+  return fetch(url, Object.assign({credentials: 'same-origin'}, opts, {headers: headers}));
+};
+
+var stateLabels = {enabled:'✅ 启用', disabled:'🚫 禁用', forced:'📢 强制'};
+var stateClasses = {enabled:'state-enabled', disabled:'state-disabled', forced:'state-forced'};
+var stateOptions = {
+  enabled:  ['disabled', 'forced'],
+  disabled: ['enabled',  'forced'],
+  forced:   ['enabled',  'disabled']
+};
+// ── 消息缓存（增量更新） ──
+var messagesCache = [];
+var msgElements = {};
+
+// ── 管理员 RSA 私钥（用于解密举报身份） ──
+var adminJse = null;
+try {
+  var savedPriv = sessionStorage.getItem('admin_priv_key');
+  if (savedPriv) {
+    adminJse = new JSEncrypt();
+    adminJse.setPrivateKey(savedPriv);
+  }
+} catch(e) { console.error('私钥初始化失败', e); }
+
+function decryptIdentity(cipherText) {
+  if (!cipherText) return '（空）';
+  if (!adminJse) return '（私钥未加载）';
+  try {
+    var plain = adminJse.decrypt(cipherText);
+    return plain || '（解密失败，密文或密钥不匹配）';
+  } catch(e) {
+    return '（解密出错）';
+  }
+}
+
+// ── IP 解密（RSA 加密 / PLAIN 降级） ──
+function decryptIp(raw) {
+  if (!raw) return '—';
+  if (raw.startsWith('RSA:')) {
+    if (!adminJse) return '(私钥未加载)';
+    try {
+      var plain = adminJse.decrypt(raw.slice(4));
+      return plain || '(解密失败)';
+    } catch(e) {
+      return '(解密出错)';
+    }
+  }
+  if (raw.startsWith('PLAIN:')) {
+    return raw.slice(6);
+  }
+  // 纯明文兜底（历史数据）
+  return raw;
+}
+
+async function init() {
+  try {
+    var csrfRes = await fetch('/api/csrf', {credentials:'same-origin'});
+    csrfToken = (await csrfRes.json()).token;
+    var statusRes = await fetch('/api/admin/status', {credentials:'same-origin'});
+    var status = await statusRes.json();
+    if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
+      document.getElementById('login-wall').style.display = 'none';
+      document.getElementById('main-content').style.display = 'block';
+      loadPerm(); loadMsgs(); loadRule(); loadThreshold();loadAdminAiConfig();
+      fetch('/api/footer').then(function(r){return r.text();}).then(function(t){document.getElementById('footer').textContent=t;});
+    } else if (status.logged_in) {
+      await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
+      sessionStorage.clear(); location.reload();
+    } else {
+      document.getElementById('login-wall').style.display = 'block';
+    }
+  } catch(e) { console.error('Init:', e); }
+}
+init();
+
+async function saveRule() {
+  var rule = document.getElementById('rule-input').value.trim();
+  try {
+    var resp = await authFetch('/api/admin/qun/rule', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({rule:rule, force:false})
+    });
+
+    if (resp.ok) {
+      alert('✅ 规则已保存');
+      return;
+    }
+
+    var data = await resp.json();
+    if (data.dangerous) {
+      var confirmed = confirm(
+        '⚠️ 该正则包含危险模式（如嵌套量词），可能导致服务卡死。\n\n' +
+        '• 强烈建议修改为更安全的正则\n' +
+        '• 超时保护（1秒）仍然生效，但可能影响性能\n\n' +
+        '确认要强制保存吗？'
+      );
+      if (!confirmed) return;
+
+      resp = await authFetch('/api/admin/qun/rule', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({rule:rule, force:true})
+      });
+
+      if (resp.ok) {
+        alert('✅ 规则已保存');
+      } else {
+        var errText = await resp.text();
+        alert('保存失败：' + errText);
+      }
+    } else {
+      alert('保存失败：' + (data.error || '未知错误'));
+    }
+  } catch(e) {
+    alert('保存失败：' + e.message);
+  }
+}
+
+function loadPerm() {
+  fetch('/api/admin/qun/permission').then(function(r){return r.text();}).then(function(v){
+    var m = v === '1';
+    var btn = document.getElementById('mute-btn');
+    btn.textContent = m ? '🔓 解除禁言' : '🔒 开启禁言';
+    btn.className = m ? 'muted' : 'unmuted';
+  }).catch(function(){});
+}
+
+function toggleMute() {
+  var m = document.getElementById('mute-btn').textContent.indexOf('开启') !== -1;
+  authFetch('/api/admin/qun/permission', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'val='+(m?1:0)})
+    .then(function(r){if(r.ok){loadPerm();}else{alert('失败');}});
+}
+
+function loadRule() {
+  authFetch('/api/admin/qun/rule').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('rule-input').value = d.rule || '';
+  }).catch(function(){});
+}
+
+function applyRule() {
+  if (!confirm('确定对所有已启用的消息应用正则规则吗？匹配的消息将被禁用。')) return;
+  authFetch('/api/admin/qun/rule/apply', {method:'POST'})
+    .then(function(r){return r.json();}).then(function(d){
+      alert('✅ 已禁用 ' + d.disabled_count + ' 条消息');
+      loadMsgs();
+    }).catch(function(e){alert('失败: '+e);});
+}
+
+function loadThreshold() {
+  authFetch('/api/admin/qun/threshold').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('threshold-input').value = d.threshold || 5;
+  }).catch(function(){});
+}
+
+function saveThreshold() {
+  var val = document.getElementById('threshold-input').value;
+  authFetch('/api/admin/qun/threshold', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({threshold:val})})
+    .then(function(r){if(r.ok){alert('✅ 阈值已保存');}else{r.text().then(alert);}});
+}
+
+// ── 单条消息渲染（管理员版） ──
+function renderAdminMsg(m) {
+  var safeHtml = DOMPurify.sanitize(marked.parse(m.content));
+  var state = m.state || 'enabled';
+  var pinnedClass = m.pinned ? ' pinned' : '';
+  var stateClass = ' ' + state;
+  var pinBtnText = m.pinned ? '取消置底' : '📌 置底';
+  var pinBtnClass = m.pinned ? 'pin-btn is-pinned' : 'pin-btn';
+
+  var div = document.createElement('div');
+  div.className = 'msg' + pinnedClass + stateClass;
+
+  // 按钮行
+  var btnRow = document.createElement('div');
+  btnRow.className = 'btn-row';
+
+  var delBtn = document.createElement('button');
+  delBtn.className = 'del-btn'; delBtn.textContent = '删除';
+  delBtn.onclick = (function(idx){return function(){deleteMsg(idx);};})(m.index);
+  btnRow.appendChild(delBtn);
+
+  var pinBtn = document.createElement('button');
+  pinBtn.className = pinBtnClass; pinBtn.textContent = pinBtnText;
+  pinBtn.onclick = (function(idx){return function(){togglePin(idx);};})(m.index);
+  btnRow.appendChild(pinBtn);
+
+  var targets = stateOptions[state] || ['enabled','disabled'];
+  targets.forEach(function(target){
+    var sBtn = document.createElement('button');
+    sBtn.className = 'state-btn';
+    sBtn.textContent = stateLabels[target];
+    sBtn.onclick = (function(idx, t){return function(){setStateDirect(idx, t);};})(m.index, target);
+    btnRow.appendChild(sBtn);
+  });
+
+  div.appendChild(btnRow);
+
+  // 元数据
+  var metaDiv = document.createElement('div');
+  metaDiv.className = 'meta';
+  var stateBadge = document.createElement('span');
+  stateBadge.className = 'state-badge ' + (stateClasses[state] || '');
+  stateBadge.textContent = stateLabels[state] || state;
+  metaDiv.appendChild(stateBadge);
+
+  var pinLabel = document.createElement('span');
+  pinLabel.className = 'pin-label'; pinLabel.textContent = '📌 已置底';
+  metaDiv.appendChild(pinLabel);
+
+  metaDiv.appendChild(document.createTextNode('👤 ' + m.nick + ' | 🌐 ' + decryptIp(m.ip) + ' | 🕒 ' + m.time));
+  if (m.key_hash) {
+    metaDiv.appendChild(document.createTextNode(' | 🔑 ' + m.key_hash.substring(0, 12) + '…'));
+  }
+
+  var copyBtn = document.createElement('button');
+  copyBtn.className = 'copy-btn'; copyBtn.textContent = '复制'; copyBtn.dataset.copy = m.content;
+  if (m.nick && m.nick.indexOf('AI:') === 0) {
+    var aiBadge = document.createElement('span');
+    aiBadge.style.cssText = 'display:inline-block;font-size:10px;padding:1px 6px;border-radius:8px;background:#f3e5f5;color:#7B1FA2;margin-left:6px;font-weight:bold';
+    aiBadge.textContent = '🤖AI';
+    metaDiv.appendChild(aiBadge);
+  }
+  metaDiv.appendChild(copyBtn);
+  div.appendChild(metaDiv);
+
+  // 举报详情
+  if (m.reports && m.reports.length > 0) {
+    var reportDiv = document.createElement('div');
+    reportDiv.style.cssText = 'margin:6px 0;padding:8px;background:#fff5f5;border-radius:4px;font-size:11px';
+    reportDiv.innerHTML = '<strong style="color:#E91E63">⚠️ 举报记录（' + m.reports.length + ' 次）：</strong>';
+    m.reports.forEach(function(r, ri){
+      var decryptedId = decryptIdentity(r.encrypted || '');
+      var shortCipher = esc((r.encrypted || '').slice(-12));
+      reportDiv.innerHTML +=
+        '<div class="report-detail">' +
+        '#' + (ri+1) + ' 🕒 ' + esc(r.time) +
+        ' | IP-SHA512: <code>' + esc((r.ip_hash || '').substring(0,16)) + '…</code>' +
+        ' | 👤 身份: <span class="decrypted-id">' + esc(decryptedId) + '</span>' +
+        ' <span style="color:#aaa">(密文尾:' + shortCipher + ')</span>' +
+        '</div>';
+    });
+    div.appendChild(reportDiv);
+  }
+
+  // 内容
+  var contentDiv = document.createElement('div');
+  contentDiv.className = 'md-content';
+  contentDiv.innerHTML = safeHtml;
+  div.appendChild(contentDiv);
+
+  return div;
+}
+function loadMsgs() {
+  authFetch('/api/admin/qun').then(function(r){return r.json();}).then(function(data){
+    var c = document.getElementById('chat');
+
+    var oldIdx = {};
+    messagesCache.forEach(function(m){ oldIdx[m.index] = m; });
+    var newIdx = {};
+    data.forEach(function(m){ newIdx[m.index] = m; });
+
+    // ① 删除
+    messagesCache.forEach(function(oldMsg){
+      if (!newIdx[oldMsg.index]) {
+        var el = msgElements[oldMsg.index];
+        if (el && el.parentNode) {
+          el.parentNode.removeChild(el);
+        }
+        delete msgElements[oldMsg.index];
+      }
+    });
+
+    // ② 新增 & 更新
+    data.forEach(function(m, idx){
+      var oldMsg = oldIdx[m.index];
+      var existingEl = msgElements[m.index];
+
+      if (!oldMsg) {
+        // 全新
+        var div = renderAdminMsg(m);
+        msgElements[m.index] = div;
+        var refNode = c.children[idx];
+        if (refNode) {
+          c.insertBefore(div, refNode);
+        } else {
+          c.appendChild(div);
+        }
+      } else if (
+        oldMsg.state !== m.state ||
+        oldMsg.pinned !== m.pinned ||
+        oldMsg.content !== m.content ||
+        oldMsg.nick !== m.nick ||
+        oldMsg.time !== m.time ||
+        oldMsg.ip !== m.ip ||
+        JSON.stringify(oldMsg.reports) !== JSON.stringify(m.reports)
+      ) {
+        // 变更 → 替换
+        var newDiv = renderAdminMsg(m);
+        msgElements[m.index] = newDiv;
+        if (existingEl && existingEl.parentNode) {
+          existingEl.parentNode.replaceChild(newDiv, existingEl);
+        } else {
+          c.appendChild(newDiv);
+        }
+      } else if (existingEl && c.children[idx] !== existingEl) {
+        // 顺序变化
+        var refNode = c.children[idx];
+        if (refNode && refNode !== existingEl) {
+          c.insertBefore(existingEl, refNode);
+        }
+      }
+    });
+
+    // ③ 更新缓存
+    messagesCache = data;
+    window.__checkUnread(data);
+    adminAiCheckAndReply(data);
+  }).catch(function(e){console.error('加载群聊失败:', e);});
+}
+function deleteMsg(index) {
+  if (!confirm('确定删除此消息？')) return;
+  authFetch('/api/admin/qun/delete/' + index, {method:'POST'}).then(function(){loadMsgs();});
+}
+
+function togglePin(index) {
+  authFetch('/api/admin/qun/pin/' + index, {method:'POST'}).then(function(r){if(r.ok){loadMsgs();}else{alert('操作失败');}});
+}
+
+function setStateDirect(index, newState) {
+  authFetch('/api/admin/qun/state/' + index, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({state: newState})
+  }).then(function(r){
+    if(r.ok){loadMsgs();}else{r.text().then(alert);}
+  });
+}
+
+function insertAnnounceLink() {
+  var url = prompt('请输入文件URL:');
+  if (!url) return;
+  var name = prompt('请输入显示名称:', url.split('/').pop() || '文件') || '文件';
+  var ext = url.split('.').pop().toLowerCase();
+  var md = ['jpg','jpeg','png','gif','webp','svg'].indexOf(ext) !== -1 ? '![' + name + '](' + url + ')' : '[📎 ' + name + '](' + url + ')';
+  var ta = document.getElementById('ann-content'); ta.value += (ta.value ? '\n' : '') + md; ta.focus();
+}
+
+function sendAnnounce() {
+  var c = document.getElementById('ann-content').value.trim();
+  if (!c) { alert('公告内容不能为空'); return; }
+  authFetch('/api/admin/qun/announce', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:c})})
+    .then(function(r){if(r.ok){alert('公告已发送'); document.getElementById('ann-content').value=''; loadMsgs();}else{alert('失败');}});
+}
+
+setInterval(loadMsgs, 2000);
+// ═══════ 未读消息计数（管理员版）═══════
+(function(){
+  var LS_KEY = 'qun_admin_last_seen_v3';
+  var badge = null;
+  var dismissed = false;
+  var firstUnreadIdx = -1;
+
+  function getLastSeen() {
+    var v = localStorage.getItem(LS_KEY);
+    return v ? parseInt(v, 10) : 0;
+  }
+
+  function saveLastSeen() {
+    localStorage.setItem(LS_KEY, String(Date.now()));
+  }
+
+  // 刚打开页面时记录
+  saveLastSeen();
+
+  // 每5秒更新
+  setInterval(saveLastSeen, 5000);
+
+  // 关闭/刷新时保存
+  window.addEventListener('beforeunload', saveLastSeen);
+
+  function parseMsgTime(s) {
+    if (!s) return 0;
+    var t = Date.parse(s);
+    if (!isNaN(t)) return t;
+    t = Date.parse(s.replace(' ', 'T'));
+    if (!isNaN(t)) return t;
+    return 0;
+  }
+
+  function computeUnread(data) {
+    var lastSeen = getLastSeen();
+    if (!lastSeen) return { count: 0, idx: -1 };
+
+    var count = 0, firstIdx = -1;
+    for (var i = 0; i < data.length; i++) {
+      var msgTs = parseMsgTime(data[i].time);
+      if (msgTs > lastSeen) {
+        if (firstIdx === -1) firstIdx = i;
+        count++;
+      }
+    }
+    return { count: count, idx: firstIdx };
+  }
+
+  function showBadge(info) {
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.id = 'qun-admin-unread-badge';
+      badge.style.cssText = [
+        'position:fixed;bottom:80px;right:20px;',
+        'background:#FF5722;color:#fff;',
+        'padding:12px 22px;border-radius:24px;',
+        'font-size:15px;font-weight:bold;cursor:pointer;',
+        'z-index:9999;display:none;',
+        'box-shadow:0 4px 16px rgba(255,87,34,0.5);',
+        'border:none;transition:all 0.2s;',
+        'font-family:sans-serif;'
+      ].join('');
+      badge.onmouseover = function(){ this.style.transform = 'scale(1.05)'; };
+      badge.onmouseout  = function(){ this.style.transform = 'scale(1)'; };
+      badge.onclick = function() {
+        var chat = document.getElementById('chat');
+        if (firstUnreadIdx >= 0 && chat && chat.children[firstUnreadIdx]) {
+          chat.children[firstUnreadIdx].scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        badge.style.display = 'none';
+        dismissed = true;
+      };
+      document.body.appendChild(badge);
+    }
+
+    if (info.count >= 5 && !dismissed) {
+      badge.textContent = '📬 ' + info.count + ' 条未读消息 ↓';
+      badge.style.display = 'block';
+      firstUnreadIdx = info.idx;
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  window.__checkUnread = function(data) {
+    if (!dismissed) {
+      showBadge(computeUnread(data));
+    }
+  };
+})();
+</script>
+</body>
+</html>
