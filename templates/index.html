@@ -53,7 +53,7 @@
   <p style="color:#666;margin:0 0 10px">6.私聊界面依然采用同样的端到端加密，管理员无法得知用户真实发送的内容，对用户私聊内发送的任何内容，本网站所有者不负任何责任</p>
   <p style="color:#666;margin:0 0 10px">7.本网站需要使用cookie来保存您的昵称和密钥，继续使用本网站代表允许本网站使用cookie。</p>
 
-  <form id="form" class="box">
+  <form id="form" class="box" onsubmit="return false">
     <input id="nick" placeholder="昵称（≤32字）" maxlength="32" required>
     <div style="display:flex;gap:8px;align-items:center">
       <input id="aesKey" placeholder="本地AES密钥（≤64字符）" maxlength="64" required style="flex:1;padding:8px">
@@ -71,7 +71,7 @@
   <div id="modal">
     <div class="modal-box">
       <p>提交信件代表您同意我们使用该信件进行处理，确认提交此信件吗？</p>
-      <button class="rate-limited-btn" onclick="submit()">确认</button>
+      <button class="rate-limited-btn" onclick="handleSubmit()">确认</button>
       <button onclick="closeModal()" style="margin-left:10px;background:#ccc">取消</button>
     </div>
   </div>
@@ -126,24 +126,41 @@ function setLS(k, v){ localStorage.setItem(k, v); }
 
   document.getElementById('nick').value = getLS(LS_NICK);
   document.getElementById('aesKey').value = getLS(LS_AES);
-  fetch('/api/footer').then(function(r){return r.text();}).then(function(t){
-    document.getElementById('footer').textContent = t;
-  });
+function loadFooter(retries, delay) {
+  if(retries === undefined) retries = 3;
+  if(delay === undefined) delay = 1000;
+  fetch('/api/footer')
+    .then(function(r){return r.text();})
+    .then(function(t){
+      if(t) document.getElementById('footer').textContent = t;
+    })
+    .catch(function(){
+      if(retries > 0){
+        setTimeout(function(){ loadFooter(retries - 1, delay * 2); }, delay);
+      }
+      // 重试用完 → 静默失败，不显示任何文字
+    });
+}
+loadFooter();
 
-  function showModal() { document.getElementById('modal').style.display = 'flex'; }
-  function closeModal() { document.getElementById('modal').style.display = 'none'; }
-
-  function showReplyModal() {
+function showModal() {
+  try { document.getElementById('modal').style.display = 'flex'; } catch(e){}
+}
+function closeModal() {
+  try { document.getElementById('modal').style.display = 'none'; } catch(e){}
+}
+function showReplyModal() {
+  try {
     document.getElementById('reply-modal').style.display = 'flex';
     document.getElementById('check-nick').value = getLS(LS_NICK);
     document.getElementById('check-key').value = getLS(LS_AES);
     document.getElementById('reply-box').style.display = 'none';
     document.getElementById('reply-box').innerHTML = '';
-  }
-
-  function closeReplyModal() {
-    document.getElementById('reply-modal').style.display = 'none';
-  }
+  } catch(e){}
+}
+function closeReplyModal() {
+  try { document.getElementById('reply-modal').style.display = 'none'; } catch(e){}
+}
 
   function switchQueryTab(tab) {
     currentQueryTab = tab;
@@ -187,7 +204,7 @@ function setLS(k, v){ localStorage.setItem(k, v); }
   }
 
   /* ========== v2 提交：不再携带 IP 与时间，仅提交 AES(nick|content) ========== */
-function submit() {
+function handleSubmit() {
     var nick = document.getElementById('nick').value.trim();
     var keyIn = document.getElementById('aesKey').value.trim();
     var msg = document.getElementById('msg').value;
@@ -227,47 +244,7 @@ function submit() {
     });
   }
 
-  function checkReply() {
-    var nick = document.getElementById('check-nick').value.trim();
-    var keyIn = document.getElementById('check-key').value.trim();
-    if (!nick || !keyIn) { alert('请填写完整'); return; }
-
-    var box = document.getElementById('reply-box');
-    box.innerHTML = '<p style="text-align:center;color:#888">查询中...</p>';
-    box.style.display = 'block';
-
-    fetch('/api/replies').then(function(r){return r.json();}).then(function(reps){
-      var found = [];
-      var key32 = deriveAESKey(keyIn);
-
-      reps.forEach(function(r){
-        try {
-          var d = CryptoJS.AES.decrypt(r.aes_msg, key32, {
-            iv: CryptoJS.enc.Base64.parse(r.iv),
-            mode: CryptoJS.mode.CBC,
-            padding: CryptoJS.pad.Pkcs7
-          }).toString(CryptoJS.enc.Utf8);
-                if (d && d.indexOf(nick + ' | ') === 0) {
-                        var parts = d.split(' | ');
-                        // 回复格式：nick | 时间 | 内容...
-                        var replyTime = parts[1] || '未知时间';
-                        var replyContent = parts.slice(2).join(' | ');
-                        found.push({
-                            time: replyTime,
-                            content: replyContent,
-                            seq: r.seq
-                        });
-                      }
-          }
-        } catch(e) {}
-      });
-
-      renderResults(box, found, '暂无管理员回复');
-    }).catch(function(){
-      box.innerHTML = '<p style="color:red;text-align:center">获取失败</p>';
-    });
-  }
-
+checkReply
   /* ========== v2 查询：第二行是 AES(nick|content)，不再单独有 meta_msg ========== */
   function checkMyMessages() {
     var nick = document.getElementById('check-nick').value.trim();
