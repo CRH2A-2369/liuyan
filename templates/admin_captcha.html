@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>验证码管理</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f5f5; color: #333; min-height: 100vh;
+    }
+    .header {
+      background: linear-gradient(135deg, #43a047 0%, #66bb6a 100%);
+      color: #fff; padding: 20px 24px; text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .header h1 { font-size: 22px; font-weight: 600; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+
+    .card {
+      background: #fff; border-radius: 10px; padding: 20px;
+      margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .card h3 { font-size: 16px; margin-bottom: 12px; color: #555; }
+
+    .form-row {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 14px; flex-wrap: wrap;
+    }
+    .form-row label { font-size: 14px; min-width: 80px; color: #555; }
+    .form-row input[type="number"] {
+      flex: 1; padding: 8px 12px; border: 1px solid #ddd;
+      border-radius: 6px; font-size: 15px; max-width: 120px;
+    }
+    .form-row .unit { font-size: 13px; color: #888; }
+
+    .toggle-row {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 14px;
+    }
+    .toggle-row label { font-size: 14px; cursor: pointer; }
+    .toggle { position: relative; width: 44px; height: 24px; cursor: pointer; }
+    .toggle input { display: none; }
+    .toggle .slider {
+      position: absolute; inset: 0; background: #ccc; border-radius: 12px;
+      transition: 0.3s;
+    }
+    .toggle .slider::before {
+      content: ''; position: absolute; width: 20px; height: 20px;
+      left: 2px; bottom: 2px; background: #fff; border-radius: 50%;
+      transition: 0.3s;
+    }
+    .toggle input:checked + .slider { background: #4CAF50; }
+    .toggle input:checked + .slider::before { transform: translateX(20px); }
+
+    .btn {
+      padding: 10px 24px; border: none; border-radius: 6px;
+      font-size: 15px; cursor: pointer; transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #4CAF50; color: #fff; }
+    .btn-danger { background: #f44336; color: #fff; }
+    .btn-gray { background: #9E9E9E; color: #fff; }
+
+    .stat-row {
+      display: flex; justify-content: space-between; padding: 8px 0;
+      border-bottom: 1px solid #f0f0f0; font-size: 14px;
+    }
+    .stat-row .label { color: #666; }
+    .stat-row .value { font-weight: bold; color: #333; }
+
+    .status-msg {
+      padding: 10px 14px; border-radius: 6px; margin-bottom: 12px;
+      font-size: 13px; display: none;
+    }
+    .status-msg.success { background: #e8f5e9; color: #2e7d32; display: block; }
+    .status-msg.error { background: #fce4ec; color: #c62828; display: block; }
+
+    .top-bar {
+      background: #fff; border-bottom: 1px solid #eee;
+      padding: 0 16px; height: 44px;
+      display: flex; align-items: center; gap: 16px;
+    }
+    .top-bar a { color: #43a047; text-decoration: none; font-size: 13px; }
+
+    .btn-row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <!-- ★ 登录墙 -->
+  <div id="login-wall" style="text-align:center;margin-top:60px">
+    <h2>🔒 请先通过管理员验证</h2>
+    <p><a href="/admin">→ 前往管理员登录</a></p>
+  </div>
+
+  <!-- ★ 主内容 -->
+  <div id="main-content" style="display:none">
+    <div class="header"><h1>🤖 验证码管理</h1></div>
+
+    <div class="top-bar">
+      <a href="/admin">← 管理面板</a>
+      <a href="/admin/qun">💬 群聊</a>
+      <a href="/admin/vote">🗳️ 投票</a>
+      <a href="/admin/ip">🌐 IP</a>
+      <a href="/admin/notice">📢 公告</a>
+      <a href="/admin/chat">私聊</a>
+    </div>
+
+    <div class="container">
+      <div id="statusMsg" class="status-msg"></div>
+
+      <!-- 配置卡片 -->
+      <div class="card">
+        <h3>⚙️ 验证码配置</h3>
+
+        <div class="toggle-row">
+          <label class="toggle">
+            <input type="checkbox" id="captcha-enabled">
+            <span class="slider"></span>
+          </label>
+          <label for="captcha-enabled">启用人机验证</label>
+        </div>
+
+        <div class="form-row">
+          <label>有效期</label>
+          <input type="number" id="captcha-duration" value="30" min="1" max="1440">
+          <span class="unit">分钟（1~1440）</span>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button>
+        </div>
+      </div>
+
+      <!-- 统计卡片 -->
+      <div class="card">
+        <h3>📊 当前状态</h3>
+        <div class="stat-row"><span class="label">已验证 IP 数</span><span class="value" id="stat-active">加载中...</span></div>
+        <div class="stat-row"><span class="label">白名单 IP 数</span><span class="value" id="stat-whitelist">加载中...</span></div>
+        <div class="stat-row"><span class="label">是否启用</span><span class="value" id="stat-enabled">加载中...</span></div>
+        <div class="stat-row"><span class="label">当前有效期</span><span class="value" id="stat-duration">加载中...</span></div>
+
+        <div class="btn-row">
+          <button class="btn btn-danger" onclick="clearAll()">🗑 清空所有已验证记录</button>
+          <button class="btn btn-gray" onclick="refreshStats()">🔄 刷新</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    var csrfToken = '';
+
+    var authFetch = function(url, opts) {
+      opts = opts || {};
+      var headers = opts.headers || {};
+      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      return fetch(url, Object.assign({credentials: 'same-origin'}, opts, {headers: headers}));
+    };
+
+    async function init() {
+      try {
+        var csrfRes = await fetch('/api/csrf', {credentials: 'same-origin'});
+        csrfToken = (await csrfRes.json()).token;
+
+        var statusRes = await fetch('/api/admin/status', {credentials: 'same-origin'});
+        var status = await statusRes.json();
+
+        if (status.logged_in && status.has_key) {
+          document.getElementById('login-wall').style.display = 'none';
+          document.getElementById('main-content').style.display = 'block';
+          refreshStats();
+        } else if (status.logged_in) {
+          await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
+          sessionStorage.clear(); location.reload();
+        }
+      } catch(e) { console.error('Init:', e); }
+    }
+    init();
+
+    function showStatus(msg, type) {
+      var el = document.getElementById('statusMsg');
+      el.textContent = msg;
+      el.className = 'status-msg ' + type;
+      setTimeout(function() { el.className = 'status-msg'; }, 3000);
+    }
+
+    async function refreshStats() {
+      try {
+        var res = await authFetch('/api/admin/captcha/config');
+        var data = await res.json();
+        var cfg = data.config || {};
+
+        document.getElementById('captcha-enabled').checked = !!cfg.enabled;
+        document.getElementById('captcha-duration').value = cfg.duration_minutes || 30;
+
+        document.getElementById('stat-active').textContent = data.active_ips || 0;
+        document.getElementById('stat-whitelist').textContent = '...';
+        document.getElementById('stat-enabled').textContent = cfg.enabled ? '✅ 已启用' : '❌ 已关闭';
+        document.getElementById('stat-duration').textContent = (cfg.duration_minutes || 30) + ' 分钟';
+
+        // 加载白名单数量
+        var wlRes = await authFetch('/api/whitelist');
+        var wlData = await wlRes.json();
+        document.getElementById('stat-whitelist').textContent = (wlData || []).length;
+
+      } catch(e) {
+        showStatus('加载失败: ' + e.message, 'error');
+      }
+    }
+
+    async function saveConfig() {
+      var enabled = document.getElementById('captcha-enabled').checked;
+      var duration = parseInt(document.getElementById('captcha-duration').value) || 30;
+
+      if (duration < 1 || duration > 1440) {
+        showStatus('有效期必须在 1~1440 分钟之间', 'error');
+        return;
+      }
+
+      try {
+        var res = await authFetch('/api/admin/captcha/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: enabled, duration_minutes: duration })
+        });
+        var data = await res.json();
+        if (data.ok) {
+          showStatus('✅ 配置已保存', 'success');
+          refreshStats();
+        } else {
+          showStatus(data.error || '保存失败', 'error');
+        }
+      } catch(e) {
+        showStatus('网络错误: ' + e.message, 'error');
+      }
+    }
+
+    async function clearAll() {
+      if (!confirm('确定清空所有已验证 IP 记录？所有未验证用户需要重新完成验证码。')) return;
+      try {
+        var res = await authFetch('/api/admin/captcha/clear', { method: 'POST' });
+        var data = await res.json();
+        if (data.ok) {
+          showStatus('✅ 已清空', 'success');
+          refreshStats();
+        }
+      } catch(e) {
+        showStatus('操作失败: ' + e.message, 'error');
+      }
+    }
+  </script>
+</body>
+</html>
