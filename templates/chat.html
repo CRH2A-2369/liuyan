@@ -136,6 +136,12 @@ function handleCaptchaRedirect(res, saveStateFn) {
   }
   return false; // 正常响应
 }
+// ── CSRF Token 获取 ──
+var csrfToken = '';
+fetch('/api/csrf')
+  .then(r => r.json())
+  .then(data => { csrfToken = data.token; })
+  .catch(() => console.warn('CSRF Token 获取失败'));
 // ═══════════════════════════════════════════
 // 工具函数
 // ═══════════════════════════════════════════
@@ -443,7 +449,7 @@ function sendChatMsg(){
 
   fetch('/api/chat/send', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json','X-CSRF-Token': csrfToken},
     body: JSON.stringify({
       sender_pub: id.pub.replace(/[\r\n]+/g,''),
       receiver_hash: recvHash,
@@ -1039,7 +1045,7 @@ function reportMessage(filename, wrappedKeyB64, ivB64, slotIdxStr){
 
   fetch('/api/chat/report', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json','X-CSRF-Token': csrfToken},
     body: JSON.stringify({
       filename: filename,
       reporter_pub: id.pub.replace(/[\r\n]+/g,''),
@@ -1083,7 +1089,7 @@ async function revokeMessage(filename, slotIdxStr){
       // ★ 第一步：请求挑战（POST /api/chat/revoke/challenge）
       var challRes = await fetch('/api/chat/revoke/challenge', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json','X-CSRF-Token': csrfToken},
         body: JSON.stringify({
           filename: filename,
           sender_pub: normalizePem(id.pub)
@@ -1116,7 +1122,7 @@ async function revokeMessage(filename, slotIdxStr){
       // ★ 第三步：提交答案 + token，完成撤回（POST /api/chat/revoke）
       var revokeRes = await fetch('/api/chat/revoke', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: {'Content-Type': 'application/json','X-CSRF-Token': csrfToken},
         body: JSON.stringify({
           filename: filename,
           answer: answer,
