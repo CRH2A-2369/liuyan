@@ -5,44 +5,36 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>人机验证</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    * { margin:0; padding:0; box-sizing:border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: rgba(0,0,0,0.5);
       display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; margin: 0;
+      min-height: 100vh;
     }
     .captcha-box {
       background: #fff; border-radius: 12px; padding: 32px 28px 28px;
-      max-width: 380px; width: 90%; text-align: center;
+      max-width: 420px; width: 90%; text-align: center;
       box-shadow: 0 8px 32px rgba(0,0,0,0.3);
     }
-    .captcha-box h2 { font-size: 18px; color: #333; margin-bottom: 6px; }
+    .captcha-box h2 { font-size: 18px; color: #333; margin-bottom: 8px; }
     .captcha-box p.hint { font-size: 13px; color: #888; margin-bottom: 16px; }
-
-    .question-box {
-      background: #f5f5f5; border-radius: 10px; padding: 24px;
-      margin-bottom: 16px; font-size: 28px; font-weight: bold;
-      color: #333; letter-spacing: 2px;
-      border: 2px solid #e0e0e0;
-      user-select: none;
+    #captcha-image {
+      width: 100%; max-width: 320px; height: auto;
+      border: 2px solid #e0e0e0; border-radius: 8px;
+      margin-bottom: 16px;
+      background: #f5f5f5;
     }
-    .question-box.loading {
-      font-size: 16px; color: #888; font-weight: normal;
-    }
-
     input {
       width: 100%; padding: 12px 14px; font-size: 18px;
       border: 2px solid #ddd; border-radius: 8px;
       text-align: center; outline: none;
-      transition: border-color 0.2s;
-      letter-spacing: 4px;
+      letter-spacing: 4px; margin-bottom: 12px;
     }
     input:focus { border-color: #673AB7; }
     input.error { border-color: #f44336; }
-
     button {
-      width: 100%; padding: 12px; margin-top: 12px;
+      width: 100%; padding: 12px; margin-top: 4px;
       font-size: 16px; font-weight: 600;
       background: #673AB7; color: #fff;
       border: none; border-radius: 8px; cursor: pointer;
@@ -50,50 +42,41 @@
     }
     button:hover { opacity: 0.9; }
     button:disabled { background: #ccc; cursor: not-allowed; }
-
-    .error-msg {
-      color: #f44336; font-size: 13px; margin-top: 8px; display: none;
-    }
-    .success-msg {
-      color: #4CAF50; font-size: 13px; margin-top: 8px; display: none;
-    }
-    .countdown {
-      font-size: 12px; color: #aaa; margin-top: 10px;
-    }
+    .error-msg { color: #f44336; font-size: 13px; margin-top: 8px; display: none; }
+    .success-msg { color: #4CAF50; font-size: 13px; margin-top: 8px; display: none; }
     .refresh-link {
       display: block; margin-top: 8px; font-size: 13px;
       color: #2196F3; cursor: pointer; text-decoration: underline;
+    }
+    .countdown {
+      font-size: 12px; color: #aaa; margin-top: 10px;
     }
   </style>
 </head>
 <body>
   <div class="captcha-box">
     <h2>🤖 人机验证</h2>
-    <p class="hint">请完成下面的算式以验证您是真人</p>
-
-    <div class="question-box" id="questionDisplay">加载中...</div>
-
-    <input type="text" id="answerInput" placeholder="输入计算结果" autocomplete="off" inputmode="numeric" pattern="[0-9]*" maxlength="5">
-
+    <p class="hint">请输入图片中显示的字符</p>
+    <img id="captcha-image" src="" alt="验证码">
+    <input type="text" id="answerInput" placeholder="输入验证码" autocomplete="off" inputmode="text" maxlength="10">
     <div class="error-msg" id="errorMsg"></div>
     <div class="success-msg" id="successMsg">✅ 验证通过！</div>
-
     <button id="submitBtn" onclick="verifyCaptcha()">确认</button>
-
     <div class="countdown" id="countdown"></div>
-    <a class="refresh-link" onclick="loadChallenge()">🔄 换一题</a>
+    <a class="refresh-link" onclick="loadChallenge()">🔄 换一张</a>
   </div>
 
   <script>
     var challengeId = null;
     var expiresAt = 0;
     var timer = null;
+    var imageEl = document.getElementById('captcha-image');
 
     function updateCountdown() {
-      var el = document.getElementById('countdown');
       var remaining = Math.max(0, Math.ceil(expiresAt - Date.now() / 1000));
+      var el = document.getElementById('countdown');
       if (remaining <= 0) {
-        el.textContent = '⏰ 已过期，请换一题';
+        el.textContent = '⏰ 已过期，请刷新';
         document.getElementById('submitBtn').disabled = true;
         loadChallenge();
       } else {
@@ -102,19 +85,17 @@
     }
 
     async function loadChallenge() {
-      var qEl = document.getElementById('questionDisplay');
       var btn = document.getElementById('submitBtn');
       var input = document.getElementById('answerInput');
       var errEl = document.getElementById('errorMsg');
       var sucEl = document.getElementById('successMsg');
 
-      qEl.textContent = '加载中...';
-      qEl.className = 'question-box loading';
       btn.disabled = true;
       input.value = '';
       input.className = '';
       errEl.style.display = 'none';
       sucEl.style.display = 'none';
+      imageEl.src = '';
 
       if (timer) clearInterval(timer);
 
@@ -123,19 +104,20 @@
         var data = await res.json();
 
         if (!data.captcha_needed) {
-          // 不需要验证码 → 通知父窗口
-          window.parent.postMessage({
-            type: 'captchaCompleted',
-            success: true
-          }, '*');
+          var urlParams = new URLSearchParams(window.location.search);
+          var redirectUrl = urlParams.get('redirect');
+          if (redirectUrl) {
+            window.location.href = decodeURIComponent(redirectUrl);
+            return;
+          }
+          window.parent.postMessage({ type: 'captchaCompleted', success: true }, '*');
           return;
         }
 
         challengeId = data.challenge_id;
         expiresAt = Date.now() / 1000 + data.expires_in;
 
-        qEl.textContent = data.question;
-        qEl.className = 'question-box';
+        imageEl.src = '/api/captcha.gif?id=' + challengeId + '&t=' + Date.now();
         btn.disabled = false;
         input.focus();
 
@@ -143,8 +125,8 @@
         updateCountdown();
 
       } catch(e) {
-        qEl.textContent = '❌ 加载失败';
-        qEl.className = 'question-box loading';
+        errEl.textContent = '加载失败，请刷新';
+        errEl.style.display = 'block';
       }
     }
 
@@ -155,7 +137,11 @@
       var sucEl = document.getElementById('successMsg');
       var input = document.getElementById('answerInput');
 
-      if (!answer) { errEl.textContent = '请输入计算结果'; errEl.style.display = 'block'; return; }
+      if (!answer) {
+        errEl.textContent = '请输入验证码';
+        errEl.style.display = 'block';
+        return;
+      }
 
       btn.disabled = true;
       btn.textContent = '验证中...';
@@ -166,27 +152,26 @@
         var res = await fetch('/api/captcha/verify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            challenge_id: challengeId,
-            answer: answer
-          })
+          body: JSON.stringify({ challenge_id: challengeId, answer: answer })
         });
         var data = await res.json();
 
         if (data.success) {
           sucEl.style.display = 'block';
           btn.textContent = '✅ 验证通过';
-
           if (timer) clearInterval(timer);
 
-          // 通知父窗口验证成功
-          setTimeout(function() {
-            window.parent.postMessage({
-              type: 'captchaCompleted',
-              success: true,
-              expires_at: data.expires_at
-            }, '*');
-          }, 500);
+          var urlParams = new URLSearchParams(window.location.search);
+          var redirectUrl = urlParams.get('redirect');
+          if (redirectUrl) {
+            setTimeout(function() {
+              window.location.href = decodeURIComponent(redirectUrl);
+            }, 800);
+          } else {
+            setTimeout(function() {
+              window.parent.postMessage({ type: 'captchaCompleted', success: true }, '*');
+            }, 500);
+          }
         } else {
           errEl.textContent = data.error || '验证失败';
           errEl.style.display = 'block';
@@ -195,8 +180,6 @@
           input.focus();
           btn.disabled = false;
           btn.textContent = '确认';
-
-          // 自动刷新题目
           setTimeout(loadChallenge, 1500);
         }
       } catch(e) {
@@ -211,7 +194,6 @@
       if (e.key === 'Enter') verifyCaptcha();
     });
 
-    // 加载挑战
     loadChallenge();
   </script>
 </body>

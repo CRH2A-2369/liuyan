@@ -5,7 +5,9 @@
   <title>投票</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js" integrity="sha512-E8QSvWZ0eCLGk4km3hxSsNmGWbLtSCSUcewDQPQWZF6pEU8GlT8a5fF32wOl1i8ftdMhssTrF/OhyGWwonTcXA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- ★ 新增：DOMPurify（渲染 Markdown 需要） -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
   <style>
     *{box-sizing:border-box}
     body{font-family:sans-serif;max-width:620px;margin:40px auto;padding:20px;color:#333}
@@ -112,6 +114,18 @@
 <footer id="footer"></footer>
 
 <script>
+// ★ 验证码拦截：如果服务器返回 418，保存状态并跳转
+function handleCaptchaRedirect(res, saveStateFn) {
+  if (res.status === 418) {
+    // 保存当前表单状态（可选）
+    if (typeof saveStateFn === 'function') saveStateFn();
+    var returnUrl = encodeURIComponent(window.location.href);
+    window.location.href = '/captcha?redirect=' + returnUrl;
+    return true; // 触发了验证码跳转
+  }
+  return false; // 正常响应
+}
+
 var esc = function(s){ return String(s || '').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); };
 function parseMeta(metaStr) {
   var parts = (metaStr||'').split(' | ');
@@ -673,11 +687,27 @@ function confirmEdit() {
       aes_msg: msgEnc.replace(/[\r\n\s]+/g, ''),
       original_key_hash: originalKeyHash
     };
+
+    // ★ 保存待提交数据，以便验证码跳回后恢复
+    sessionStorage.setItem('pending_edit_poll', currentEditingPollId);
+    sessionStorage.setItem('pending_edit_seq', mv.seq);
+    sessionStorage.setItem('pending_edit_body', JSON.stringify(body));
+    sessionStorage.setItem('pending_edit_iv', CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''));
+    sessionStorage.setItem('pending_edit_enc', msgEnc.replace(/[\r\n\s]+/g, ''));
+    sessionStorage.setItem('pending_edit_key', cleanRsaKey);
+
     fetch('/api/votes/'+encodeURIComponent(currentEditingPollId)+'/'+mv.seq, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
       body: JSON.stringify(body)
     }).then(function(res){
+      // ★ 验证码拦截：如果服务器返回 418，跳转到验证码页面
+      if (res.status === 418) {
+        var returnUrl = encodeURIComponent(window.location.href);
+        window.location.href = '/captcha?redirect=' + returnUrl;
+        return;
+      }
+
       window.handleRateLimitResponse(res);
       if (res.ok) {
         mv.iv = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, '');
@@ -685,6 +715,15 @@ function confirmEdit() {
         mv.rsa_key = cleanRsaKey;
         mv.nick = identity.nick;
         saveMyVote(currentEditingPollId, mv);
+
+        // ★ 清除待提交数据
+        sessionStorage.removeItem('pending_edit_poll');
+        sessionStorage.removeItem('pending_edit_seq');
+        sessionStorage.removeItem('pending_edit_body');
+        sessionStorage.removeItem('pending_edit_iv');
+        sessionStorage.removeItem('pending_edit_enc');
+        sessionStorage.removeItem('pending_edit_key');
+
         alert('✅ 投票已修改');
         closeModal('view-modal');
         syncFromServer();
@@ -726,6 +765,15 @@ function submitVote() {
     if (!cleanRsaKey) { alert('RSA加密失败'); return; }
     var editToken = Array.from(crypto.getRandomValues(new Uint8Array(18))).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
     var keyHash = CryptoJS.SHA256(identity.key).toString();
+
+    // ★ 保存待提交数据，以便验证码跳回后恢复
+    sessionStorage.setItem('pending_vote_poll', currentPollId);
+    sessionStorage.setItem('pending_vote_content', voteContent);
+    sessionStorage.setItem('pending_vote_iv', CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''));
+    sessionStorage.setItem('pending_vote_enc', msgEnc.replace(/[\r\n\s]+/g, ''));
+    sessionStorage.setItem('pending_vote_key', cleanRsaKey);
+    sessionStorage.setItem('pending_vote_token', editToken);
+
     fetch('/api/votes/' + encodeURIComponent(currentPollId), {
       method: 'POST',
       headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
@@ -736,10 +784,19 @@ function submitVote() {
         key_hash: keyHash
       })
     }).then(function(res){
+      // ★ 验证码拦截：如果服务器返回 418，跳转到验证码页面
+      if (res.status === 418) {
+        var returnUrl = encodeURIComponent(window.location.href);
+        window.location.href = '/captcha?redirect=' + returnUrl;
+        return;
+      }
+
       window.handleRateLimitResponse(res);
       if (res.ok) return res.json();
       else return res.text().then(function(t){ throw new Error(t); });
     }).then(function(data){
+      if (!data) return; // 已跳转到验证码页面
+
       saveMyVote(currentPollId, {
         seq: data.seq,
         rsa_key: cleanRsaKey,
@@ -747,6 +804,14 @@ function submitVote() {
         aes_enc: msgEnc.replace(/[\r\n\s]+/g, ''),
         edit_token: data.edit_token || editToken
       });
+      // ★ 清除待提交数据
+      sessionStorage.removeItem('pending_vote_poll');
+      sessionStorage.removeItem('pending_vote_content');
+      sessionStorage.removeItem('pending_vote_iv');
+      sessionStorage.removeItem('pending_vote_enc');
+      sessionStorage.removeItem('pending_vote_key');
+      sessionStorage.removeItem('pending_vote_token');
+
       var msgEl = document.getElementById('vote-msg');
       msgEl.textContent = '✅ 投票成功！';
       msgEl.style.color = '#4CAF50';
@@ -831,6 +896,42 @@ window.addEventListener('beforeunload', function(){ stopPolling(); });
     start();
   }else{
     updateUI();
+  }
+})();
+// ★ 从验证码页面跳回后，自动重试待提交的投票
+(function() {
+  var pendingPoll = sessionStorage.getItem('pending_vote_poll');
+  if (pendingPoll) {
+    // 待提交的投票 → 重新提交
+    var pollObj = allPolls.find(function(p){ return p.id === pendingPoll; });
+    if (pollObj) {
+      openVoteModal(pollObj);
+      // 恢复内容后自动提交
+      setTimeout(function() {
+        document.getElementById('vote-submit-btn').click();
+      }, 500);
+    }
+    // 即使失败，清除待提交标记（防止死循环）
+    sessionStorage.removeItem('pending_vote_poll');
+    sessionStorage.removeItem('pending_vote_content');
+    sessionStorage.removeItem('pending_vote_iv');
+    sessionStorage.removeItem('pending_vote_enc');
+    sessionStorage.removeItem('pending_vote_key');
+    sessionStorage.removeItem('pending_vote_token');
+    return;
+  }
+
+  var pendingEdit = sessionStorage.getItem('pending_edit_poll');
+  if (pendingEdit) {
+    // 待修改的投票 → 重新编辑
+    // 只是提示用户重新操作
+    alert('验证码已通过，请重新点击"修改投票"按钮提交修改。');
+    sessionStorage.removeItem('pending_edit_poll');
+    sessionStorage.removeItem('pending_edit_seq');
+    sessionStorage.removeItem('pending_edit_body');
+    sessionStorage.removeItem('pending_edit_iv');
+    sessionStorage.removeItem('pending_edit_enc');
+    sessionStorage.removeItem('pending_edit_key');
   }
 })();
 </script>

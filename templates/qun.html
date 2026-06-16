@@ -102,6 +102,18 @@
 <footer id="footer"></footer>
 
 <script>
+// ★ 验证码拦截：如果服务器返回 418，保存状态并跳转
+function handleCaptchaRedirect(res, saveStateFn) {
+  if (res.status === 418) {
+    // 保存当前表单状态（可选）
+    if (typeof saveStateFn === 'function') saveStateFn();
+    var returnUrl = encodeURIComponent(window.location.href);
+    window.location.href = '/captcha?redirect=' + returnUrl;
+    return true; // 触发了验证码跳转
+  }
+  return false; // 正常响应
+}
+
 var esc = function(s) {
   return String(s).replace(/[&<>"']/g, function(c) {
     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
@@ -295,6 +307,8 @@ function sendAsAI(content) {
     headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
     body: JSON.stringify({nick: aiNick, content: content, key: id.key})
   }).then(function(r) {
+    // ★ 验证码被拦截时静默失败，不跳转（AI 下次自动重试）
+    if (r.status === 418) return;
     window.handleRateLimitResponse(r);
     if (r.ok) { loadMsgs(); }
   });
@@ -566,6 +580,14 @@ function send() {
     headers:{'Content-Type':'application/json', 'X-CSRF-Token': csrfToken},
     body:JSON.stringify({nick:id.nick, content:msg, key:id.key})
   }).then(function(r){
+    // ★ 验证码拦截
+    if (r.status === 418) {
+      sessionStorage.setItem('pending_qun_msg', msg);
+      sessionStorage.setItem('pending_qun_nick', id.nick);
+      sessionStorage.setItem('pending_qun_key', id.key);
+      window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+      return;
+    }
     window.handleRateLimitResponse(r);
     window.isRateLimited = function(){
       var now = Date.now() / 1000;
@@ -589,6 +611,11 @@ function revokeMsg(index) {
     headers:{'Content-Type':'application/json', 'X-CSRF-Token': csrfToken},
     body:JSON.stringify({nick:id.nick, key:id.key})
   }).then(function(r){
+    // ★ 验证码拦截
+    if (r.status === 418) {
+      window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+      return;
+    }
     window.handleRateLimitResponse(r);
     if(r.ok){ loadMsgs(); }
     else r.text().then(alert);
@@ -605,9 +632,15 @@ function reportMsg(index) {
     headers:{'Content-Type':'application/json', 'X-CSRF-Token': csrfToken},
     body:JSON.stringify({nick:id.nick, key:id.key})
   }).then(function(r){
+    // ★ 验证码拦截
+    if (r.status === 418) {
+      window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+      return;
+    }
     window.handleRateLimitResponse(r);
     return r.json().then(function(data){ return {ok:r.ok, data:data}; });
   }).then(function(result){
+    if(!result) return; // 已跳转
     if(result.ok){
       var msg = '✅ 举报已提交';
       if(result.data.auto_disabled) msg += '\n该消息举报数已达阈值，已自动禁用';
@@ -785,6 +818,20 @@ document.getElementById('key-input').addEventListener('input', function(){ loadM
       showBadge(computeUnread(data));
     }
   };
+})();
+// ★ 从验证码页面跳回后，自动恢复待发送的群聊消息
+(function() {
+  var pendingMsg = sessionStorage.getItem('pending_qun_msg');
+  var pendingNick = sessionStorage.getItem('pending_qun_nick');
+  if (pendingMsg && pendingNick) {
+    document.getElementById('msg').value = pendingMsg;
+    document.getElementById('nick').value = pendingNick;
+    document.getElementById('key-input').value = sessionStorage.getItem('pending_qun_key') || '';
+    sessionStorage.removeItem('pending_qun_msg');
+    sessionStorage.removeItem('pending_qun_nick');
+    sessionStorage.removeItem('pending_qun_key');
+    alert('✅ 验证码已通过，请点击"发送"重新发送消息');
+  }
 })();
 </script>
 </body>

@@ -125,6 +125,17 @@
 <footer id="footer"></footer>
 
 <script>
+// ★ 验证码拦截：如果服务器返回 418，保存状态并跳转
+function handleCaptchaRedirect(res, saveStateFn) {
+  if (res.status === 418) {
+    // 保存当前表单状态（可选）
+    if (typeof saveStateFn === 'function') saveStateFn();
+    var returnUrl = encodeURIComponent(window.location.href);
+    window.location.href = '/captcha?redirect=' + returnUrl;
+    return true; // 触发了验证码跳转
+  }
+  return false; // 正常响应
+}
 // ═══════════════════════════════════════════
 // 工具函数
 // ═══════════════════════════════════════════
@@ -396,12 +407,12 @@ function sendChatMsg(){
   var msg = document.getElementById('chat-msg').value.trim();
   if(!msg){ alert('请输入消息'); return; }
 
-  var recvPub = normalizePem(document.getElementById('recv-pub-input').value.trim());  // ★ 规范化
+  var recvPub = normalizePem(document.getElementById('recv-pub-input').value.trim());
   var contactSel = document.getElementById('send-contact').value;
 
   if(!recvPub && contactSel && contactSel.startsWith('contact_')){
     var ci = parseInt(contactSel.replace('contact_',''));
-    if(contacts[ci]) recvPub = contacts[ci].pub;   // 存储时已规范化，直接用
+    if(contacts[ci]) recvPub = contacts[ci].pub;
   }
 
   if(!recvPub){ alert('请选择联系人或粘贴接收方公钥'); return; }
@@ -423,7 +434,7 @@ function sendChatMsg(){
   var aesContent = CryptoJS.AES.encrypt(payload, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString().replace(/[\r\n\s]+/g,'');
 
   var jse = new JSEncrypt();
-  jse.setPublicKey(recvPub);   // ★ 此时 recvPub 已经是标准多行 PEM
+  jse.setPublicKey(recvPub);
   var wrappedKey = jse.encrypt(id.aes);
   if(!wrappedKey){ alert('RSA加密失败（接收方公钥无效）'); return; }
   wrappedKey = wrappedKey.replace(/[\r\n\s]+/g,'');
@@ -442,10 +453,21 @@ function sendChatMsg(){
       nonce: nonce
     })
   }).then(function(r){
+    // ★ 验证码拦截：418 → 保存状态并跳转
+    if (r.status === 418) {
+      sessionStorage.setItem('pending_chat_msg', msg);
+      sessionStorage.setItem('pending_chat_slot', slotIdx);
+      sessionStorage.setItem('pending_chat_recv', recvPub);
+      sessionStorage.setItem('pending_chat_contact', contactSel);
+      window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+      return;
+    }
+
     window.handleRateLimitResponse(r);
     if(r.ok) return r.json();
     else return r.text().then(function(t){ throw new Error(t); });
   }).then(function(data){
+    if (!data) return; // 已跳转到验证码页面
     sentMessages.push({
       nick: id.nick,
       time: timeStr,
@@ -1024,14 +1046,22 @@ function reportMessage(filename, wrappedKeyB64, ivB64, slotIdxStr){
       aes_key_enc: aesKeyEnc.replace(/[\r\n\s]+/g,''),
       reason_enc: reasonEnc.replace(/[\r\n\s]+/g,'')
     })
-  }).then(function(r){ return r.json(); }).then(function(d){
+  }).then(function(r){
+    // ★ 验证码拦截：418 → 跳转
+    if (r.status === 418) {
+      window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+      return;
+    }
+    return r.json();
+  }).then(function(d){
+    if (!d) return; // 已跳转
     if(d.status === 'ok'){
       alert('✅ 举报已提交。\n编号: ' + d.report_id);
-            reportMap[d.report_id] = {filename: filename, slotIdx: slotIdx};
-            reportedFiles.add(filename);
-            saveReportMap(reportMap);
-            saveReportedFiles(Array.from(reportedFiles));
-            renderChat();
+      reportMap[d.report_id] = {filename: filename, slotIdx: slotIdx};
+      reportedFiles.add(filename);
+      saveReportMap(reportMap);
+      saveReportedFiles(Array.from(reportedFiles));
+      renderChat();
     } else {
       alert('❌ ' + (d.error||'举报失败'));
     }
@@ -1050,7 +1080,7 @@ async function revokeMessage(filename, slotIdxStr){
 
   showConfirm('确定撤回此消息？服务器上的文件将被真正删除。', async function(){
     try {
-      // ★ 第一步：请求挑战
+      // ★ 第一步：请求挑战（POST /api/chat/revoke/challenge）
       var challRes = await fetch('/api/chat/revoke/challenge', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1059,6 +1089,13 @@ async function revokeMessage(filename, slotIdxStr){
           sender_pub: normalizePem(id.pub)
         })
       });
+
+      // ★ 验证码拦截（第一步）
+      if (challRes.status === 418) {
+        window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+        return;
+      }
+
       window.handleRateLimitResponse(challRes);
       var challData = await challRes.json();
 
@@ -1076,16 +1113,23 @@ async function revokeMessage(filename, slotIdxStr){
         return;
       }
 
-      // ★ 第三步：提交答案 + token，完成撤回
+      // ★ 第三步：提交答案 + token，完成撤回（POST /api/chat/revoke）
       var revokeRes = await fetch('/api/chat/revoke', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
           filename: filename,
           answer: answer,
-          token: challData.token    // ★ 回传 HMAC token
+          token: challData.token
         })
       });
+
+      // ★ 验证码拦截（第三步）
+      if (revokeRes.status === 418) {
+        window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+        return;
+      }
+
       window.handleRateLimitResponse(revokeRes);
       var revokeData = await revokeRes.json();
 
@@ -1136,6 +1180,27 @@ setInterval(function(){
       }).catch(function(){});
   });
 }, 3000);
+// ★ 从验证码页面跳回后，自动恢复待发送的聊天消息
+(function() {
+  var pendingMsg = sessionStorage.getItem('pending_chat_msg');
+  if (pendingMsg) {
+    document.getElementById('chat-msg').value = pendingMsg;
+    // 可选：恢复选中的身份和接收方
+    var pendingSlot = sessionStorage.getItem('pending_chat_slot');
+    var pendingRecv = sessionStorage.getItem('pending_chat_recv');
+    if (pendingSlot) document.getElementById('send-slot').value = pendingSlot;
+    if (pendingRecv) {
+      document.getElementById('recv-pub-input').value = pendingRecv;
+      document.getElementById('send-contact').value = 'custom';
+    }
+    // 清除标记
+    sessionStorage.removeItem('pending_chat_msg');
+    sessionStorage.removeItem('pending_chat_slot');
+    sessionStorage.removeItem('pending_chat_recv');
+    sessionStorage.removeItem('pending_chat_contact');
+    alert('✅ 验证码已通过，请点击"发送"重新发送消息');
+  }
+})();
 </script>
 </body>
 </html>

@@ -47,7 +47,7 @@
 </h2>
   <p style="color:#666;margin:0 0 10px">1.本网站实行RSA-2048与AES-256结合的端到端加密，即使攻破服务器拿到加密后密文，以目前算力来讲在本世纪无法被破解。</p>
   <p style="color:#666;margin:0 0 10px">2.为防止DDos攻击及注入攻击，本网站实行了风控措施。若访问次数和速度超过阈值，会开启临时风控，请等待1-5分钟后再试。</p>
-  <p style="color:#666;margin:0 0 10px">3.本网站采用7s写入缓冲，若您的系统时间不准确，则前端可能会出现问题，服务器可能会拒绝请求。</p>
+  <p style="color:#666;msargin:0 0 10px">3.本网站采用7s写入缓冲，若您的系统时间不准确，则前端可能会出现问题，服务器可能会拒绝请求。</p>
   <p style="color:#666;margin:0 0 10px">4.请文明发言，若发送违反相关法律法规的内容，则会被永久拉黑。请谨慎发言，即使您撤回消息，也依然对管理员可见。</p>
   <p style="color:#666;margin:0 0 10px">5.当在公开群聊的聊天内容被举报次数超过阈值或违反相应匹配规则时，会被禁用并交给管理员进一步处理。</p>
   <p style="color:#666;margin:0 0 10px">6.私聊界面依然采用同样的端到端加密，管理员无法得知用户真实发送的内容，对用户私聊内发送的任何内容，本网站所有者不负任何责任</p>
@@ -94,6 +94,18 @@
   <footer id="footer"></footer>
 
 <script>
+// ★ 验证码拦截：如果服务器返回 418，保存状态并跳转
+function handleCaptchaRedirect(res, saveStateFn) {
+  if (res.status === 418) {
+    // 保存当前表单状态（可选）
+    if (typeof saveStateFn === 'function') saveStateFn();
+    var returnUrl = encodeURIComponent(window.location.href);
+    window.location.href = '/captcha?redirect=' + returnUrl;
+    return true; // 触发了验证码跳转
+  }
+  return false; // 正常响应
+}
+
   var currentQueryTab = 'reply';
 
   function deriveAESKey(str) {
@@ -234,6 +246,16 @@ function handleSubmit() {
           aes_msg: aesEnc.replace(/[\r\n\s]+/g, '')
         })
       }).then(function(res){
+        // ★ 验证码拦截
+        if (res.status === 418) {
+          // 保存当前输入以便跳转回来后恢复
+          sessionStorage.setItem('pending_nick', nick);
+          sessionStorage.setItem('pending_key', keyIn);
+          sessionStorage.setItem('pending_msg', msg);
+          window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+          return;
+        }
+
         window.handleRateLimitResponse(res);
         if (res.ok) { alert('✅ 已加密提交'); }
         else { alert('❌ 提交失败'); }
@@ -385,6 +407,21 @@ checkReply
     start();
   }else{
     updateUI();
+  }
+})();
+// ★ 如果从验证码页面跳回，恢复待提交的表单数据
+(function() {
+  var pendingMsg = sessionStorage.getItem('pending_msg');
+  var pendingNick = sessionStorage.getItem('pending_nick');
+  if (pendingMsg && pendingNick) {
+    document.getElementById('nick').value = pendingNick;
+    document.getElementById('aesKey').value = sessionStorage.getItem('pending_key') || '';
+    document.getElementById('msg').value = pendingMsg;
+    sessionStorage.removeItem('pending_nick');
+    sessionStorage.removeItem('pending_key');
+    sessionStorage.removeItem('pending_msg');
+    // 自动弹出确认框
+    showModal();
   }
 })();
 </script>
