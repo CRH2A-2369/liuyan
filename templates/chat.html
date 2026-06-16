@@ -125,17 +125,6 @@
 <footer id="footer"></footer>
 
 <script>
-// ★ 验证码拦截：如果服务器返回 418，保存状态并跳转
-function handleCaptchaRedirect(res, saveStateFn) {
-  if (res.status === 418) {
-    // 保存当前表单状态（可选）
-    if (typeof saveStateFn === 'function') saveStateFn();
-    var returnUrl = encodeURIComponent(window.location.href);
-    window.location.href = '/captcha?redirect=' + returnUrl;
-    return true; // 触发了验证码跳转
-  }
-  return false; // 正常响应
-}
 // ═══════════════════════════════════════════
 // 工具函数
 // ═══════════════════════════════════════════
