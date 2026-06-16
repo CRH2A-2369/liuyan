@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template, jsonify, session, make_response
+from flask import Flask, request, render_template, jsonify, session, make_response, Response
 import os, re, glob, base64, json, secrets, time, hashlib, threading, tempfile, shutil
 from collections import OrderedDict
 from functools import wraps
@@ -6,6 +6,21 @@ from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
+import io
+import random
+import string
+
+CAPTCHA_DEFAULTS = {
+    "width": 320,
+    "height": 120,
+    "channels": 3,
+    "loop_frames": 30,
+    "scroll_speed": 2,
+    "font_size": 75,
+    "captcha_length": 5,
+    "allowed_chars": "23456789ABCDEFGHJKLMNPRSTXYZ"
+}
 
 load_dotenv()
 app = Flask(__name__)
@@ -76,23 +91,24 @@ TRUSTED_PROXIES = [ip.strip() for ip in os.environ.get('TRUSTED_PROXIES', '').sp
 
 # === 3. 路径与初始化 ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MSG_DIR = os.path.join(BASE_DIR, '留言')
-REPLY_DIR = os.path.join(BASE_DIR, '回复')
-QUN_DIR = os.path.join(BASE_DIR, '群')
-VOTE_DIR = os.path.join(BASE_DIR, 'vote_data')
-IP_DIR = os.path.join(BASE_DIR, 'ip')
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+MSG_DIR = os.path.join(DATA_DIR, '留言')
+REPLY_DIR = os.path.join(DATA_DIR, '回复')
+QUN_DIR = os.path.join(DATA_DIR, '群')
+VOTE_DIR = os.path.join(DATA_DIR, 'vote_data')
+IP_DIR = os.path.join(DATA_DIR, 'ip')
 RSA_PUB = os.path.join(BASE_DIR, 'gongyao.txt')
-UNDER_FILE = os.path.join(BASE_DIR, 'under.txt')
-CHAT_FILE = os.path.join(QUN_DIR, 'chat_data.json')
+UNDER_FILE = os.path.join(DATA_DIR, 'under.txt')
+CHAT_FILE = os.path.join(DATA_DIR, 'chat_data.json')
 RULE_FILE = os.path.join(QUN_DIR, 'rule.txt')
 THRESHOLD_FILE = os.path.join(QUN_DIR, 'threshold.txt')
-NOTICE_FILE = os.path.join(BASE_DIR, 'notice_data.json')
+NOTICE_FILE = os.path.join(DATA_DIR, 'notice_data.json')
 PERM_FILE = os.path.join(QUN_DIR, 'permission.txt')
-BLACK_FILE = os.path.join(BASE_DIR, 'black.txt')
-WHITE_FILE = os.path.join(BASE_DIR, 'white.txt')
-LOG_FILE = os.path.join(BASE_DIR, 'log.txt')
-CHAT_DIR = os.path.join(BASE_DIR, 'chat')
-REPORT_DIR = os.path.join(BASE_DIR, 'chat_reports')
+BLACK_FILE = os.path.join(DATA_DIR, 'black.txt')
+WHITE_FILE = os.path.join(DATA_DIR, 'white.txt')
+LOG_FILE = os.path.join(DATA_DIR, 'log.txt')
+CHAT_DIR = os.path.join(DATA_DIR, 'chat')
+REPORT_DIR = os.path.join(DATA_DIR, 'chat_reports')
 CHAT_RETENTION_FILE = os.path.join(CHAT_DIR, 'retention_hours.txt')
 
 for d in [MSG_DIR, REPLY_DIR, QUN_DIR, VOTE_DIR, IP_DIR, CHAT_DIR, REPORT_DIR]:
@@ -302,6 +318,508 @@ def validate_origin_referer():
 
     return True
 
+def require_csrf(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            # ★ 第一层：Origin / Referer 校验（防跨站伪造）
+            if not validate_origin_referer():
+                return jsonify({'error': '跨域请求被拒绝（Origin/Referer 不匹配）'}), 403
+            # ★ 第二层：CSRF Token 校验（防同站利用）
+            token = session.get('csrf_token')
+            header = request.headers.get('X-CSRF-Token')
+            if not token or token != header:
+                return jsonify({'error': 'CSRF 校验失败'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+def require_private_key(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('admin_has_key'):
+            return jsonify({'error': '私钥未校验'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+# ═══════════════════════════════════════════════════════════
+# 4.6 CAPTCHA 人机验证模块（动态 GIF 验证码）
+# ═══════════════════════════════════════════════════════════
+import random as _captcha_random
+import hashlib as _captcha_hash
+import secrets as _captcha_secrets
+import time as _captcha_time
+import json as _captcha_json
+import threading as _captcha_threading
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import io
+
+# ---------- 默认配置 ----------
+CAPTCHA_DEFAULTS = {
+    "width": 320,
+    "height": 120,
+    "channels": 3,
+    "loop_frames": 30,
+    "scroll_speed": 2,
+    "font_size": 75,
+    "captcha_length": 5,
+    "allowed_chars": "23456789ABCDEFGHJKLMNPRSTXYZ"
+}
+
+# ---------- 路径 ----------
+CAPTCHA_DIR = os.path.join(DATA_DIR, 'captcha')
+os.makedirs(CAPTCHA_DIR, exist_ok=True)
+
+CAPTCHA_CONFIG_FILE = os.path.join(CAPTCHA_DIR, 'config.json')
+CAPTCHA_VERIFIED_FILE = os.path.join(CAPTCHA_DIR, 'verified.json')
+CAPTCHA_CHALLENGES_FILE = os.path.join(CAPTCHA_DIR, 'challenges.json')
+CAPTCHA_LOG_FILE = os.path.join(CAPTCHA_DIR, 'verified_log.json')
+
+# 初始化文件
+for f, default in [
+    (CAPTCHA_CONFIG_FILE, {"enabled": True, "duration_minutes": 30}),
+    (CAPTCHA_VERIFIED_FILE, {}),
+    (CAPTCHA_CHALLENGES_FILE, {}),
+    (CAPTCHA_LOG_FILE, []),
+]:
+    if not os.path.exists(f):
+        atomic_write(f, _captcha_json.dumps(default, ensure_ascii=False))
+
+_captcha_lock = _captcha_threading.Lock()
+
+def _captcha_load_json(path):
+    with _captcha_lock:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return _captcha_json.load(f)
+        except Exception:
+            return {}
+
+def _captcha_save_json(path, data):
+    atomic_write(path, _captcha_json.dumps(data, ensure_ascii=False))
+
+# ---------- 配置读写 ----------
+def get_captcha_config():
+    config = _captcha_load_json(CAPTCHA_CONFIG_FILE)
+    # 合并默认值
+    for k, v in CAPTCHA_DEFAULTS.items():
+        if k not in config:
+            config[k] = v
+    return config
+
+def save_captcha_config(config):
+    _captcha_save_json(CAPTCHA_CONFIG_FILE, config)
+
+def get_verified_ips():
+    return _captcha_load_json(CAPTCHA_VERIFIED_FILE)
+
+def save_verified_ips(data):
+    _captcha_save_json(CAPTCHA_VERIFIED_FILE, data)
+
+def get_challenges():
+    return _captcha_load_json(CAPTCHA_CHALLENGES_FILE)
+
+def save_challenges(data):
+    _captcha_save_json(CAPTCHA_CHALLENGES_FILE, data)
+
+def get_verified_log():
+    try:
+        with open(CAPTCHA_LOG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_verified_log(data):
+    atomic_write(CAPTCHA_LOG_FILE, json.dumps(data, ensure_ascii=False))
+
+def get_aes_key():
+    config = get_captcha_config()
+    return config.get('aes_key', '')
+
+# ---------- 清理 ----------
+def _cleanup_challenges():
+    challenges = get_challenges()
+    now = _captcha_time.time()
+    expired = [k for k, v in challenges.items() if v.get('expires_at', 0) < now]
+    for k in expired:
+        del challenges[k]
+    if expired:
+        save_challenges(challenges)
+
+def _cleanup_verified():
+    verified = get_verified_ips()
+    now = _captcha_time.time()
+    expired = [k for k, v in verified.items() if v < now]
+    for k in expired:
+        del verified[k]
+    if expired:
+        save_verified_ips(verified)
+
+# ---------- 核心业务 ----------
+def is_captcha_needed(ip):
+    """检查IP是否需要验证"""
+    if ip in load_whitelist():
+        return False
+    config = get_captcha_config()
+    if not config.get('enabled', True):
+        return False
+    verified = get_verified_ips()
+    if ip in verified and verified[ip] > _captcha_time.time():
+        return False
+    return True
+
+def mark_captcha_verified(ip):
+    config = get_captcha_config()
+    duration = config.get('duration_minutes', 30)
+    expiry = _captcha_time.time() + duration * 60
+    verified_at = _captcha_time.time()
+
+    verified = get_verified_ips()
+    verified[ip] = expiry
+    save_verified_ips(verified)
+
+    # 加密日志
+    aes_key = config.get('aes_key', '')
+    if aes_key:
+        try:
+            plaintext = f"{ip}|{datetime.fromtimestamp(verified_at, CST).strftime('%Y-%m-%d %H:%M:%S')}|{datetime.fromtimestamp(expiry, CST).strftime('%Y-%m-%d %H:%M:%S')}"
+            encrypted = _aes_encrypt(plaintext, aes_key)
+            log = get_verified_log()
+            log.append({'data': encrypted, 'ts': verified_at})
+            if len(log) > 500:
+                log = log[-500:]
+            save_verified_log(log)
+        except Exception:
+            pass
+    return expiry
+
+def require_captcha(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            ip = get_client_ip()
+            if is_captcha_needed(ip):
+                return jsonify({
+                    "error": "captcha_required",
+                    "message": "请先完成人机验证",
+                    "captcha_url": "/captcha"
+                }), 418
+        return f(*args, **kwargs)
+    return decorated
+
+# ---------- GIF 生成 ----------
+FONT_PATH = os.path.join(BASE_DIR, 'resources', 'MonaspaceNeon-WideBold.otf')
+if not os.path.exists(FONT_PATH):
+    FONT_PATH = None   # 降级使用默认字体
+
+def _create_text_mask(text, font_size, offset, width, height):
+    mask = np.zeros((height, width), dtype=bool)
+    try:
+        font = ImageFont.truetype(FONT_PATH, font_size) if FONT_PATH else ImageFont.load_default()
+    except:
+        font = ImageFont.load_default()
+    img = Image.new('L', (width, height), 0)
+    draw = ImageDraw.Draw(img)
+    draw.text(offset, text, font=font, fill=255)
+    text_layer = np.array(img)
+    mask[text_layer > 128] = True
+    return mask
+
+def _generate_looping_noise(width, height, channels, loop_frames, scroll_speed):
+    noise_height = loop_frames * scroll_speed
+    noise = np.random.choice([0, 255], size=(noise_height, width), p=[0.5, 0.5]).astype(np.uint8)
+    return np.stack([noise] * channels, axis=-1)
+
+def _generate_frame(frame_index, text_mask, noise_texture, width, height, channels, scroll_speed):
+    frame = np.zeros((height, width, channels), dtype=np.uint8)
+    noise_height = noise_texture.shape[0]
+    y_coords = np.arange(height).reshape(-1, 1)
+    x_coords = np.arange(width).reshape(1, -1)
+    text_offset = (frame_index * scroll_speed)
+    bg_offset = -(frame_index * scroll_speed)
+    text_noise_y = (y_coords + text_offset) % noise_height
+    bg_noise_y = (y_coords + bg_offset) % noise_height
+    text_pixels = noise_texture[text_noise_y, x_coords]
+    bg_pixels = noise_texture[bg_noise_y, x_coords]
+    frame[text_mask] = text_pixels[text_mask]
+    frame[~text_mask] = bg_pixels[~text_mask]
+    return frame
+
+def generate_captcha_gif(text, config):
+    w = config['width']
+    h = config['height']
+    channels = config['channels']
+    loop_frames = config['loop_frames']
+    speed = config['scroll_speed']
+    font_size = config['font_size']
+    offset = (15, 22)   # 可调整
+    text_mask = _create_text_mask(text, font_size, offset, w, h)
+    noise_texture = _generate_looping_noise(w, h, channels, loop_frames, speed)
+    frames = [Image.fromarray(_generate_frame(i, text_mask, noise_texture, w, h, channels, speed)) for i in range(loop_frames)]
+    gif_bytes = io.BytesIO()
+    frames[0].save(gif_bytes, format='GIF', save_all=True, append_images=frames[1:], optimize=True, duration=40, loop=0)
+    return gif_bytes.getvalue()
+
+# ---------- 定时清理线程 ----------
+def _captcha_cleanup_loop():
+    while True:
+        _captcha_time.sleep(60)
+        try:
+            _cleanup_challenges()
+            _cleanup_verified()
+        except Exception:
+            pass
+
+_captcha_thread = _captcha_threading.Thread(target=_captcha_cleanup_loop, daemon=True)
+_captcha_thread.start()
+
+# ---------- 前台路由 ----------
+@app.route('/captcha')
+def captcha_page():
+    return render_template('captcha.html')
+
+@app.route('/api/captcha/status', methods=['GET'])
+def api_captcha_status():
+    ip = get_client_ip()
+    return jsonify({"captcha_needed": is_captcha_needed(ip)})
+
+@app.route('/api/captcha/challenge', methods=['GET'])
+def api_captcha_challenge():
+    ip = get_client_ip()
+    if not is_captcha_needed(ip):
+        return jsonify({"captcha_needed": False})
+
+    config = get_captcha_config()
+    allowed_chars = config.get('allowed_chars', CAPTCHA_DEFAULTS['allowed_chars'])
+    length = config.get('captcha_length', CAPTCHA_DEFAULTS['captcha_length'])
+    text = ''.join(random.choices(allowed_chars, k=length))
+
+    challenge_id = secrets.token_urlsafe(16)
+    answer_hash = hashlib.sha256(text.encode()).hexdigest()
+    challenges = get_challenges()
+    challenges[challenge_id] = {
+        'answer_hash': answer_hash,
+        'expires_at': time.time() + 300,
+        'ip': ip,
+        'text': text   # 存储明文用于生成 GIF
+    }
+    save_challenges(challenges)
+    return jsonify({
+        'captcha_needed': True,
+        'challenge_id': challenge_id,
+        'expires_in': 300
+    })
+
+@app.route('/api/captcha.gif')
+def api_captcha_gif():
+    challenge_id = request.args.get('id')
+    if not challenge_id:
+        return "Missing ID", 400
+    challenges = get_challenges()
+    challenge = challenges.get(challenge_id)
+    if not challenge or challenge.get('expires_at', 0) < time.time():
+        return "Invalid or expired", 404
+    config = get_captcha_config()
+    gif_data = generate_captcha_gif(challenge['text'], config)
+    return Response(gif_data, mimetype='image/gif')
+
+@app.route('/api/captcha/verify', methods=['POST'])
+def api_captcha_verify():
+    data = request.get_json(silent=True) or {}
+    challenge_id = data.get('challenge_id', '').strip()
+    answer = data.get('answer', '').strip().upper()
+    ip = get_client_ip()
+
+    if not challenge_id or not answer:
+        return jsonify({"success": False, "error": "参数不完整"}), 400
+
+    _cleanup_challenges()
+    challenges = get_challenges()
+    challenge = challenges.get(challenge_id)
+    if not challenge or challenge.get('expires_at', 0) < time.time():
+        return jsonify({"success": False, "error": "验证码已过期"}), 400
+    if challenge.get('ip') != ip:
+        return jsonify({"success": False, "error": "挑战与IP不匹配"}), 403
+
+    answer_hash = hashlib.sha256(answer.encode()).hexdigest()
+    if answer_hash != challenge['answer_hash']:
+        return jsonify({"success": False, "error": "答案错误"}), 400
+
+    del challenges[challenge_id]
+    save_challenges(challenges)
+
+    expiry = mark_captcha_verified(ip)
+    return jsonify({
+        "success": True,
+        "expires_at": expiry,
+        "remaining_seconds": int(expiry - time.time())
+    })
+
+# ---------- 后台管理路由 ----------
+@app.route('/admin/captcha')
+def admin_captcha_page():
+    return render_template('admin_captcha.html')
+
+@app.route('/api/admin/captcha/config', methods=['GET', 'POST'])
+@require_csrf
+@require_private_key
+def api_admin_captcha_config():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    if request.method == 'GET':
+        config = get_captcha_config()
+        verified = get_verified_ips()
+        now = time.time()
+        active_count = sum(1 for v in verified.values() if v > now)
+        return jsonify({
+            'config': config,
+            'active_ips': active_count,
+            'total_verified': len(verified)
+        })
+
+    data = request.get_json(silent=True) or {}
+    config = get_captcha_config()
+
+    # 基础配置
+    config['enabled'] = bool(data.get('enabled', True))
+    config['duration_minutes'] = int(data.get('duration_minutes', 30))
+
+    # 图形参数
+    for key in ['width', 'height', 'channels', 'loop_frames', 'scroll_speed', 'font_size', 'captcha_length']:
+        if key in data:
+            try:
+                config[key] = int(data[key])
+            except:
+                pass
+    if 'allowed_chars' in data:
+        config['allowed_chars'] = data['allowed_chars'].strip()
+
+    save_captcha_config(config)
+    return jsonify({'ok': True, 'config': config})
+
+@app.route('/api/admin/captcha/clear', methods=['POST'])
+@require_csrf
+@require_private_key
+def api_admin_captcha_clear():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+    save_verified_ips({})
+    return jsonify({'ok': True})
+
+@app.route('/api/admin/captcha/verified-log', methods=['GET'])
+@require_csrf
+@require_private_key
+def api_admin_captcha_verified_log():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    aes_key = get_aes_key()
+    if not aes_key:
+        return jsonify({'error': '请先在验证码配置中设置 AES 密钥', 'entries': []})
+
+    log = get_verified_log()
+    entries = []
+    for entry in log:
+        try:
+            decrypted = _aes_decrypt(entry['data'], aes_key)
+            parts = decrypted.split('|')
+            entries.append({
+                'ip': parts[0] if len(parts) >= 1 else '???',
+                'verified_at': parts[1] if len(parts) >= 2 else '',
+                'expiry': parts[2] if len(parts) >= 3 else '',
+            })
+        except Exception:
+            entries.append({'ip': '🔒 解密失败', 'verified_at': '', 'expiry': ''})
+    return jsonify({'entries': list(reversed(entries))})
+
+@app.route('/api/admin/captcha/aes-key', methods=['POST'])
+@require_csrf
+@require_private_key
+def api_admin_captcha_set_aes_key():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    new_key = data.get('aes_key', '').strip()
+    if new_key and len(new_key) < 8:
+        return jsonify({'error': 'AES 密钥至少 8 个字符'}), 400
+
+    config = get_captcha_config()
+    old_key = config.get('aes_key', '')
+    if new_key and old_key and new_key != old_key:
+        log = get_verified_log()
+        new_log = []
+        for entry in log:
+            try:
+                decrypted = _aes_decrypt(entry['data'], old_key)
+                new_encrypted = _aes_encrypt(decrypted, new_key)
+                new_log.append({'data': new_encrypted, 'ts': entry['ts']})
+            except Exception:
+                pass
+        save_verified_log(new_log)
+
+    config['aes_key'] = new_key
+    save_captcha_config(config)
+    return jsonify({'ok': True, 'has_key': bool(new_key)})# ═══════════════════════════════════════════════════════════
+# 4.6.5 AES 加密工具（用于已验证 IP 加密存储）
+# ═══════════════════════════════════════════════════════════
+from Crypto.Cipher import AES as _AES_CIPHER
+import base64 as _base64
+
+def _aes_pad(data: bytes, block_size: int = 16) -> bytes:
+    """PKCS7 填充"""
+    pad_len = block_size - len(data) % block_size
+    return data + bytes([pad_len] * pad_len)
+
+def _aes_unpad(data: bytes) -> bytes:
+    """PKCS7 去填充"""
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 16:
+        raise ValueError("填充错误")
+    return data[:-pad_len]
+
+def _aes_encrypt(plaintext: str, key_str: str) -> str:
+    """AES-256-CBC 加密，返回 Base64"""
+    key = hashlib.sha256(key_str.encode()).digest()
+    iv = secrets.token_bytes(16)
+    cipher = _AES_CIPHER.new(key, _AES_CIPHER.MODE_CBC, iv)
+    ct = cipher.encrypt(_aes_pad(plaintext.encode()))
+    return _base64.b64encode(iv + ct).decode()
+
+def _aes_decrypt(cipher_b64: str, key_str: str) -> str:
+    """AES-256-CBC 解密"""
+    key = hashlib.sha256(key_str.encode()).digest()
+    raw = _base64.b64decode(cipher_b64)
+    iv, ct = raw[:16], raw[16:]
+    cipher = _AES_CIPHER.new(key, _AES_CIPHER.MODE_CBC, iv)
+    pt = _aes_unpad(cipher.decrypt(ct))
+    return pt.decode()
+
+# ── 已验证 IP 日志文件 ──
+CAPTCHA_LOG_FILE = os.path.join(CAPTCHA_DIR, 'verified_log.json')
+
+def get_verified_log():
+    """获取加密的已验证IP日志"""
+    try:
+        with open(CAPTCHA_LOG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_verified_log(data):
+    """保存已验证IP日志"""
+    atomic_write(CAPTCHA_LOG_FILE, json.dumps(data, ensure_ascii=False))
+
+def get_aes_key():
+    """从 config 中获取 AES 密钥"""
+    config = get_captcha_config()
+    return config.get('aes_key', '')
+
+# ═══════════════════════════════════════════════════════════
+# 修改 mark_captcha_verified：同时写入加密日志
+# ═══════════════════════════════════════════════════════════
+
 # === 5. 核心工具函数 ===
 def get_client_ip():
     direct_ip = request.remote_addr or '127.0.0.1'
@@ -473,7 +991,7 @@ def release_processing_lock(ip):
 import sqlite3
 import random as _random
 
-_rate_db_path = os.path.join(BASE_DIR, 'rate_limits.db')
+_rate_db_path = os.path.join(DATA_DIR, 'rate_limits.db')
 _rate_db_lock = threading.Lock()
 
 def _init_rate_db():
@@ -601,29 +1119,6 @@ def secure_headers(response):
     )
     return response
 
-def require_csrf(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
-            # ★ 第一层：Origin / Referer 校验（防跨站伪造）
-            if not validate_origin_referer():
-                return jsonify({'error': '跨域请求被拒绝（Origin/Referer 不匹配）'}), 403
-            # ★ 第二层：CSRF Token 校验（防同站利用）
-            token = session.get('csrf_token')
-            header = request.headers.get('X-CSRF-Token')
-            if not token or token != header:
-                return jsonify({'error': 'CSRF 校验失败'}), 403
-        return f(*args, **kwargs)
-    return decorated
-
-def require_private_key(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not session.get('admin_has_key'):
-            return jsonify({'error': '私钥未校验'}), 403
-        return f(*args, **kwargs)
-    return decorated
-
 # === 8. 路由：认证与安全 ===
 @app.route('/api/csrf')
 def api_csrf():
@@ -709,6 +1204,7 @@ def get_footer():
     return open(UNDER_FILE, encoding='utf-8').read()
 
 @app.route('/', methods=['GET', 'POST'])
+@require_captcha
 def index():
     if request.method == 'POST':
         ip = get_client_ip()
@@ -867,6 +1363,7 @@ def get_messages():
     return jsonify(msgs)
 
 @app.route('/api/reply', methods=['POST'])
+@require_captcha
 @require_csrf
 def save_reply():
     if not is_admin(): return "未授权", 403
@@ -906,6 +1403,7 @@ def delete_msg(filename):
     return "ok"
 
 @app.route('/admin/delete_reply/<seq>', methods=['POST'])
+@require_captcha
 @require_csrf
 def delete_reply(seq):
     if not is_admin(): return "未授权", 403
@@ -916,6 +1414,7 @@ def delete_reply(seq):
     return "ok"
 
 @app.route('/admin/delete_reply_file/<filename>', methods=['POST'])
+@require_captcha
 @require_csrf
 def delete_reply_file(filename):
     """删除单条回复（支持多条回复）"""
@@ -926,6 +1425,7 @@ def delete_reply_file(filename):
     return "ok"
 
 @app.route('/api/footer', methods=['POST'])
+@require_captcha
 @require_csrf
 def update_footer():
     if not is_admin(): return "未授权", 403
@@ -933,6 +1433,7 @@ def update_footer():
     return "ok"
 
 @app.route('/api/blacklist', methods=['GET', 'POST'])
+@require_captcha
 @require_csrf
 def manage_blacklist():
     if not is_admin(): return "未授权", 403
@@ -947,6 +1448,7 @@ def manage_blacklist():
     return "ok"
 
 @app.route('/api/whitelist', methods=['GET', 'POST'])
+@require_captcha
 @require_csrf
 def manage_whitelist():
     if not is_admin(): return "未授权", 403
@@ -1024,6 +1526,7 @@ def get_qun():
     return jsonify(ordered)
 
 @app.route('/api/qun', methods=['POST'])
+@require_captcha
 @require_csrf
 def post_qun():
     ip = get_client_ip()
@@ -1062,6 +1565,7 @@ def post_qun():
     return rate_limit_json({"status": "ok", "state": initial_state}, 200, in_wl, block_until)
 
 @app.route('/api/qun/revoke/<int:index>', methods=['POST'])
+
 @require_csrf
 def revoke_qun_msg(index):
     ip = get_client_ip()
@@ -1102,6 +1606,7 @@ def revoke_qun_msg(index):
     return rate_limit_json({"ok": True}, 200, in_wl, block_until)
 
 @app.route('/api/qun/report/<int:index>', methods=['POST'])
+@require_captcha
 @require_csrf
 def report_qun_msg(index):
     ip = get_client_ip()
@@ -1455,6 +1960,7 @@ def list_votes():
     return jsonify(polls)
 
 @app.route('/api/votes/<poll_id>', methods=['POST'])
+@require_captcha
 @require_csrf
 def submit_vote(poll_id):
     ip = get_client_ip()
@@ -1964,6 +2470,7 @@ def admin_chat_page():
     return render_template('admin_chat.html')
 
 @app.route('/api/chat/send', methods=['POST'])
+@require_captcha
 @require_csrf
 def chat_send():
     ip = get_client_ip()
@@ -2034,6 +2541,7 @@ def chat_send():
 
 
 @app.route('/api/chat/poll', methods=['POST'])
+@require_captcha
 def chat_poll():
     """轮询新消息：前端上传公钥哈希列表 + sender_hashes + since时间戳"""
     rl = check_rate_limit('read')
@@ -2132,6 +2640,7 @@ def chat_poll():
 # 17.5 聊天举报 / 撤回 / 回复
 # ═══════════════════════════════════════════════════════════
 @app.route('/api/chat/report', methods=['POST'])
+@require_captcha
 @require_csrf
 def chat_report():
     """接收方举报消息"""
@@ -2237,6 +2746,7 @@ def _verify_revoke_token(token_b64):
 
 
 @app.route('/api/chat/revoke/challenge', methods=['POST'])
+@require_captcha
 @require_csrf
 def chat_revoke_challenge():
     """撤回第一步：请求挑战（用文件中发送方公钥加密随机数）"""
@@ -2324,6 +2834,7 @@ def chat_revoke_challenge():
 
 
 @app.route('/api/chat/revoke', methods=['POST'])
+@require_captcha
 @require_csrf
 def chat_revoke():
     """撤回第二步：验证挑战答案，删除文件"""
@@ -2663,4 +3174,4 @@ if __name__ == '__main__':
     print(f"[CONFIG] SESSION_COOKIE_SECURE = {app.config['SESSION_COOKIE_SECURE']}")
     print(f"[CONFIG] TRUSTED_PROXIES = {TRUSTED_PROXIES}")
     print(f"[CONFIG] RSA_PUB exists = {os.path.exists(RSA_PUB)}")
-    app.run(debug=False, host='::', port=5033)
+    app.run(debug=False, host='0.0.0.0', port=5033)
