@@ -471,26 +471,23 @@ def is_captcha_needed(ip):
 def mark_captcha_verified(ip):
     config = get_captcha_config()
     duration = config.get('duration_minutes', 30)
-    expiry = _captcha_time.time() + duration * 60
-    verified_at = _captcha_time.time()
+    expiry = time.time() + duration * 60
+    verified_at = time.time()
 
     verified = get_verified_ips()
     verified[ip] = expiry
     save_verified_ips(verified)
 
-    # 加密日志
-    aes_key = config.get('aes_key', '')
-    if aes_key:
-        try:
-            plaintext = f"{ip}|{datetime.fromtimestamp(verified_at, CST).strftime('%Y-%m-%d %H:%M:%S')}|{datetime.fromtimestamp(expiry, CST).strftime('%Y-%m-%d %H:%M:%S')}"
-            encrypted = _aes_encrypt(plaintext, aes_key)
-            log = get_verified_log()
-            log.append({'data': encrypted, 'ts': verified_at})
-            if len(log) > 500:
-                log = log[-500:]
-            save_verified_log(log)
-        except Exception:
-            pass
+    # ★ 使用 RSA 加密存储日志
+    plaintext = f"{ip}|{datetime.fromtimestamp(verified_at, CST).strftime('%Y-%m-%d %H:%M:%S')}|{datetime.fromtimestamp(expiry, CST).strftime('%Y-%m-%d %H:%M:%S')}"
+    encrypted = rsa_encrypt_report(plaintext)   # 返回 "RSA:" + base64 或空字符串
+    if encrypted:
+        log = get_verified_log()
+        log.append({'data': encrypted, 'ts': verified_at})
+        if len(log) > 500:
+            log = log[-500:]
+        save_verified_log(log)
+
     return expiry
 
 def require_captcha(f):
@@ -713,88 +710,15 @@ def api_admin_captcha_clear():
 def api_admin_captcha_verified_log():
     if not is_admin():
         return jsonify({'error': '未授权'}), 403
-
-    aes_key = get_aes_key()
-    if not aes_key:
-        return jsonify({'error': '请先在验证码配置中设置 AES 密钥', 'entries': []})
-
     log = get_verified_log()
-    entries = []
-    for entry in log:
-        try:
-            decrypted = _aes_decrypt(entry['data'], aes_key)
-            parts = decrypted.split('|')
-            entries.append({
-                'ip': parts[0] if len(parts) >= 1 else '???',
-                'verified_at': parts[1] if len(parts) >= 2 else '',
-                'expiry': parts[2] if len(parts) >= 3 else '',
-            })
-        except Exception:
-            entries.append({'ip': '🔒 解密失败', 'verified_at': '', 'expiry': ''})
-    return jsonify({'entries': list(reversed(entries))})
+    # 直接返回原始加密数据，前端自行解密
+    return jsonify({'entries': log})
 
-@app.route('/api/admin/captcha/aes-key', methods=['POST'])
-@require_csrf
-@require_private_key
-def api_admin_captcha_set_aes_key():
-    if not is_admin():
-        return jsonify({'error': '未授权'}), 403
-
-    data = request.get_json(silent=True) or {}
-    new_key = data.get('aes_key', '').strip()
-    if new_key and len(new_key) < 8:
-        return jsonify({'error': 'AES 密钥至少 8 个字符'}), 400
-
-    config = get_captcha_config()
-    old_key = config.get('aes_key', '')
-    if new_key and old_key and new_key != old_key:
-        log = get_verified_log()
-        new_log = []
-        for entry in log:
-            try:
-                decrypted = _aes_decrypt(entry['data'], old_key)
-                new_encrypted = _aes_encrypt(decrypted, new_key)
-                new_log.append({'data': new_encrypted, 'ts': entry['ts']})
-            except Exception:
-                pass
-        save_verified_log(new_log)
-
-    config['aes_key'] = new_key
-    save_captcha_config(config)
-    return jsonify({'ok': True, 'has_key': bool(new_key)})# ═══════════════════════════════════════════════════════════
-# 4.6.5 AES 加密工具（用于已验证 IP 加密存储）
+# ═══════════════════════════════════════════════════════════
+# 4.6.5  加密工具（用于已验证 IP 加密存储）
 # ═══════════════════════════════════════════════════════════
 from Crypto.Cipher import AES as _AES_CIPHER
 import base64 as _base64
-
-def _aes_pad(data: bytes, block_size: int = 16) -> bytes:
-    """PKCS7 填充"""
-    pad_len = block_size - len(data) % block_size
-    return data + bytes([pad_len] * pad_len)
-
-def _aes_unpad(data: bytes) -> bytes:
-    """PKCS7 去填充"""
-    pad_len = data[-1]
-    if pad_len < 1 or pad_len > 16:
-        raise ValueError("填充错误")
-    return data[:-pad_len]
-
-def _aes_encrypt(plaintext: str, key_str: str) -> str:
-    """AES-256-CBC 加密，返回 Base64"""
-    key = hashlib.sha256(key_str.encode()).digest()
-    iv = secrets.token_bytes(16)
-    cipher = _AES_CIPHER.new(key, _AES_CIPHER.MODE_CBC, iv)
-    ct = cipher.encrypt(_aes_pad(plaintext.encode()))
-    return _base64.b64encode(iv + ct).decode()
-
-def _aes_decrypt(cipher_b64: str, key_str: str) -> str:
-    """AES-256-CBC 解密"""
-    key = hashlib.sha256(key_str.encode()).digest()
-    raw = _base64.b64decode(cipher_b64)
-    iv, ct = raw[:16], raw[16:]
-    cipher = _AES_CIPHER.new(key, _AES_CIPHER.MODE_CBC, iv)
-    pt = _aes_unpad(cipher.decrypt(ct))
-    return pt.decode()
 
 # ── 已验证 IP 日志文件 ──
 CAPTCHA_LOG_FILE = os.path.join(CAPTCHA_DIR, 'verified_log.json')
@@ -810,11 +734,6 @@ def get_verified_log():
 def save_verified_log(data):
     """保存已验证IP日志"""
     atomic_write(CAPTCHA_LOG_FILE, json.dumps(data, ensure_ascii=False))
-
-def get_aes_key():
-    """从 config 中获取 AES 密钥"""
-    config = get_captcha_config()
-    return config.get('aes_key', '')
 
 # ═══════════════════════════════════════════════════════════
 # 修改 mark_captcha_verified：同时写入加密日志
@@ -1983,14 +1902,19 @@ def submit_vote(poll_id):
         iv = data['iv'].replace('\n', '').replace('\r', '').strip()
         aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
         key_hash = data['key_hash'].strip()
-        edit_token = secrets.token_urlsafe(24)   # 保留但不再用于校验，仅用于兼容旧文件
+        edit_token = secrets.token_urlsafe(24)
+
+        # ★ 读取备注
+        remark_iv = data.get('remark_iv', '').strip()
+        remark_aes_msg = data.get('remark_aes_msg', '').strip()
+        remark_line = f"{remark_iv}|{remark_aes_msg}"
 
         server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
         server_meta = f"{get_client_ip()} | {server_time}"
         server_enc = rsa_encrypt_report(server_meta)
 
-        # 写入新投票文件：v2|rsa_key|iv\n aes_msg\n server_enc\n edit_token\n key_hash
-        content = f"v2|{rsa_key}|{iv}\n{aes_msg}\n{server_enc}\n{edit_token}\n{key_hash}"
+        # 写入文件：v2|rsa_key|iv\n aes_msg\n server_enc\n edit_token\n key_hash\n remark_line
+        content = f"v2|{rsa_key}|{iv}\n{aes_msg}\n{server_enc}\n{edit_token}\n{key_hash}\n{remark_line}"
 
         with _file_lock:
             seq = get_vote_seq_unlocked(poll_dir)
@@ -2000,6 +1924,7 @@ def submit_vote(poll_id):
         return rate_limit_json({'status': 'ok', 'seq': seq, 'edit_token': edit_token}, 200, in_wl, block_until)
     finally:
         release_processing_lock(ip)
+
 @app.route('/api/votes/<poll_id>/<int:seq>', methods=['PUT'])
 @require_csrf
 def modify_vote(poll_id, seq):
@@ -2019,36 +1944,49 @@ def modify_vote(poll_id, seq):
         if not filepath or not os.path.isfile(filepath):
             return rate_limit_json({"error": "投票记录不存在"}, 404, in_wl, block_until)
 
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                old_lines = [l.strip() for l in f.readlines() if l.strip()]
-            # 新格式必须有 5 行：v2|... , aes_msg, server_enc, edit_token, key_hash
-            if len(old_lines) < 5:
-                return rate_limit_json({"error": "原投票文件格式过旧，无法修改（缺少密钥哈希）"}, 400, in_wl, block_until)
-            old_edit_token = old_lines[3].strip()      # 兼容保留，不再使用
-            old_server_enc = old_lines[2].strip()
-            stored_key_hash = old_lines[4].strip()
-        except Exception as e:
-            return rate_limit_json({"error": f"读取原投票失败: {str(e)}"}, 500, in_wl, block_until)
+        # 读取原文件
+        with open(filepath, 'r', encoding='utf-8') as f:
+            lines = [l.rstrip('\n') for l in f.readlines()]
+        # 确保至少6行
+        while len(lines) < 6:
+            lines.append('')
 
+        # 检查原文件格式
+        if len(lines) < 5 or not lines[0].startswith('v2|'):
+            return rate_limit_json({"error": "原投票文件格式无效"}, 400, in_wl, block_until)
+
+        stored_key_hash = lines[4].strip()
         data = request.get_json(silent=True) or {}
         provided_key_hash = data.get('original_key_hash', '').strip()
-
         if not stored_key_hash or stored_key_hash != provided_key_hash:
             return rate_limit_json({"error": "原 AES 密钥哈希验证失败，无权修改此投票"}, 403, in_wl, block_until)
 
         if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv')):
             return rate_limit_json({"error": "数据不完整（缺少 rsa_key / aes_msg / iv）"}, 400, in_wl, block_until)
 
+        # 更新内容行
+        lines[1] = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+        # 更新第一行的 rsa_key 和 iv
         rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
         iv = data['iv'].replace('\n', '').replace('\r', '').strip()
-        aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+        # 保留原 server_enc 和 edit_token，但可以重新生成或保留
+        # 我们保留原 server_enc（第3行）和 edit_token（第4行）以及 key_hash（第5行）
+        # 但需要更新第一行的 rsa_key 和 iv
+        parts = lines[0].split('|')
+        if len(parts) >= 3:
+            parts[1] = rsa_key
+            parts[2] = iv
+            lines[0] = '|'.join(parts)
 
-        # 保留原始 server_enc 和原 key_hash
-        content = f"v2|{rsa_key}|{iv}\n{aes_msg}\n{old_server_enc}\n{old_edit_token}\n{stored_key_hash}"
+        # ★ 更新备注（如果有提供）
+        new_remark_iv = data.get('remark_iv', '').strip()
+        new_remark_aes = data.get('remark_aes_msg', '').strip()
+        if 'remark_iv' in data or 'remark_aes_msg' in data:
+            lines[5] = f"{new_remark_iv}|{new_remark_aes}"
 
-        with _file_lock:
-            atomic_write_unlocked(filepath, content)
+        # 写回文件
+        content = "\n".join(lines)
+        atomic_write(filepath, content)
 
         block_until = set_rate_limit_after(ip)
         return rate_limit_json({'status': 'ok', 'seq': seq}, 200, in_wl, block_until)
@@ -2138,6 +2076,12 @@ def get_poll_data(poll_id):
                 if len(lines) < 3:
                     continue
                 is_v2 = lines[0].startswith('v2|')
+                # 解析备注行（第6行，索引5）
+                remark_line = lines[5].strip() if len(lines) >= 6 else ''
+                remark_parts = remark_line.split('|', 1)
+                remark_iv = remark_parts[0] if len(remark_parts) >= 1 else ''
+                remark_aes_msg = remark_parts[1] if len(remark_parts) >= 2 else ''
+
                 if is_v2:
                     parts = lines[0].split('|')
                     votes.append({
@@ -2146,7 +2090,9 @@ def get_poll_data(poll_id):
                         'iv': parts[2] if len(parts) >= 3 else '',
                         'aes_msg': lines[1],
                         'server_enc': lines[2] if len(lines) > 2 else '',
-                        'edit_token': lines[3].strip() if len(lines) >= 4 else ''
+                        'edit_token': lines[3].strip() if len(lines) >= 4 else '',
+                        'remark_iv': remark_iv,
+                        'remark_aes_msg': remark_aes_msg
                     })
                 else:
                     parts = lines[0].split('|')
@@ -2156,7 +2102,9 @@ def get_poll_data(poll_id):
                         'iv': parts[1] if len(parts) >= 2 else '',
                         'meta_enc': lines[1].strip(),
                         'content_enc': lines[2].strip(),
-                        'edit_token': lines[3].strip() if len(lines) >= 4 else ''
+                        'edit_token': lines[3].strip() if len(lines) >= 4 else '',
+                        'remark_iv': remark_iv,
+                        'remark_aes_msg': remark_aes_msg
                     })
         except Exception:
             continue
@@ -3170,6 +3118,93 @@ def chat_retention():
         return jsonify({'error': '请输入有效整数'}), 400
     atomic_write(CHAT_RETENTION_FILE, str(hours))
     return jsonify({'ok': True, 'hours': hours})
+# ═══════════════════════════════════════════════════════════
+# 18. 数据导入导出（全量备份/恢复）
+# ═══════════════════════════════════════════════════════════
+import zipfile
+import io
+import shutil
+
+# 临时提高上传大小限制（仅用于导入）
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
+
+@app.route('/api/admin/export-data', methods=['GET'])
+@require_csrf
+@require_private_key
+def export_data():
+    """导出 /data 目录为 ZIP 文件"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    # 创建内存中的 ZIP 文件
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        data_dir = DATA_DIR
+        if not os.path.exists(data_dir):
+            return jsonify({'error': '数据目录不存在'}), 404
+
+        for root, dirs, files in os.walk(data_dir):
+            for file in files:
+                file_path = os.path.join(root, file)
+                # 计算相对路径（相对于 DATA_DIR）
+                arcname = os.path.relpath(file_path, data_dir)
+                zf.write(file_path, arcname)
+
+    zip_buffer.seek(0)
+    return Response(
+        zip_buffer.getvalue(),
+        mimetype='application/zip',
+        headers={
+            'Content-Disposition': f'attachment; filename=backup_{datetime.now(CST).strftime("%Y%m%d_%H%M%S")}.zip'
+        }
+    )
+
+
+@app.route('/api/admin/import-data', methods=['POST'])
+@require_csrf
+@require_private_key
+def import_data():
+    """导入 ZIP 文件并覆盖 /data 目录"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    # 检查是否有文件上传
+    if 'file' not in request.files:
+        return jsonify({'error': '未上传文件'}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': '文件名为空'}), 400
+    if not file.filename.lower().endswith('.zip'):
+        return jsonify({'error': '仅支持 ZIP 文件'}), 400
+
+    try:
+        # 读取上传的文件内容
+        zip_data = file.read()
+        zip_buffer = io.BytesIO(zip_data)
+        with zipfile.ZipFile(zip_buffer, 'r') as zf:
+            # 先验证 ZIP 是否有效
+            if zf.testzip() is not None:
+                return jsonify({'error': 'ZIP 文件损坏'}), 400
+
+            # 清空当前 DATA_DIR（保留目录本身）
+            data_dir = DATA_DIR
+            if os.path.exists(data_dir):
+                # 删除所有子文件和子目录，但保留 data_dir 本身
+                for item in os.listdir(data_dir):
+                    item_path = os.path.join(data_dir, item)
+                    if os.path.isfile(item_path) or os.path.islink(item_path):
+                        os.unlink(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+
+            # 解压所有文件到 DATA_DIR
+            zf.extractall(data_dir)
+
+        return jsonify({'ok': True, 'message': '数据已成功导入'})
+    except zipfile.BadZipFile:
+        return jsonify({'error': '无效的 ZIP 文件'}), 400
+    except Exception as e:
+        return jsonify({'error': f'导入失败: {str(e)}'}), 500
 if __name__ == '__main__':
     print(f"[CONFIG] SESSION_COOKIE_SECURE = {app.config['SESSION_COOKIE_SECURE']}")
     print(f"[CONFIG] TRUSTED_PROXIES = {TRUSTED_PROXIES}")
