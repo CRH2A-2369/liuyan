@@ -51,8 +51,12 @@
 
   <div id="msg-panel" style="display:none">
     <hr><h3>IP白名单管理（豁免速率限制）</h3>
-    <div style="display:flex;gap:8px"><input id="wl-ip" placeholder="输入要加入白名单的IP" style="flex:1"><button onclick="addWL()">添加</button></div>
     <div id="wl-list" style="max-height:120px;overflow-y:auto;background:#fff;padding:6px;border:1px solid #eee;border-radius:4px;margin-top:8px"></div>
+    <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <input id="wl-ip" placeholder="输入要加入白名单的IP" style="flex:1">
+      <button onclick="addWL()">添加</button>
+      <button onclick="addCurrentIPToWL()" style="background:#2196F3;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">➕ 添加当前IP</button>
+    </div>
     <h2>信件管理
   <a href="javascript:logout()" style="font-size:14px">[退出登录]</a>
   <a href="/admin/qun" style="font-size:14px;margin-left:10px;color:#4CAF50;text-decoration:none;border:1px solid #4CAF50;padding:3px 10px;border-radius:4px">💬 群聊管理</a>
@@ -87,366 +91,450 @@
   </div>
   <footer id="footer"></footer>
 
-  <script>
-    const rawData = JSON.parse(document.getElementById('raw-data').textContent);
-    function loadWL(){
-        authFetch('/api/whitelist').then(function(r){return r.json();}).then(function(list){
-        var el=document.getElementById('wl-list');
-        el.innerHTML=list.length?list.map(function(ip){
-        return '<div class="bl-item"><span>'+esc(ip)+'</span><button class="bl-del" onclick="removeWL(\''+esc(ip)+'\')">移除</button></div>';
-        }).join(''):'<div style="color:#888;padding:4px">暂无白名单IP</div>';
+<script>
+  const rawData = JSON.parse(document.getElementById('raw-data').textContent);
+  let allReplies = [], jse = null, csrfToken = '';
+
+  // 初始化 JSEncrypt
+  try { jse = new JSEncrypt(); } catch(e) {}
+
+  // 工具函数：获取 CSRF Token
+  function getCsrfToken() {
+    return csrfToken;
+  }
+
+  // 解密 IP（使用管理员私钥）
+  function decryptIP(encrypted) {
+    if (!jse) return '（密钥未加载）';
+    try {
+      const raw = encrypted && encrypted.startsWith('RSA:') ? encrypted.slice(4) : encrypted;
+      if (!raw) return '（空数据）';
+      const dec = jse.decrypt(raw);
+      return dec || '（解密失败）';
+    } catch(e) {
+      return '（解密失败）';
+    }
+  }
+
+  // ---------- 白名单 ----------
+  async function loadWL() {
+    const res = await fetch('/api/whitelist');
+    const list = await res.json();
+    const container = document.getElementById('wl-list');
+    container.innerHTML = '';
+    list.forEach(item => {
+      const plainIP = decryptIP(item.encrypted);
+      const div = document.createElement('div');
+      div.className = 'bl-item';
+      div.innerHTML = `
+        <span>${plainIP}</span>
+        <button class="bl-del" onclick="deleteIP('${item.hash}', 'white')">删除</button>
+      `;
+      container.appendChild(div);
     });
-    }
-function addWL(){
-  var ip=document.getElementById('wl-ip').value.trim();
-  if(!ip)return;
-  authFetch('/api/whitelist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',ip:ip})}).then(async function(r){
-    if(r.ok){document.getElementById('wl-ip').value='';loadWL();}else{
-      try { const d=await r.json(); alert(d.error||'失败'); }catch(e){ alert('失败'); }
-    }
-  });
-}
-function removeWL(ip){
-  authFetch('/api/whitelist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',ip:ip})}).then(function(r){
-    if(r.ok){loadWL();}else{alert('失败');}
-  });
-}
-    function insertAdminFileLink() {
-      const url = prompt('请输入文件URL:');
-      if (!url) return;
-      const name = prompt('请输入显示名称:', url.split('/').pop() || '文件') || '文件';
-      const ext = url.split('.').pop().toLowerCase();
-      let md = ['jpg','jpeg','png','gif','webp','svg'].includes(ext) ? `![${name}](${url})` : `[📎 ${name}](${url})`;
-      const ta = document.getElementById('rep-content');
-      ta.value += (ta.value ? '\n' : '') + md;
-      ta.focus();
-    }
+  }
 
-    let allReplies=[], jse=null, csrfToken='';
-    try{ jse = new JSEncrypt(); }catch(e){}
-    const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
-    function deriveKey(str) { return CryptoJS.enc.Hex.parse(CryptoJS.SHA256(str).toString()); }
-
-    const authFetch = async (url, opts={}) => {
-        const headers = { ...opts.headers };
-        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
-        const res = await fetch(url, { credentials: 'same-origin', ...opts, headers });
-        if (res.status === 403) throw new Error('CSRF/Session 失效');
-        return res;
-    };
-
-    async function init() {
-        try {
-            csrfToken = (await fetch('/api/csrf', {credentials:'same-origin'}).then(r=>r.json())).token;
-            const status = await fetch('/api/admin/status', {credentials:'same-origin'}).then(r=>r.json());
-            if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
-                const savedKey = sessionStorage.getItem('admin_priv_key');
-                if (savedKey) { jse.setPrivateKey(savedKey); showAdmin(); }
-                else { await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}}); sessionStorage.clear(); location.reload(); }
-            } else if (status.logged_in) {
-                await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}}); sessionStorage.clear(); location.reload();
-            } else {
-                const chal = await fetch('/api/admin/challenge', {credentials:'same-origin'}).then(r=>r.json());
-                if (chal.challenge && chal.challenge !== 'ERROR') { window.challenge = chal.challenge; document.getElementById('login-panel').style.display = 'block'; }
-            }
-        } catch(e) { console.error('Init:', e); }
-    }
-    init();
-
-    async function verify(){
-        if(!jse||!window.challenge) return;
-        const k = document.getElementById('privKey').value.trim(); if(!k) return;
-        jse.setPrivateKey(k);
-        try{
-            const plain = jse.decrypt(window.challenge);
-            if(!plain) throw new Error('RSA解密为空');
-            const fd = new FormData(); fd.append('plaintext', plain);
-            const r = await authFetch('/api/admin/verify',{method:'POST',body:fd});
-            if(r.ok){ sessionStorage.setItem('admin_has_key', 'true'); sessionStorage.setItem('admin_priv_key', k); location.reload(); }
-            else document.getElementById('err').textContent = await r.text();
-        }catch(e){ document.getElementById('err').textContent = '私钥无效'; }
-    }
-
-    function showAdmin(){
-        document.getElementById('login-panel').style.display='none';
-        document.getElementById('msg-panel').style.display='block';
-        fetch('/api/replies', {credentials:'same-origin'}).then(function(r){return r.json();}).then(function(rps){allReplies=rps;render();});
-        fetch('/api/footer', {credentials:'same-origin'}).then(function(r){return r.text();}).then(function(t){document.getElementById('footInput').value=t;});
-        loadBL();
-        loadWL();
-    }
-
-    function render(){
-        const list = document.getElementById('list');
-        list.innerHTML = '';
-        if(!rawData.length){ list.innerHTML='<p style="color:#888;text-align:center">暂无留言</p>'; return; }
-
-        rawData.forEach(m => {
-            const isV2 = m.is_v2;
-            let rk, ivStr, aesEnc, serverEnc, metaEnc, contentEnc;
-
-            if (isV2) {
-                const parts = m.rsa_iv.split('|');
-                rk = (parts[1] || '').replace(/\s+/g, '');
-                ivStr = (parts[2] || '').replace(/\s+/g, '');
-                aesEnc = (m.aes_msg || '').replace(/\s+/g, '');
-                serverEnc = (m.server_enc || '').replace(/\s+/g, '');
-            } else {
-                const parts = m.rsa_iv.split('|');
-                rk = parts[0].replace(/\s+/g, '');
-                ivStr = (parts[1] || '').replace(/\s+/g, '');
-                metaEnc = (m.meta_enc || '').replace(/\s+/g, '');
-                contentEnc = (m.content_enc || '').replace(/\s+/g, '');
-            }
-
-            let meta = '解密失败', txt = '解密失败', rawAES = '', serverMeta = '', nick = '匿名';
-            try {
-                rawAES = jse.decrypt(rk);
-                if (!rawAES) throw new Error('RSA解密失败，请检查私钥');
-                const key32 = deriveKey(rawAES);
-                const ivW = CryptoJS.enc.Base64.parse(ivStr);
-                const opts = { iv: ivW, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 };
-
-                if (isV2) {
-                    const plain = CryptoJS.AES.decrypt(aesEnc, key32, opts).toString(CryptoJS.enc.Utf8);
-                    if (!plain) throw new Error('AES解密结果为空');
-                    const p = plain.indexOf(' | ');
-                    if (p !== -1) {
-                        nick = plain.substring(0, p);
-                        txt = plain.substring(p + 3);
-                        meta = '👤 ' + nick;
-                    } else {
-                        txt = plain;
-                        meta = '（格式异常）';
-                    }
-                    if (serverEnc) {
-                        const sm = jse.decrypt(serverEnc);
-                        if (sm) serverMeta = ' | 🌐🕒 ' + sm;
-                    }
-                } else {
-                    meta = CryptoJS.AES.decrypt(metaEnc, key32, opts).toString(CryptoJS.enc.Utf8);
-                    txt  = CryptoJS.AES.decrypt(contentEnc, key32, opts).toString(CryptoJS.enc.Utf8);
-                    if (!meta || !txt) throw new Error('AES解密结果为空');
-                    const mp = meta.split(' | ');
-                    nick = mp[2] || '匿名';
-                }
-            } catch(e) {
-                console.warn(`[留言${m.seq}]`, e.message);
-                meta = txt = `❌ ${e.message}`;
-            }
-
-            const card = document.createElement('div');
-            card.className = 'card';
-
-            const delBtn = document.createElement('button');
-            delBtn.className = 'del';
-            delBtn.textContent = '删除留言';
-            delBtn.dataset.file = m.file;
-            card.appendChild(delBtn);
-
-            const metaDiv = document.createElement('div');
-            metaDiv.className = 'meta';
-            metaDiv.textContent = isV2 ? (meta + serverMeta) : ('📦 ' + meta);
-            card.appendChild(metaDiv);
-
-            const keySpan = document.createElement('span');
-            keySpan.className = 'key-display';
-            keySpan.textContent = '🔑 AES密钥: ' + (rawAES || '解密失败');
-            card.appendChild(keySpan);
-
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'md-content';
-            contentDiv.style.cssText = 'margin:4px 0 0;word-break:break-all';
-            contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(txt));
-            card.appendChild(contentDiv);
-
-            const copyBtn = document.createElement('button');
-            copyBtn.className = 'copy-btn';
-            copyBtn.textContent = '复制原文';
-            copyBtn.dataset.copy = txt;
-            card.appendChild(copyBtn);
-
-            // ★ 渲染该留言的所有回复（允许多条）
-            const reps = allReplies.filter(r => r.seq == m.seq);
-            reps.sort((a, b) => (a.num || 1) - (b.num || 1));
-            reps.forEach(rep => {
-                try {
-                    const rKey = deriveKey(rawAES);
-                    const rTxt = CryptoJS.AES.decrypt(
-                        rep.aes_msg.replace(/\s+/g, ''),
-                        rKey,
-                        { iv: CryptoJS.enc.Base64.parse(rep.iv.replace(/\s+/g, '')),
-                          mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
-                    ).toString(CryptoJS.enc.Utf8);
-                    if (rTxt) {
-                        const p = rTxt.split(' | ');
-                        const replyBox = document.createElement('div');
-                        replyBox.className = 'reply-box';
-
-                        const rDelBtn = document.createElement('button');
-                        rDelBtn.className = 'reply-del';
-                        rDelBtn.textContent = '删除回复';
-                        rDelBtn.dataset.file = `回复_${m.seq}_${rep.num || 1}.txt`;
-                        replyBox.appendChild(rDelBtn);
-
-                        const rMeta = document.createElement('div');
-                        rMeta.className = 'reply-meta';
-                        rMeta.textContent = `📝 回复 #${rep.num || 1} ${p[0]} | 🕒 ${p[1] || ''}`;
-                        replyBox.appendChild(rMeta);
-
-                        const rContent = document.createElement('div');
-                        rContent.className = 'md-content';
-                        rContent.style.margin = '0';
-                        rContent.innerHTML = DOMPurify.sanitize(marked.parse(p.slice(2).join(' | ')));
-                        replyBox.appendChild(rContent);
-
-                        const rCopyBtn = document.createElement('button');
-                        rCopyBtn.className = 'copy-btn';
-                        rCopyBtn.textContent = '复制回复';
-                        rCopyBtn.dataset.copy = p.slice(2).join(' | ');
-                        replyBox.appendChild(rCopyBtn);
-
-                        card.appendChild(replyBox);
-                    }
-                } catch(e) { console.warn(`[回复${m.seq}#${rep.num}]`, e.message); }
-            });
-
-            // ★ 回复按钮始终可见（允许多次回复）
-            const replyBtn = document.createElement('button');
-            replyBtn.className = 'reply-btn';
-            replyBtn.textContent = '回复';
-            replyBtn.dataset.seq = m.seq;
-            replyBtn.dataset.nick = nick;
-            replyBtn.dataset.key = rawAES;
-            card.appendChild(replyBtn);
-
-            list.appendChild(card);
-        }); // ← 关闭 rawData.forEach
-
-        // ★ 事件委托
-        list.onclick = e => {
-            const t = e.target;
-            if (t.matches('.del')) { if(confirm('确定？')) authFetch(`/admin/delete/${t.dataset.file}`, {method:'POST'}).then(()=>location.reload()); }
-            if (t.matches('.reply-btn')) { openReply(t.dataset.seq, t.dataset.nick, t.dataset.key); }
-            if (t.matches('.reply-del')) {
-                if (confirm('确定删除这条回复？')) {
-                    authFetch(`/admin/delete_reply_file/${t.dataset.file}`, { method: 'POST' })
-                        .then(() => location.reload());
-                }
-            }
-        };
-    } // ← 关闭 render
-
-    function openReply(s,n,k){
-        document.getElementById('reply-panel').style.display='block';
-        document.getElementById('rep-seq').value=s;
-        document.getElementById('rep-nick').value=n;
-        document.getElementById('rep-key').value=k;
-        document.getElementById('reply-panel').scrollIntoView({behavior:'smooth'});
-    }
-    function closeReply(){ document.getElementById('reply-panel').style.display='none'; document.getElementById('rep-content').value=''; }
-    function submitReply(){
-        const s = document.getElementById('rep-seq').value, k = document.getElementById('rep-key').value, t = document.getElementById('rep-content').value.trim();
-        if (!t) return alert('内容不能为空');
-        const iv = CryptoJS.lib.WordArray.random(16), pld = `${document.getElementById('rep-nick').value} | ${new Date().toLocaleString()} | ${t}`;
-        const enc = CryptoJS.AES.encrypt(pld, deriveKey(k), {iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
-        authFetch('/api/reply', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({seq:s, iv:CryptoJS.enc.Base64.stringify(iv), aes_msg:enc})}).then(r=>r.ok?(alert('已发送'),closeReply(),location.reload()):alert('失败'));
-    }
-    function updateFoot(){ authFetch('/api/footer',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'content='+encodeURIComponent(document.getElementById('footInput').value)}).then(()=>{alert('已更新');location.reload();}); }
-    function logout(){ sessionStorage.removeItem('admin_has_key'); sessionStorage.removeItem('admin_priv_key'); authFetch('/api/admin/logout').then(()=>location.reload()); }
-    function loadBL(){ authFetch('/api/blacklist').then(r=>r.json()).then(list=>{ document.getElementById('bl-list').innerHTML=list.length?list.map(ip=>`<div class="bl-item"><span>${esc(ip)}</span><button class="bl-del" onclick="removeBL('${esc(ip)}')">移除</button></div>`).join(''):'<div style="color:#888;padding:4px">暂无</div>'; }); }
-    function addBL(){
-        const ip=document.getElementById('bl-ip').value.trim();
-        if(!ip)return;
-        authFetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',ip})}).then(async r=>{
-            if(r.ok){document.getElementById('bl-ip').value='';loadBL();}else{
-                try { const d=await r.json(); alert(d.error||'失败'); }catch(e){ alert('失败'); }
-            }
-        });
-    }
-    function removeBL(ip){ authFetch('/api/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',ip})}).then(r=>r.ok?loadBL():alert('失败')); }
-
-    document.addEventListener('click', e => {
-        if (!e.target.matches('.copy-btn')) return;
-        const text = e.target.dataset.copy;
-        navigator.clipboard.writeText(text).then(() => {
-            e.target.textContent = '已复制';
-            e.target.classList.add('copied');
-            setTimeout(() => { e.target.textContent = '复制'; e.target.classList.remove('copied'); }, 1500);
-        }).catch(() => alert('复制失败，请手动选择'));
+  async function addWL(ip) {
+    const targetIp = ip || document.getElementById('wl-ip').value.trim();
+    if (!targetIp) return alert('请输入IP地址');
+    const res = await fetch('/api/whitelist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ action: 'add', ip: targetIp })
     });
-// ── 导出数据 ──
-async function exportData() {
-  if (!confirm('⚠️ 确认导出所有数据？\n导出文件包含所有留言、群聊、投票、IP记录等，请妥善保管。')) return;
-  const confirmText = prompt('请输入 "确认导出所有文件" 以继续：');
-  if (confirmText !== '确认导出所有文件') {
-    alert('操作已取消');
-    return;
-  }
-  try {
-    const res = await authFetch('/api/admin/export-data');
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(err || '导出失败');
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    // 从 Content-Disposition 提取文件名，或使用默认
-    const disposition = res.headers.get('content-disposition');
-    let filename = 'backup.zip';
-    if (disposition) {
-      const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-      if (match && match[1]) {
-        filename = match[1].replace(/['"]/g, '');
-      }
-    }
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    alert('✅ 导出成功');
-  } catch (e) {
-    alert('❌ 导出失败：' + e.message);
-  }
-}
-
-// ── 导入数据 ──
-function importData(input) {
-  if (!input.files || input.files.length === 0) return;
-  const file = input.files[0];
-  // 二次确认
-  const confirmMsg = `⚠️ 即将导入文件：${file.name}\n此操作将覆盖当前所有数据，不可撤销！\n请输入 "确认覆盖来自于 ${file.name} 的文件" 以继续：`;
-  const confirmText = prompt(confirmMsg);
-  if (confirmText !== `确认覆盖来自于 ${file.name} 的文件`) {
-    alert('操作已取消');
-    input.value = '';
-    return;
-  }
-
-  const formData = new FormData();
-  formData.append('file', file);
-
-  authFetch('/api/admin/import-data', {
-    method: 'POST',
-    body: formData,
-    // 不要设置 Content-Type，浏览器会自动设置 multipart/form-data
-  }).then(res => res.json()).then(data => {
-    if (data.ok) {
-      alert('✅ 导入成功！页面即将刷新。');
-      location.reload();
+    if (res.ok) {
+      alert('添加白名单成功');
+      document.getElementById('wl-ip').value = '';
+      loadWL();
     } else {
-      alert('❌ 导入失败：' + (data.error || '未知错误'));
+      alert('添加失败：' + await res.text());
     }
-  }).catch(err => {
-    alert('❌ 请求失败：' + err.message);
-  }).finally(() => {
-    input.value = '';
-  });
-}
-  </script>
+  }
+
+  async function addCurrentIPToWL() {
+    const res = await fetch('/api/myip');
+    const ip = await res.text();
+    if (!ip) { alert('无法获取当前IP'); return; }
+    if (confirm('确定将当前IP (' + ip + ') 加入白名单吗？')) {
+      addWL(ip);
+    }
+  }
+
+  // ---------- 黑名单 ----------
+  async function loadBL() {
+    const res = await fetch('/api/blacklist');
+    const list = await res.json();
+    const container = document.getElementById('bl-list');
+    container.innerHTML = '';
+    list.forEach(item => {
+      const plainIP = decryptIP(item.encrypted);
+      const div = document.createElement('div');
+      div.className = 'bl-item';
+      div.innerHTML = `
+        <span>${plainIP}</span>
+        <button class="bl-del" onclick="deleteIP('${item.hash}', 'black')">删除</button>
+      `;
+      container.appendChild(div);
+    });
+  }
+
+  async function addBL(ip) {
+    const targetIp = ip || document.getElementById('bl-ip').value.trim();
+    if (!targetIp) return alert('请输入IP地址');
+    const res = await fetch('/api/blacklist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ action: 'add', ip: targetIp })
+    });
+    if (res.ok) {
+      alert('添加黑名单成功');
+      document.getElementById('bl-ip').value = '';
+      loadBL();
+    } else {
+      alert('添加失败：' + await res.text());
+    }
+  }
+
+  // ---------- 删除 IP（统一函数） ----------
+  async function deleteIP(hash, type) {
+    if (!confirm('确定删除该IP？')) return;
+    const url = type === 'white' ? '/api/whitelist' : '/api/blacklist';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ action: 'remove', hash: hash })
+    });
+    if (res.ok) {
+      alert('删除成功');
+      if (type === 'white') loadWL(); else loadBL();
+    } else {
+      alert('删除失败：' + await res.text());
+    }
+  }
+
+  // ---------- 原有功能（回复、导出、导入等）----------
+  function insertAdminFileLink() {
+    const url = prompt('请输入文件URL:');
+    if (!url) return;
+    const name = prompt('请输入显示名称:', url.split('/').pop() || '文件') || '文件';
+    const ext = url.split('.').pop().toLowerCase();
+    let md = ['jpg','jpeg','png','gif','webp','svg'].includes(ext) ? `![${name}](${url})` : `[📎 ${name}](${url})`;
+    const ta = document.getElementById('rep-content');
+    ta.value += (ta.value ? '\n' : '') + md;
+    ta.focus();
+  }
+
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  function deriveKey(str) { return CryptoJS.enc.Hex.parse(CryptoJS.SHA256(str).toString()); }
+
+  const authFetch = async (url, opts={}) => {
+    const headers = { ...opts.headers };
+    if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    const res = await fetch(url, { credentials: 'same-origin', ...opts, headers });
+    if (res.status === 403) throw new Error('CSRF/Session 失效');
+    return res;
+  };
+
+  async function init() {
+    try {
+      csrfToken = (await fetch('/api/csrf', {credentials:'same-origin'}).then(r=>r.json())).token;
+      const status = await fetch('/api/admin/status', {credentials:'same-origin'}).then(r=>r.json());
+      if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
+        const savedKey = sessionStorage.getItem('admin_priv_key');
+        if (savedKey) { jse.setPrivateKey(savedKey); showAdmin(); }
+        else { await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}}); sessionStorage.clear(); location.reload(); }
+      } else if (status.logged_in) {
+        await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}}); sessionStorage.clear(); location.reload();
+      } else {
+        const chal = await fetch('/api/admin/challenge', {credentials:'same-origin'}).then(r=>r.json());
+        if (chal.challenge && chal.challenge !== 'ERROR') { window.challenge = chal.challenge; document.getElementById('login-panel').style.display = 'block'; }
+      }
+    } catch(e) { console.error('Init:', e); }
+  }
+  init();
+
+  async function verify(){
+    if(!jse||!window.challenge) return;
+    const k = document.getElementById('privKey').value.trim(); if(!k) return;
+    jse.setPrivateKey(k);
+    try{
+      const plain = jse.decrypt(window.challenge);
+      if(!plain) throw new Error('RSA解密为空');
+      const fd = new FormData(); fd.append('plaintext', plain);
+      const r = await authFetch('/api/admin/verify',{method:'POST',body:fd});
+      if(r.ok){ sessionStorage.setItem('admin_has_key', 'true'); sessionStorage.setItem('admin_priv_key', k); location.reload(); }
+      else document.getElementById('err').textContent = await r.text();
+    }catch(e){ document.getElementById('err').textContent = '私钥无效'; }
+  }
+
+  function showAdmin(){
+    document.getElementById('login-panel').style.display='none';
+    document.getElementById('msg-panel').style.display='block';
+    fetch('/api/replies', {credentials:'same-origin'}).then(function(r){return r.json();}).then(function(rps){allReplies=rps;render();});
+    fetch('/api/footer', {credentials:'same-origin'}).then(function(r){return r.text();}).then(function(t){document.getElementById('footInput').value=t;});
+    loadBL();
+    loadWL();
+  }
+
+  function render(){
+    const list = document.getElementById('list');
+    list.innerHTML = '';
+    if(!rawData.length){ list.innerHTML='<p style="color:#888;text-align:center">暂无留言</p>'; return; }
+
+    rawData.forEach(m => {
+      const isV2 = m.is_v2;
+      let rk, ivStr, aesEnc, serverEnc, metaEnc, contentEnc;
+
+      if (isV2) {
+        const parts = m.rsa_iv.split('|');
+        rk = (parts[1] || '').replace(/\s+/g, '');
+        ivStr = (parts[2] || '').replace(/\s+/g, '');
+        aesEnc = (m.aes_msg || '').replace(/\s+/g, '');
+        serverEnc = (m.server_enc || '').replace(/\s+/g, '');
+      } else {
+        const parts = m.rsa_iv.split('|');
+        rk = parts[0].replace(/\s+/g, '');
+        ivStr = (parts[1] || '').replace(/\s+/g, '');
+        metaEnc = (m.meta_enc || '').replace(/\s+/g, '');
+        contentEnc = (m.content_enc || '').replace(/\s+/g, '');
+      }
+
+      let meta = '解密失败', txt = '解密失败', rawAES = '', serverMeta = '', nick = '匿名';
+      try {
+        rawAES = jse.decrypt(rk);
+        if (!rawAES) throw new Error('RSA解密失败，请检查私钥');
+        const key32 = deriveKey(rawAES);
+        const ivW = CryptoJS.enc.Base64.parse(ivStr);
+        const opts = { iv: ivW, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 };
+
+        if (isV2) {
+          const plain = CryptoJS.AES.decrypt(aesEnc, key32, opts).toString(CryptoJS.enc.Utf8);
+          if (!plain) throw new Error('AES解密结果为空');
+          const p = plain.indexOf(' | ');
+          if (p !== -1) {
+            nick = plain.substring(0, p);
+            txt = plain.substring(p + 3);
+            meta = '👤 ' + nick;
+          } else {
+            txt = plain;
+            meta = '（格式异常）';
+          }
+          if (serverEnc) {
+            const sm = jse.decrypt(serverEnc);
+            if (sm) serverMeta = ' | 🌐🕒 ' + sm;
+          }
+        } else {
+          meta = CryptoJS.AES.decrypt(metaEnc, key32, opts).toString(CryptoJS.enc.Utf8);
+          txt  = CryptoJS.AES.decrypt(contentEnc, key32, opts).toString(CryptoJS.enc.Utf8);
+          if (!meta || !txt) throw new Error('AES解密结果为空');
+          const mp = meta.split(' | ');
+          nick = mp[2] || '匿名';
+        }
+      } catch(e) {
+        console.warn(`[留言${m.seq}]`, e.message);
+        meta = txt = `❌ ${e.message}`;
+      }
+
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'del';
+      delBtn.textContent = '删除留言';
+      delBtn.dataset.file = m.file;
+      card.appendChild(delBtn);
+
+      const metaDiv = document.createElement('div');
+      metaDiv.className = 'meta';
+      metaDiv.textContent = isV2 ? (meta + serverMeta) : ('📦 ' + meta);
+      card.appendChild(metaDiv);
+
+      const keySpan = document.createElement('span');
+      keySpan.className = 'key-display';
+      keySpan.textContent = '🔑 AES密钥: ' + (rawAES || '解密失败');
+      card.appendChild(keySpan);
+
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'md-content';
+      contentDiv.style.cssText = 'margin:4px 0 0;word-break:break-all';
+      contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(txt));
+      card.appendChild(contentDiv);
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'copy-btn';
+      copyBtn.textContent = '复制原文';
+      copyBtn.dataset.copy = txt;
+      card.appendChild(copyBtn);
+
+      const reps = allReplies.filter(r => r.seq == m.seq);
+      reps.sort((a, b) => (a.num || 1) - (b.num || 1));
+      reps.forEach(rep => {
+        try {
+          const rKey = deriveKey(rawAES);
+          const rTxt = CryptoJS.AES.decrypt(
+            rep.aes_msg.replace(/\s+/g, ''),
+            rKey,
+            { iv: CryptoJS.enc.Base64.parse(rep.iv.replace(/\s+/g, '')),
+              mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+          ).toString(CryptoJS.enc.Utf8);
+          if (rTxt) {
+            const p = rTxt.split(' | ');
+            const replyBox = document.createElement('div');
+            replyBox.className = 'reply-box';
+
+            const rDelBtn = document.createElement('button');
+            rDelBtn.className = 'reply-del';
+            rDelBtn.textContent = '删除回复';
+            rDelBtn.dataset.file = `回复_${m.seq}_${rep.num || 1}.txt`;
+            replyBox.appendChild(rDelBtn);
+
+            const rMeta = document.createElement('div');
+            rMeta.className = 'reply-meta';
+            rMeta.textContent = `📝 回复 #${rep.num || 1} ${p[0]} | 🕒 ${p[1] || ''}`;
+            replyBox.appendChild(rMeta);
+
+            const rContent = document.createElement('div');
+            rContent.className = 'md-content';
+            rContent.style.margin = '0';
+            rContent.innerHTML = DOMPurify.sanitize(marked.parse(p.slice(2).join(' | ')));
+            replyBox.appendChild(rContent);
+
+            const rCopyBtn = document.createElement('button');
+            rCopyBtn.className = 'copy-btn';
+            rCopyBtn.textContent = '复制回复';
+            rCopyBtn.dataset.copy = p.slice(2).join(' | ');
+            replyBox.appendChild(rCopyBtn);
+
+            card.appendChild(replyBox);
+          }
+        } catch(e) { console.warn(`[回复${m.seq}#${rep.num}]`, e.message); }
+      });
+
+      const replyBtn = document.createElement('button');
+      replyBtn.className = 'reply-btn';
+      replyBtn.textContent = '回复';
+      replyBtn.dataset.seq = m.seq;
+      replyBtn.dataset.nick = nick;
+      replyBtn.dataset.key = rawAES;
+      card.appendChild(replyBtn);
+
+      list.appendChild(card);
+    });
+
+    list.onclick = e => {
+      const t = e.target;
+      if (t.matches('.del')) { if(confirm('确定？')) authFetch(`/admin/delete/${t.dataset.file}`, {method:'POST'}).then(()=>location.reload()); }
+      if (t.matches('.reply-btn')) { openReply(t.dataset.seq, t.dataset.nick, t.dataset.key); }
+      if (t.matches('.reply-del')) {
+        if (confirm('确定删除这条回复？')) {
+          authFetch(`/admin/delete_reply_file/${t.dataset.file}`, { method: 'POST' })
+            .then(() => location.reload());
+        }
+      }
+    };
+  }
+
+  function openReply(s,n,k){
+    document.getElementById('reply-panel').style.display='block';
+    document.getElementById('rep-seq').value=s;
+    document.getElementById('rep-nick').value=n;
+    document.getElementById('rep-key').value=k;
+    document.getElementById('reply-panel').scrollIntoView({behavior:'smooth'});
+  }
+  function closeReply(){ document.getElementById('reply-panel').style.display='none'; document.getElementById('rep-content').value=''; }
+  function submitReply(){
+    const s = document.getElementById('rep-seq').value, k = document.getElementById('rep-key').value, t = document.getElementById('rep-content').value.trim();
+    if (!t) return alert('内容不能为空');
+    const iv = CryptoJS.lib.WordArray.random(16), pld = `${document.getElementById('rep-nick').value} | ${new Date().toLocaleString()} | ${t}`;
+    const enc = CryptoJS.AES.encrypt(pld, deriveKey(k), {iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
+    authFetch('/api/reply', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({seq:s, iv:CryptoJS.enc.Base64.stringify(iv), aes_msg:enc})}).then(r=>r.ok?(alert('已发送'),closeReply(),location.reload()):alert('失败'));
+  }
+  function updateFoot(){ authFetch('/api/footer',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'content='+encodeURIComponent(document.getElementById('footInput').value)}).then(()=>{alert('已更新');location.reload();}); }
+  function logout(){ sessionStorage.removeItem('admin_has_key'); sessionStorage.removeItem('admin_priv_key'); authFetch('/api/admin/logout').then(()=>location.reload()); }
+
+  // ── 导出数据 ──
+  async function exportData() {
+    if (!confirm('⚠️ 确认导出所有数据？\n导出文件包含所有留言、群聊、投票、IP记录等，请妥善保管。')) return;
+    const confirmText = prompt('请输入 "确认导出所有文件" 以继续：');
+    if (confirmText !== '确认导出所有文件') {
+      alert('操作已取消');
+      return;
+    }
+    try {
+      const res = await authFetch('/api/admin/export-data');
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(err || '导出失败');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const disposition = res.headers.get('content-disposition');
+      let filename = 'backup.zip';
+      if (disposition) {
+        const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+        if (match && match[1]) {
+          filename = match[1].replace(/['"]/g, '');
+        }
+      }
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      alert('✅ 导出成功');
+    } catch (e) {
+      alert('❌ 导出失败：' + e.message);
+    }
+  }
+
+  // ── 导入数据 ──
+  function importData(input) {
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    const confirmMsg = `⚠️ 即将导入文件：${file.name}\n此操作将覆盖当前所有数据，不可撤销！\n请输入 "确认覆盖来自于 ${file.name} 的文件" 以继续：`;
+    const confirmText = prompt(confirmMsg);
+    if (confirmText !== `确认覆盖来自于 ${file.name} 的文件`) {
+      alert('操作已取消');
+      input.value = '';
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    authFetch('/api/admin/import-data', {
+      method: 'POST',
+      body: formData,
+    }).then(res => res.json()).then(data => {
+      if (data.ok) {
+        alert('✅ 导入成功！页面即将刷新。');
+        location.reload();
+      } else {
+        alert('❌ 导入失败：' + (data.error || '未知错误'));
+      }
+    }).catch(err => {
+      alert('❌ 请求失败：' + err.message);
+    }).finally(() => {
+      input.value = '';
+    });
+  }
+
+  // 兼容旧代码（可能存在的调用）
+  async function addCurrentIP() {
+    try {
+      var res = await fetch('/api/myip');
+      var ip = await res.text();
+      if (!ip) { alert('无法获取当前IP'); return; }
+      if (confirm('确定将当前IP (' + ip + ') 加入白名单吗？')) {
+        addWL(ip);
+      }
+    } catch(e) {
+      alert('获取当前IP失败：' + e.message);
+    }
+  }
+</script>
 </body>
 </html>
