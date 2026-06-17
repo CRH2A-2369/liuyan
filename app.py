@@ -760,17 +760,102 @@ def get_fp():
 def is_admin():
     return session.get('admin') is True
 
-def load_blacklist():
-    try:
-        return set(line.strip() for line in open(BLACK_FILE, 'r', encoding='utf-8') if line.strip())
-    except Exception:
-        return set()
+def _migrate_ip_file(filepath, encrypted=False):
+    """迁移旧格式（纯IP）到新格式（hash|RSA加密）"""
+    if not os.path.exists(filepath):
+        return
+    with open(filepath, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    new_lines = []
+    changed = False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if '|' not in line:   # 旧格式
+            ip = line
+            ip_hash = sha512(ip)
+            enc = rsa_encrypt_report(ip)
+            if enc:
+                new_lines.append(f"{ip_hash}|{enc}\n")
+                changed = True
+            else:
+                # 加密失败则保留原样（但会丢失）
+                pass
+        else:
+            new_lines.append(line + '\n')
+    if changed:
+        # 备份原文件
+        shutil.copy(filepath, filepath + '.bak')
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.writelines(new_lines)
 
-def load_whitelist():
+def load_whitelist_hashes():
+    """返回白名单IP哈希集合（用于速率限制检查）"""
+    _migrate_ip_file(WHITE_FILE)
+    hashes = set()
     try:
-        return set(line.strip() for line in open(WHITE_FILE, 'r', encoding='utf-8') if line.strip())
+        with open(WHITE_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and '|' in line:
+                    h = line.split('|')[0]
+                    hashes.add(h)
     except Exception:
-        return set()
+        pass
+    return hashes
+
+def load_whitelist_encrypted():
+    """返回白名单加密列表（用于前端展示）"""
+    _migrate_ip_file(WHITE_FILE)
+    entries = []
+    try:
+        with open(WHITE_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and '|' in line:
+                    parts = line.split('|', 1)
+                    entries.append({'hash': parts[0], 'encrypted': parts[1]})
+    except Exception:
+        pass
+    return entries
+
+# 同样修改 load_blacklist 和 load_blacklist_encrypted
+def load_blacklist_hashes():
+    _migrate_ip_file(BLACK_FILE)
+    hashes = set()
+    try:
+        with open(BLACK_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and '|' in line:
+                    h = line.split('|')[0]
+                    hashes.add(h)
+    except Exception:
+        pass
+    return hashes
+
+def load_blacklist_encrypted():
+    _migrate_ip_file(BLACK_FILE)
+    entries = []
+    try:
+        with open(BLACK_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and '|' in line:
+                    parts = line.split('|', 1)
+                    entries.append({'hash': parts[0], 'encrypted': parts[1]})
+    except Exception:
+        pass
+    return entries
+
+# 修改原有的 load_whitelist / load_blacklist 重命名或保留向后兼容
+# 但建议直接修改原函数为返回哈希集合，并保留旧名
+def load_whitelist():
+    return load_whitelist_hashes()
+
+def load_blacklist():
+    return load_blacklist_hashes()
 
 def load_chat():
     with _file_lock:
@@ -930,7 +1015,8 @@ def _init_rate_db():
 _init_rate_db()
 
 def _is_whitelisted(ip):
-    return ip in load_whitelist()
+    ip_hash = sha512(ip)
+    return ip_hash in load_whitelist_hashes()
 
 def check_rate_limit_before(ip):
     _cleanup_rate_limits()
@@ -1005,7 +1091,7 @@ def check_rate_limit(action='read'):
 # === 7. 安全中间件 ===
 @app.before_request
 def security_checks():
-    if get_client_ip() in load_blacklist():
+    if sha512(get_client_ip()) in load_blacklist_hashes():
         return "IP已被封禁，拒绝访问", 403
     if session.get('admin'):
         stored = session.get('fp')
@@ -1352,35 +1438,129 @@ def update_footer():
     return "ok"
 
 @app.route('/api/blacklist', methods=['GET', 'POST'])
-@require_captcha
 @require_csrf
 def manage_blacklist():
     if not is_admin(): return "未授权", 403
-    bl = load_blacklist()
-    if request.method == 'GET': return jsonify(list(bl))
+    rl = check_rate_limit('read')
+    if rl: return rl
+    
+    if request.method == 'GET':
+        return jsonify(load_blacklist_encrypted())
+
     data = request.get_json(silent=True) or {}
-    ip = data.get('ip', '').strip()
-    if not ip: return "IP无效", 400
-    if data.get('action') == 'add': bl.add(ip)
-    elif data.get('action') == 'remove': bl.discard(ip)
-    atomic_write(BLACK_FILE, '\n'.join(bl) + '\n' if bl else '')
+    action = data.get('action')
+    
+    _migrate_ip_file(BLACK_FILE)
+    lines = []
+    try:
+        with open(BLACK_FILE, 'r', encoding='utf-8') as f: lines = f.readlines()
+    except Exception: lines = []
+
+    new_lines = []
+    
+    if action == 'add':
+        # 添加时：前端传明文 IP，后端计算 hash 并加密
+        ip = data.get('ip', '').strip()
+        if not ip: return "IP无效", 400
+        ip_hash = sha512(ip)
+        enc = rsa_encrypt_report(ip)
+        if not enc: return "加密失败", 500
+        
+        found = False
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            h = line.split('|')[0] if '|' in line else ''
+            if h == ip_hash:
+                found = True
+                new_lines.append(f"{ip_hash}|{enc}\n") # 覆盖更新
+            else:
+                new_lines.append(line + '\n')
+        if not found: new_lines.append(f"{ip_hash}|{enc}\n")
+        
+    elif action == 'remove':
+        # ★ 删除时：前端直接传 hash，后端按 hash 匹配删除
+        target_hash = data.get('hash', '').strip()
+        if not target_hash: return "缺少哈希值", 400
+        
+        removed = False
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            h = line.split('|')[0] if '|' in line else ''
+            if h != target_hash:
+                new_lines.append(line + '\n')
+            else:
+                removed = True
+        if not removed:
+            return jsonify({'error': 'IP不在黑名单中'}), 404
+    else:
+        return "无效操作", 400
+
+    atomic_write(BLACK_FILE, ''.join(new_lines))
     return "ok"
 
 @app.route('/api/whitelist', methods=['GET', 'POST'])
-@require_captcha
 @require_csrf
 def manage_whitelist():
     if not is_admin(): return "未授权", 403
     rl = check_rate_limit('read')
     if rl: return rl
-    wl = load_whitelist()
-    if request.method == 'GET': return jsonify(list(wl))
+    
+    if request.method == 'GET':
+        return jsonify(load_whitelist_encrypted())
+
     data = request.get_json(silent=True) or {}
-    ip = data.get('ip', '').strip()
-    if not ip: return "IP无效", 400
-    if data.get('action') == 'add': wl.add(ip)
-    elif data.get('action') == 'remove': wl.discard(ip)
-    atomic_write(WHITE_FILE, '\n'.join(sorted(wl)) + '\n' if wl else '')
+    action = data.get('action')
+    
+    _migrate_ip_file(WHITE_FILE)
+    lines = []
+    try:
+        with open(WHITE_FILE, 'r', encoding='utf-8') as f: lines = f.readlines()
+    except Exception: lines = []
+
+    new_lines = []
+    
+    if action == 'add':
+        # 添加时：前端传明文 IP，后端计算 hash 并加密
+        ip = data.get('ip', '').strip()
+        if not ip: return "IP无效", 400
+        ip_hash = sha512(ip)
+        enc = rsa_encrypt_report(ip)
+        if not enc: return "加密失败", 500
+        
+        found = False
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            h = line.split('|')[0] if '|' in line else ''
+            if h == ip_hash:
+                found = True
+                new_lines.append(f"{ip_hash}|{enc}\n") # 覆盖更新
+            else:
+                new_lines.append(line + '\n')
+        if not found: new_lines.append(f"{ip_hash}|{enc}\n")
+        
+    elif action == 'remove':
+        # ★ 删除时：前端直接传 hash，后端按 hash 匹配删除
+        target_hash = data.get('hash', '').strip()
+        if not target_hash: return "缺少哈希值", 400
+        
+        removed = False
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            h = line.split('|')[0] if '|' in line else ''
+            if h != target_hash:
+                new_lines.append(line + '\n')
+            else:
+                removed = True
+        if not removed:
+            return jsonify({'error': 'IP不在黑名单中'}), 404
+    else:
+        return "无效操作", 400
+
+    atomic_write(WHITE_FILE, ''.join(new_lines))
     return "ok"
 
 # === 12. 路由：群聊（未改动，与原版一致）===
