@@ -117,12 +117,6 @@
           <span class="unit">不含易混淆字符</span>
         </div>
 
-        <div class="form-row">
-          <label>🔐 AES 密钥</label>
-          <input type="password" id="aes-key" placeholder="设置密钥以加密存储IP（≥8字符）" style="flex:2;max-width:300px">
-          <button class="btn btn-purple" onclick="toggleAesKey()" style="font-size:12px">👁 显示</button>
-        </div>
-        <p style="font-size:11px;color:#888;margin:-8px 0 8px 92px">密钥用于加密已验证IP列表，仅管理员可查看</p>
 
         <div class="btn-row">
           <button class="btn btn-primary" onclick="saveConfig()">💾 保存全部配置</button>
@@ -198,7 +192,6 @@
         var cfg = data.config || {};
         document.getElementById('captcha-enabled').checked = !!cfg.enabled;
         document.getElementById('captcha-duration').value = cfg.duration_minutes || 30;
-        document.getElementById('aes-key').value = cfg.aes_key || '';
         // 图形参数
         document.getElementById('captcha-width').value = cfg.width || 320;
         document.getElementById('captcha-height').value = cfg.height || 120;
@@ -220,14 +213,11 @@
     async function saveConfig() {
       var enabled = document.getElementById('captcha-enabled').checked;
       var duration = parseInt(document.getElementById('captcha-duration').value) || 30;
-      var aesKey = document.getElementById('aes-key').value.trim();
       if (duration < 1 || duration > 1440) { showStatus('有效期必须在 1~1440 分钟之间', 'error'); return; }
-      if (aesKey && aesKey.length < 8) { showStatus('AES 密钥至少 8 个字符', 'error'); return; }
 
       var payload = {
         enabled: enabled,
         duration_minutes: duration,
-        aes_key: aesKey,
         width: parseInt(document.getElementById('captcha-width').value) || 320,
         height: parseInt(document.getElementById('captcha-height').value) || 120,
         loop_frames: parseInt(document.getElementById('captcha-frames').value) || 30,
@@ -238,15 +228,6 @@
       };
 
       try {
-        // 先保存 AES 密钥（如果有变化）
-        var aesRes = await authFetch('/api/admin/captcha/aes-key', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({aes_key: aesKey})
-        });
-        var aesData = await aesRes.json();
-        if (!aesData.ok && aesData.error) { showStatus(aesData.error, 'error'); return; }
-
         // 再保存主配置
         var res = await authFetch('/api/admin/captcha/config', {
           method: 'POST',
@@ -272,14 +253,19 @@
       } catch(e) { showStatus('操作失败: ' + e.message, 'error'); }
     }
 
-    function toggleAesKey() {
-      var el = document.getElementById('aes-key');
-      el.type = el.type === 'password' ? 'text' : 'password';
-    }
-
     async function loadVerifiedLog() {
       var tbody = document.getElementById('log-tbody');
       tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#888">加载中...</td></tr>';
+
+      // 获取管理员私钥（登录时已存入 sessionStorage）
+      var privKey = sessionStorage.getItem('admin_priv_key');
+      if (!privKey) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#f44336">管理员私钥未加载，请重新登录</td></tr>';
+        return;
+      }
+      var jse = new JSEncrypt();
+      jse.setPrivateKey(privKey);
+
       try {
         var res = await authFetch('/api/admin/captcha/verified-log');
         var data = await res.json();
@@ -291,17 +277,33 @@
           tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#888">暂无已验证记录</td></tr>';
           return;
         }
+
         var now = Date.now() / 1000;
         tbody.innerHTML = '';
-        data.entries.slice(0, 50).forEach(function(e) {
-          var isExpired = e.expiry && new Date(e.expiry + '+08:00').getTime() / 1000 < now;
+        data.entries.slice(0, 50).forEach(function(entry) {
+          var cipher = entry.data;
+          var decrypted = '';
+          if (cipher && cipher.startsWith('RSA:')) {
+            try {
+              decrypted = jse.decrypt(cipher.slice(4));
+            } catch(e) {}
+          }
+          if (!decrypted) {
+            tbody.innerHTML += '<tr><td colspan="4" style="text-align:center;color:#f44336">解密失败</td></tr>';
+            return;
+          }
+          var parts = decrypted.split('|');
+          var ip = parts[0] || '???';
+          var verifiedAt = parts[1] || '';
+          var expiry = parts[2] || '';
+          var isExpired = expiry && new Date(expiry + '+08:00').getTime() / 1000 < now;
           var statusHtml = isExpired 
             ? '<span class="expired">⏰ 已过期</span>' 
             : '<span class="active">✅ 有效</span>';
           tbody.innerHTML += '<tr>'
-            + '<td class="ip-cell">' + e.ip + '</td>'
-            + '<td class="time-cell">' + (e.verified_at || '—') + '</td>'
-            + '<td class="time-cell">' + (e.expiry || '—') + '</td>'
+            + '<td class="ip-cell">' + ip + '</td>'
+            + '<td class="time-cell">' + verifiedAt + '</td>'
+            + '<td class="time-cell">' + expiry + '</td>'
             + '<td>' + statusHtml + '</td>'
             + '</tr>';
         });

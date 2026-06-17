@@ -246,6 +246,19 @@ function refreshCsrf(){
     csrfToken = d.token || '';
   });
 }
+
+// ★ 同步主页存储的昵称和密钥到投票界面
+document.getElementById('global-nick').value = getLS(LS_NICK);
+document.getElementById('global-key').value = getLS(LS_AES);
+
+// 当用户在投票界面修改时，同步到 localStorage（主页也会读取）
+document.getElementById('global-nick').addEventListener('input', function() {
+  setLS(LS_NICK, this.value.trim());
+});
+document.getElementById('global-key').addEventListener('input', function() {
+  setLS(LS_AES, this.value.trim());
+});
+
 refreshCsrf();
 var allPolls = [];
 var currentPollId = null;
@@ -513,7 +526,7 @@ function selectCustom(inputName) {
   }
 }
 
-function openVoteModal(poll) {
+function openVoteModal(poll, restoreSelected, restoreRemark) {
   currentPollId = poll.id;
   currentEditingPollId = null;
   currentEditingSeq = null;
@@ -530,7 +543,18 @@ function openVoteModal(poll) {
   hintEl.textContent = (maxSel > 1) ? '请选择 ' + minSel + '~' + maxSel + ' 个选项' : '请选择 1 个选项';
   optsDiv.innerHTML = '';
   optsDiv.appendChild(hintEl);
-  optsDiv.innerHTML += buildOptionRows(poll, 'vote-opt', 'custom-val', null);
+  optsDiv.innerHTML += buildOptionRows(poll, 'vote-opt', 'custom-val', restoreSelected || null);
+
+  // ★ 备注输入框
+  var oldRemark = document.getElementById('vote-remark-container');
+  if (oldRemark) oldRemark.remove();
+  var remarkContainer = document.createElement('div');
+  remarkContainer.id = 'vote-remark-container';
+  remarkContainer.style.cssText = 'margin:12px 0';
+  remarkContainer.innerHTML = '<label style="font-size:13px;color:#666">📝 备注（可选，仅管理员可见）</label>' +
+    '<textarea id="vote-remark" placeholder="输入备注信息..." maxlength="500" style="width:100%;padding:6px;border:1px solid #ccc;border-radius:4px;resize:vertical;font-size:13px;margin-top:4px">' + esc(restoreRemark || '') + '</textarea>';
+  var msgEl = document.getElementById('vote-msg');
+  optsDiv.parentNode.insertBefore(remarkContainer, msgEl);
 
   document.getElementById('vote-msg').style.display = 'none';
   document.getElementById('vote-submit-btn').disabled = false;
@@ -568,6 +592,22 @@ function viewMyVote(pollId) {
         editArea.style.display = 'none';
       } else {
         contentDiv.innerHTML = '<p>🗳️ 你投了：<b>'+renderMdInline(choice)+'</b></p><p class="hint">服务器时间与IP已独立加密存储</p>';
+        // ★ 显示备注
+        var remarkText = '';
+        if (mv.remark_iv && mv.remark_aes_msg) {
+          try {
+            var remarkIvParsed = CryptoJS.enc.Base64.parse(mv.remark_iv);
+            var remarkDec = CryptoJS.AES.decrypt(mv.remark_aes_msg, key32, {
+              iv: remarkIvParsed,
+              mode: CryptoJS.mode.CBC,
+              padding: CryptoJS.pad.Pkcs7
+            }).toString(CryptoJS.enc.Utf8);
+            if (remarkDec) remarkText = remarkDec;
+          } catch(e) {}
+        }
+        if (remarkText) {
+          contentDiv.innerHTML += '<p style="font-size:13px;color:#888;margin-top:8px">📝 备注：' + renderMdInline(remarkText) + '</p>';
+        }
         editArea.style.display = 'none';
       }
     }
@@ -611,8 +651,30 @@ function editMyVote(pollId) {
     }
     contentDiv.innerHTML = '<p>原投票：<b>'+renderMdInline(choice)+'</b></p>';
 
-    var prevChoices = choice.split(', ');
+    // ★ 显示当前备注
+    var currentRemark = '';
+    if (mv.remark_iv && mv.remark_aes_msg) {
+      try {
+        var remarkIvParsed = CryptoJS.enc.Base64.parse(mv.remark_iv);
+        var remarkDec = CryptoJS.AES.decrypt(mv.remark_aes_msg, key32, {
+          iv: remarkIvParsed,
+          mode: CryptoJS.mode.CBC,
+          padding: CryptoJS.pad.Pkcs7
+        }).toString(CryptoJS.enc.Utf8);
+        if (remarkDec) currentRemark = remarkDec;
+      } catch(e) {}
+    }
+    // 创建备注编辑容器
+    var remarkEditContainer = document.createElement('div');
+    remarkEditContainer.id = 'view-remark-container';
+    remarkEditContainer.style.cssText = 'margin:12px 0';
+    remarkEditContainer.innerHTML = '<label style="font-size:13px;color:#666">📝 备注（可选，仅管理员可见）</label>' +
+      '<textarea id="view-remark-input" placeholder="输入备注信息..." maxlength="500" style="width:100%;padding:6px;border:1px solid #ccc;border-radius:4px;resize:vertical;font-size:13px;margin-top:4px">' + esc(currentRemark) + '</textarea>';
 
+    // 插入到 editOptsDiv 之前
+    editOptsDiv.parentNode.insertBefore(remarkEditContainer, editOptsDiv);
+
+    var prevChoices = choice.split(', ');
     editOptsDiv.innerHTML = '';
     var editHintEl = document.createElement('div');
     editHintEl.id = 'edit-select-hint';
@@ -628,22 +690,6 @@ function editMyVote(pollId) {
     editArea.style.display = 'none';
   }
   document.getElementById('view-modal').style.display = 'flex';
-}
-
-function updateEditHint(minSel, maxSel) {
-  var total = countSelected('edit-opt');
-  var hintEl = document.getElementById('edit-select-hint');
-  if (!hintEl) return;
-  if (minSel === 1 && maxSel === 1) {
-    hintEl.textContent = total >= 1 ? '已选 1 个 ✓' : '请选择 1 个选项';
-    hintEl.style.color = total >= 1 ? '#4CAF50' : '#888';
-  } else if (total < minSel) {
-    hintEl.textContent = '已选 ' + total + ' 个（至少选 ' + minSel + ' 个）';
-    hintEl.style.color = '#FF9800';
-  } else {
-    hintEl.textContent = '已选 ' + total + ' 个 ✓';
-    hintEl.style.color = '#4CAF50';
-  }
 }
 
 function confirmEdit() {
@@ -672,10 +718,23 @@ function confirmEdit() {
   var mv = myVotes[currentEditingPollId];
   if (!mv) { alert('找不到原投票记录'); return; }
   setLS(LS_NICK, identity.nick);
-  setCookie('msg_aes', identity.key);
+  setLS(LS_AES, identity.key);
   var iv = CryptoJS.lib.WordArray.random(16);
   var key32 = deriveAESKey(identity.key);
   var msgEnc = CryptoJS.AES.encrypt(voteContent, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
+
+  // ★ 备注处理
+  var remarkInput = document.getElementById('view-remark-input');
+  var remark = remarkInput ? remarkInput.value.trim() : '';
+  var remarkIvB64 = '', remarkEnc = '';
+  if (remark) {
+    var remarkIv = CryptoJS.lib.WordArray.random(16);
+    remarkIvB64 = CryptoJS.enc.Base64.stringify(remarkIv).replace(/[\r\n\s]+/g, '');
+    remarkEnc = CryptoJS.AES.encrypt(remark, key32, {iv: remarkIv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7})
+      .toString()
+      .replace(/[\r\n\s]+/g, '');
+  }
+
   fetch('/gongyao.txt').then(function(r){return r.text();}).then(function(pub){
     var jse = new JSEncrypt();
     jse.setPublicKey(pub);
@@ -685,10 +744,11 @@ function confirmEdit() {
       rsa_key: cleanRsaKey,
       iv: CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''),
       aes_msg: msgEnc.replace(/[\r\n\s]+/g, ''),
-      original_key_hash: originalKeyHash
+      original_key_hash: originalKeyHash,
+      remark_iv: remarkIvB64,
+      remark_aes_msg: remarkEnc
     };
 
-    // ★ 保存待提交数据，以便验证码跳回后恢复
     sessionStorage.setItem('pending_edit_poll', currentEditingPollId);
     sessionStorage.setItem('pending_edit_seq', mv.seq);
     sessionStorage.setItem('pending_edit_body', JSON.stringify(body));
@@ -701,22 +761,22 @@ function confirmEdit() {
       headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
       body: JSON.stringify(body)
     }).then(function(res){
-      // ★ 验证码拦截：如果服务器返回 418，跳转到验证码页面
       if (res.status === 418) {
         var returnUrl = encodeURIComponent(window.location.href);
         window.location.href = '/captcha?redirect=' + returnUrl;
         return;
       }
-
       window.handleRateLimitResponse(res);
       if (res.ok) {
         mv.iv = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, '');
         mv.aes_enc = msgEnc.replace(/[\r\n\s]+/g, '');
         mv.rsa_key = cleanRsaKey;
         mv.nick = identity.nick;
+        // 更新备注
+        mv.remark_iv = remarkIvB64;
+        mv.remark_aes_msg = remarkEnc;
         saveMyVote(currentEditingPollId, mv);
 
-        // ★ 清除待提交数据
         sessionStorage.removeItem('pending_edit_poll');
         sessionStorage.removeItem('pending_edit_seq');
         sessionStorage.removeItem('pending_edit_body');
@@ -734,12 +794,19 @@ function confirmEdit() {
   });
 }
 
-function submitVote() {
+async function submitVote() {
   var identity = currentIdentity();
-  if (!identity.nick || !identity.key) { alert('请填写昵称和AES密钥'); return; }
-  var poll = allPolls.find(function(p){return p.id === currentPollId;});
-  var minSel = (poll && poll.minSelect) || 1;
-  var maxSel = (poll && poll.maxSelect) || 1;
+  if (!identity.nick || !identity.key) {
+    alert('请填写昵称和AES密钥');
+    return;
+  }
+  var poll = allPolls.find(function(p){ return p.id === currentPollId; });
+  if (!poll) {
+    alert('投票已不存在，请刷新');
+    return;
+  }
+  var minSel = poll.minSelect || 1;
+  var maxSel = poll.maxSelect || 1;
 
   var selectedValues = collectVoteValues('vote-opt', 'custom-val');
   if (selectedValues.length < minSel) {
@@ -751,80 +818,141 @@ function submitVote() {
     return;
   }
   var voteContent = selectedValues.join(', ');
-  if (!voteContent) { alert('请选择或输入投票内容'); return; }
+  if (!voteContent) {
+    alert('请选择或输入投票内容');
+    return;
+  }
+
+  // ★ 获取备注
+  var remark = document.getElementById('vote-remark').value.trim();
+  var remarkIvB64 = '', remarkEnc = '';
+
+  // ★ 准备 AES 密钥
+  var key32 = deriveAESKey(identity.key);
+  var iv = CryptoJS.lib.WordArray.random(16);
+  var ivB64 = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, '');
+  var msgEnc = CryptoJS.AES.encrypt(voteContent, key32, {
+    iv: iv,
+    mode: CryptoJS.mode.CBC,
+    padding: CryptoJS.pad.Pkcs7
+  }).toString().replace(/[\r\n\s]+/g, '');
+
+  // ★ 加密备注
+  if (remark) {
+    try {
+      var remarkIv = CryptoJS.lib.WordArray.random(16);
+      remarkIvB64 = CryptoJS.enc.Base64.stringify(remarkIv).replace(/[\r\n\s]+/g, '');
+      remarkEnc = CryptoJS.AES.encrypt(remark, key32, {
+        iv: remarkIv,
+        mode: CryptoJS.mode.CBC,
+        padding: CryptoJS.pad.Pkcs7
+      }).toString().replace(/[\r\n\s]+/g, '');
+    } catch (e) {
+      alert('备注加密失败：' + e.message);
+      return;
+    }
+  }
 
   setLS(LS_NICK, identity.nick);
   setLS(LS_AES, identity.key);
-  var iv = CryptoJS.lib.WordArray.random(16);
-  var key32 = deriveAESKey(identity.key);
-  var msgEnc = CryptoJS.AES.encrypt(voteContent, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
-  fetch('/gongyao.txt').then(function(r){return r.text();}).then(function(pub){
+
+  try {
+    // ★ 获取公钥并加密 AES 密钥
+    var pubRes = await fetch('/gongyao.txt');
+    var pub = await pubRes.text();
     var jse = new JSEncrypt();
     jse.setPublicKey(pub);
     var cleanRsaKey = jse.encrypt(identity.key).replace(/[\r\n\s]+/g, '');
-    if (!cleanRsaKey) { alert('RSA加密失败'); return; }
-    var editToken = Array.from(crypto.getRandomValues(new Uint8Array(18))).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+    if (!cleanRsaKey) {
+      alert('RSA加密失败，请检查公钥');
+      return;
+    }
+
+    var editToken = Array.from(crypto.getRandomValues(new Uint8Array(18)))
+      .map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
     var keyHash = CryptoJS.SHA256(identity.key).toString();
 
-    // ★ 保存待提交数据，以便验证码跳回后恢复
+    // ★ 保存待提交数据到 sessionStorage（用于验证码返回后恢复）
     sessionStorage.setItem('pending_vote_poll', currentPollId);
     sessionStorage.setItem('pending_vote_content', voteContent);
-    sessionStorage.setItem('pending_vote_iv', CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''));
-    sessionStorage.setItem('pending_vote_enc', msgEnc.replace(/[\r\n\s]+/g, ''));
+    sessionStorage.setItem('pending_vote_iv', ivB64);
+    sessionStorage.setItem('pending_vote_enc', msgEnc);
     sessionStorage.setItem('pending_vote_key', cleanRsaKey);
     sessionStorage.setItem('pending_vote_token', editToken);
+    // ★ 保存用户选择的选项和备注，以便恢复
+    sessionStorage.setItem('pending_vote_selected', JSON.stringify(selectedValues));
+    sessionStorage.setItem('pending_vote_remark', remark);
 
-    fetch('/api/votes/' + encodeURIComponent(currentPollId), {
+    // ★ 发送投票请求
+    var res = await fetch('/api/votes/' + encodeURIComponent(currentPollId), {
       method: 'POST',
-      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken
+      },
       body: JSON.stringify({
         rsa_key: cleanRsaKey,
-        iv: CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''),
-        aes_msg: msgEnc.replace(/[\r\n\s]+/g, ''),
-        key_hash: keyHash
+        iv: ivB64,
+        aes_msg: msgEnc,
+        key_hash: keyHash,
+        remark_iv: remarkIvB64,
+        remark_aes_msg: remarkEnc
       })
-    }).then(function(res){
-      // ★ 验证码拦截：如果服务器返回 418，跳转到验证码页面
-      if (res.status === 418) {
-        var returnUrl = encodeURIComponent(window.location.href);
-        window.location.href = '/captcha?redirect=' + returnUrl;
-        return;
-      }
-
-      window.handleRateLimitResponse(res);
-      if (res.ok) return res.json();
-      else return res.text().then(function(t){ throw new Error(t); });
-    }).then(function(data){
-      if (!data) return; // 已跳转到验证码页面
-
-      saveMyVote(currentPollId, {
-        seq: data.seq,
-        rsa_key: cleanRsaKey,
-        iv: CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''),
-        aes_enc: msgEnc.replace(/[\r\n\s]+/g, ''),
-        edit_token: data.edit_token || editToken
-      });
-      // ★ 清除待提交数据
-      sessionStorage.removeItem('pending_vote_poll');
-      sessionStorage.removeItem('pending_vote_content');
-      sessionStorage.removeItem('pending_vote_iv');
-      sessionStorage.removeItem('pending_vote_enc');
-      sessionStorage.removeItem('pending_vote_key');
-      sessionStorage.removeItem('pending_vote_token');
-
-      var msgEl = document.getElementById('vote-msg');
-      msgEl.textContent = '✅ 投票成功！';
-      msgEl.style.color = '#4CAF50';
-      msgEl.style.display = 'block';
-      document.getElementById('vote-submit-btn').disabled = true;
-      setTimeout(function(){ closeModal('vote-modal'); syncFromServer(); }, 1200);
-    }).catch(function(err){
-      var msgEl = document.getElementById('vote-msg');
-      msgEl.textContent = '❌ ' + err.message;
-      msgEl.style.color = '#f44336';
-      msgEl.style.display = 'block';
     });
-  });
+
+    // ★ 处理验证码拦截（418）
+    if (res.status === 418) {
+      var returnUrl = encodeURIComponent(window.location.href);
+      window.location.href = '/captcha?redirect=' + returnUrl;
+      return; // 跳转后终止
+    }
+
+    window.handleRateLimitResponse(res);
+    if (!res.ok) {
+      var errText = await res.text();
+      throw new Error(errText);
+    }
+
+    var data = await res.json();
+
+    // ★ 保存投票记录到本地
+    saveMyVote(currentPollId, {
+      seq: data.seq,
+      rsa_key: cleanRsaKey,
+      iv: ivB64,
+      aes_enc: msgEnc,
+      edit_token: data.edit_token || editToken,
+      remark_iv: remarkIvB64,
+      remark_aes_msg: remarkEnc
+    });
+
+    // ★ 清除待提交数据
+    sessionStorage.removeItem('pending_vote_poll');
+    sessionStorage.removeItem('pending_vote_content');
+    sessionStorage.removeItem('pending_vote_iv');
+    sessionStorage.removeItem('pending_vote_enc');
+    sessionStorage.removeItem('pending_vote_key');
+    sessionStorage.removeItem('pending_vote_token');
+    sessionStorage.removeItem('pending_vote_selected');
+    sessionStorage.removeItem('pending_vote_remark');
+
+    var msgEl = document.getElementById('vote-msg');
+    msgEl.textContent = '✅ 投票成功！';
+    msgEl.style.color = '#4CAF50';
+    msgEl.style.display = 'block';
+    document.getElementById('vote-submit-btn').disabled = true;
+    setTimeout(function(){
+      closeModal('vote-modal');
+      syncFromServer();
+    }, 1200);
+
+  } catch (err) {
+    var msgEl = document.getElementById('vote-msg');
+    msgEl.textContent = '❌ ' + err.message;
+    msgEl.style.color = '#f44336';
+    msgEl.style.display = 'block';
+    console.error('提交投票失败:', err);
+  }
 }
 
 function closeModal(id) {
@@ -899,32 +1027,58 @@ window.addEventListener('beforeunload', function(){ stopPolling(); });
   }
 })();
 // ★ 从验证码页面跳回后，自动重试待提交的投票
+// ★ 从验证码页面跳回后，自动恢复待提交的投票
 (function() {
   var pendingPoll = sessionStorage.getItem('pending_vote_poll');
   if (pendingPoll) {
-    // 待提交的投票 → 重新提交
-    var pollObj = allPolls.find(function(p){ return p.id === pendingPoll; });
-    if (pollObj) {
+    // 等待 allPolls 加载完成（可能尚未加载）
+    var checkAndRestore = function() {
+      var pollObj = allPolls.find(function(p){ return p.id === pendingPoll; });
+      if (!pollObj) {
+        // 如果还未加载，等待500ms再试
+        setTimeout(checkAndRestore, 500);
+        return;
+      }
+      // 打开投票模态框
       openVoteModal(pollObj);
-      // 恢复内容后自动提交
+
+      // ★ 恢复用户之前选择的选项
+      var selectedStr = sessionStorage.getItem('pending_vote_selected');
+      if (selectedStr) {
+        try {
+          var selectedValues = JSON.parse(selectedStr);
+          // 勾选对应的选项
+          var inputs = document.querySelectorAll('#vote-options input[type="radio"], #vote-options input[type="checkbox"]');
+          inputs.forEach(function(inp) {
+            if (selectedValues.indexOf(inp.value) !== -1) {
+              inp.checked = true;
+            }
+          });
+          // 更新提示
+          var minSel = pollObj.minSelect || 1;
+          var maxSel = pollObj.maxSelect || 1;
+          updateHint(minSel, maxSel, 'vote-opt');
+        } catch(e) {}
+      }
+
+      // ★ 恢复备注
+      var remark = sessionStorage.getItem('pending_vote_remark') || '';
+      var remarkEl = document.getElementById('vote-remark');
+      if (remarkEl) remarkEl.value = remark;
+
+      // ★ 自动提交（延迟确保渲染完成）
       setTimeout(function() {
         document.getElementById('vote-submit-btn').click();
-      }, 500);
-    }
-    // 即使失败，清除待提交标记（防止死循环）
-    sessionStorage.removeItem('pending_vote_poll');
-    sessionStorage.removeItem('pending_vote_content');
-    sessionStorage.removeItem('pending_vote_iv');
-    sessionStorage.removeItem('pending_vote_enc');
-    sessionStorage.removeItem('pending_vote_key');
-    sessionStorage.removeItem('pending_vote_token');
+      }, 800);
+    };
+
+    // 开始尝试恢复
+    setTimeout(checkAndRestore, 100);
     return;
   }
 
   var pendingEdit = sessionStorage.getItem('pending_edit_poll');
   if (pendingEdit) {
-    // 待修改的投票 → 重新编辑
-    // 只是提示用户重新操作
     alert('验证码已通过，请重新点击"修改投票"按钮提交修改。');
     sessionStorage.removeItem('pending_edit_poll');
     sessionStorage.removeItem('pending_edit_seq');

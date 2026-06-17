@@ -73,6 +73,16 @@
     <hr><h3>IP黑名单管理</h3>
     <div style="display:flex;gap:8px"><input id="bl-ip" placeholder="输入要封禁的IP" style="flex:1"><button onclick="addBL()">添加</button></div>
     <div id="bl-list"></div>
+
+<hr>
+<h3>📦 数据备份与恢复（全量操作，请谨慎）</h3>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0">
+  <button onclick="exportData()" style="background:#2196F3;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📤 导出所有数据</button>
+  <button onclick="document.getElementById('import-file-input').click()" style="background:#FF9800;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📥 导入数据并覆盖</button>
+  <input type="file" id="import-file-input" accept=".zip" style="display:none" onchange="importData(this)">
+</div>
+<p style="font-size:12px;color:#888;margin:4px 0">导出将下载包含所有数据的 ZIP 文件；导入将用所选 ZIP 完全覆盖当前数据，操作不可逆！</p>
+
     <hr><h3>修改底部文字</h3><textarea id="footInput" placeholder="输入新内容"></textarea><button onclick="updateFoot()">保存底部</button>
   </div>
   <footer id="footer"></footer>
@@ -366,6 +376,77 @@ function removeWL(ip){
             setTimeout(() => { e.target.textContent = '复制'; e.target.classList.remove('copied'); }, 1500);
         }).catch(() => alert('复制失败，请手动选择'));
     });
+// ── 导出数据 ──
+async function exportData() {
+  if (!confirm('⚠️ 确认导出所有数据？\n导出文件包含所有留言、群聊、投票、IP记录等，请妥善保管。')) return;
+  const confirmText = prompt('请输入 "确认导出所有文件" 以继续：');
+  if (confirmText !== '确认导出所有文件') {
+    alert('操作已取消');
+    return;
+  }
+  try {
+    const res = await authFetch('/api/admin/export-data');
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(err || '导出失败');
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    // 从 Content-Disposition 提取文件名，或使用默认
+    const disposition = res.headers.get('content-disposition');
+    let filename = 'backup.zip';
+    if (disposition) {
+      const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+      if (match && match[1]) {
+        filename = match[1].replace(/['"]/g, '');
+      }
+    }
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    alert('✅ 导出成功');
+  } catch (e) {
+    alert('❌ 导出失败：' + e.message);
+  }
+}
+
+// ── 导入数据 ──
+function importData(input) {
+  if (!input.files || input.files.length === 0) return;
+  const file = input.files[0];
+  // 二次确认
+  const confirmMsg = `⚠️ 即将导入文件：${file.name}\n此操作将覆盖当前所有数据，不可撤销！\n请输入 "确认覆盖来自于 ${file.name} 的文件" 以继续：`;
+  const confirmText = prompt(confirmMsg);
+  if (confirmText !== `确认覆盖来自于 ${file.name} 的文件`) {
+    alert('操作已取消');
+    input.value = '';
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  authFetch('/api/admin/import-data', {
+    method: 'POST',
+    body: formData,
+    // 不要设置 Content-Type，浏览器会自动设置 multipart/form-data
+  }).then(res => res.json()).then(data => {
+    if (data.ok) {
+      alert('✅ 导入成功！页面即将刷新。');
+      location.reload();
+    } else {
+      alert('❌ 导入失败：' + (data.error || '未知错误'));
+    }
+  }).catch(err => {
+    alert('❌ 请求失败：' + err.message);
+  }).finally(() => {
+    input.value = '';
+  });
+}
   </script>
 </body>
 </html>

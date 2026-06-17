@@ -436,7 +436,7 @@ function decryptPoll(pollId) {
           var aesKeyStr = jse.decrypt(v.rsa_key);
           if (!aesKeyStr || aesKeyStr.length === 0) {
             failedRsa++;
-            details.push({ idx: idx + 1, meta: '❌ RSA解密失败', choice: '—', ip: null, nick: null, date: '' });
+            details.push({ idx: idx + 1, meta: '❌ RSA解密失败', choice: '—', ip: null, nick: null, date: '', remark: '' });
             return;
           }
           var key32 = deriveKey(aesKeyStr);
@@ -473,17 +473,33 @@ function decryptPoll(pollId) {
             choice = CryptoJS.AES.decrypt(v.content_enc, key32, aesOpts).toString(CryptoJS.enc.Utf8);
           }
 
+          // ★ 解密备注
+          var remarkText = '';
+          if (v.remark_iv && v.remark_aes_msg) {
+            try {
+              var remarkIvParsed = CryptoJS.enc.Base64.parse(v.remark_iv);
+              var remarkDec = CryptoJS.AES.decrypt(v.remark_aes_msg, key32, {
+                iv: remarkIvParsed,
+                mode: CryptoJS.mode.CBC,
+                padding: CryptoJS.pad.Pkcs7
+              }).toString(CryptoJS.enc.Utf8);
+              if (remarkDec) remarkText = remarkDec;
+            } catch(e) {
+              remarkText = '（解密失败）';
+            }
+          }
+
           if (choice) {
             tally[choice] = (tally[choice] || 0) + 1;
             total++;
-            details.push({ idx: idx + 1, meta: meta || '—', choice: choice, ip: ip, nick: nick, date: date });
+            details.push({ idx: idx + 1, meta: meta || '—', choice: choice, ip: ip, nick: nick, date: date, remark: remarkText });
           } else {
             failedAes++;
-            details.push({ idx: idx + 1, meta: meta || '—', choice: '❌ AES解密失败', ip: ip, nick: nick, date: date });
+            details.push({ idx: idx + 1, meta: meta || '—', choice: '❌ AES解密失败', ip: ip, nick: nick, date: date, remark: remarkText });
           }
         } catch(e) {
           failedAes++;
-          details.push({ idx: idx + 1, meta: '❌ 异常', choice: e.message, ip: null, nick: null, date: '' });
+          details.push({ idx: idx + 1, meta: '❌ 异常', choice: e.message, ip: null, nick: null, date: '', remark: '' });
         }
       });
 
@@ -589,6 +605,8 @@ function decryptPoll(pollId) {
       }
       resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:left">元数据</th>';
       resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:left">投票选项</th>';
+      // ★ 新增备注列
+      resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:left">备注</th>';
       if (useIpWeight) {
         resultsDiv.innerHTML += '<th style="padding:8px 10px;border-bottom:2px solid #ddd;text-align:center;width:70px">权重</th>';
       }
@@ -606,6 +624,8 @@ function decryptPoll(pollId) {
         }
         resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;color:' + metaColor + ';font-size:12px">' + esc(d.meta) + '</td>';
         resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;color:' + choiceColor + ';font-weight:500">' + renderMdInline(d.choice) + '</td>';
+        // ★ 显示备注
+        resultsDiv.innerHTML += '<td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px;color:#555">' + esc(d.remark || '无') + '</td>';
         if (useIpWeight) {
           var weightStr = '—';
           if (d.ip && !(d.choice||'').startsWith('❌') && ipStats) {
