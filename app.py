@@ -254,13 +254,18 @@ def _extract_host_parts(url):
 
 
 def _build_allowed_hosts():
-    """构建允许的 Host 集合，仅基于固定配置和本地回环"""
+    """构建允许的 Host 集合（包含当前请求 Host + 环境变量 + 本地回环）"""
     allowed = set()
-    # 环境变量 FORCE_HOST（必须配置）
+    # 1. 环境变量 FORCE_HOST（若设置则优先）
     if FORCE_HOST:
         allowed.add(FORCE_HOST)
         allowed.add(FORCE_HOST.split(':')[0])
-    # 本地回环（开发/测试）
+    # 2. 当前请求的 Host（同源请求）
+    host = request.host
+    if host:
+        allowed.add(host)
+        allowed.add(host.split(':')[0])
+    # 3. 本地回环（开发/内网）
     port = request.environ.get('SERVER_PORT', '5033')
     for lh in ('127.0.0.1', 'localhost', '::1'):
         allowed.add(lh)
