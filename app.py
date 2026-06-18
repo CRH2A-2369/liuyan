@@ -11,6 +11,10 @@ import io
 import random
 import string
 
+load_dotenv()
+app = Flask(__name__)
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=360)
+
 CAPTCHA_DEFAULTS = {
     "width": 320,
     "height": 120,
@@ -21,9 +25,6 @@ CAPTCHA_DEFAULTS = {
     "captcha_length": 5,
     "allowed_chars": "23456789ABCDEFGHJKLMNPRSTXYZ"
 }
-
-load_dotenv()
-app = Flask(__name__)
 
 # === ReDoS 防护 ===
 import concurrent.futures
@@ -253,69 +254,38 @@ def _extract_host_parts(url):
 
 
 def _build_allowed_hosts():
-    """构建允许的 Host 集合（请求 Host + 环境变量 + 本地回环）"""
+    """构建允许的 Host 集合，仅基于固定配置和本地回环"""
     allowed = set()
-
-    # 1) 请求自身的 Host
-    host = request.host
-    if host:
-        allowed.add(host)
-        allowed.add(host.split(':')[0])
-
-    # 2) 环境变量 FORCE_HOST（反向代理场景：CDN / Nginx 转发后 Host 可能不同）
+    # 环境变量 FORCE_HOST（必须配置）
     if FORCE_HOST:
         allowed.add(FORCE_HOST)
         allowed.add(FORCE_HOST.split(':')[0])
-
-    # 3) 本地回环（开发 / 内网场景）
+    # 本地回环（开发/测试）
     port = request.environ.get('SERVER_PORT', '5033')
     for lh in ('127.0.0.1', 'localhost', '::1'):
         allowed.add(lh)
         allowed.add(f'{lh}:{port}')
-
     return allowed
 
-
 def validate_origin_referer():
-    """
-    校验 Origin / Referer 头是否匹配本站。
-
-    两层防御：
-    - Origin：浏览器保证不可伪造（CORS 规范强制）
-    - Referer：兼容不支持 Origin 的旧环境
-    - 两个都缺失时放行（非浏览器客户端，如 curl / 脚本，天然免疫 CSRF）
-
-    即使攻击者通过某种方式拿到了固定的 session CSRF Token，
-    也无法从外部域名发起跨站请求——浏览器会自动附带 Origin 头暴露真实来源。
-    """
     if request.method not in ('POST', 'PUT', 'DELETE', 'PATCH'):
         return True
-
-    origin = (request.headers.get('Origin') or '').strip()
-    referer = (request.headers.get('Referer') or '').strip()
-
-    # 非浏览器客户端 → 无害
+    origin = request.headers.get('Origin') or ''
+    referer = request.headers.get('Referer') or ''
+    # 必须至少有一个来源头（防止非浏览器伪造）
     if not origin and not referer:
-        return True
-
+        return False
     allowed = _build_allowed_hosts()
-
-    # 优先校验 Origin（浏览器保证不可伪造）
     if origin:
         netloc, hostname = _extract_host_parts(origin)
         if netloc and netloc not in allowed:
             if hostname and hostname not in allowed:
-                app.logger.warning(f'[CSRF] Origin 不匹配: {origin} ∉ {allowed}')
                 return False
-
-    # 次选 Referer
     if referer:
         netloc, hostname = _extract_host_parts(referer)
         if netloc and netloc not in allowed:
             if hostname and hostname not in allowed:
-                app.logger.warning(f'[CSRF] Referer 不匹配: {referer} ∉ {allowed}')
                 return False
-
     return True
 
 def require_csrf(f):
@@ -742,14 +712,11 @@ def save_verified_log(data):
 # === 5. 核心工具函数 ===
 def get_client_ip():
     direct_ip = request.remote_addr or '127.0.0.1'
-    if 'any' in [p.lower() for p in TRUSTED_PROXIES]:
-        xff = request.headers.get('X-Forwarded-For')
-        if xff:
-            return xff.split(',')[0].strip()
-        return direct_ip
+    # 仅当 direct_ip 在可信代理列表中时，才信任 X-Forwarded-For
     if TRUSTED_PROXIES and direct_ip in TRUSTED_PROXIES:
         xff = request.headers.get('X-Forwarded-For')
         if xff:
+            # 取第一个 IP（原始客户端）
             return xff.split(',')[0].strip()
     return direct_ip
 
@@ -1175,6 +1142,7 @@ def admin_verify():
         return "挑战已过期（请刷新页面重新验证）", 401
     if plaintext != stored:
         return "解密值不匹配（私钥错误或已失效）", 401
+    # 登录成功
     session['admin'] = True
     session['admin_has_key'] = True
     session['fp'] = get_fp()
@@ -3339,6 +3307,22 @@ def export_data():
         }
     )
 
+def safe_extract(zip_file, extract_dir):
+    """
+    安全解压 ZIP 文件，防止路径遍历攻击。
+    - 拒绝包含 '..' 或绝对路径的条目。
+    - 确保所有解压目标都在 extract_dir 之内。
+    """
+    extract_dir = os.path.realpath(extract_dir)
+    for member in zip_file.infolist():
+        # 拒绝绝对路径或包含 '..' 的路径
+        if member.filename.startswith('/') or '..' in member.filename.split('/'):
+            raise Exception(f'非法路径: {member.filename}')
+        target = os.path.realpath(os.path.join(extract_dir, member.filename))
+        if not target.startswith(extract_dir + os.sep):
+            raise Exception(f'路径遍历检测: {member.filename}')
+    # 所有条目通过检查，执行解压
+    zip_file.extractall(extract_dir)
 
 @app.route('/api/admin/import-data', methods=['POST'])
 @require_csrf
@@ -3377,14 +3361,18 @@ def import_data():
                     elif os.path.isdir(item_path):
                         shutil.rmtree(item_path)
 
-            # 解压所有文件到 DATA_DIR
-            zf.extractall(data_dir)
+            # 安全解压（防止路径遍历）
+            try:
+                safe_extract(zf, data_dir)
+            except Exception as e:
+                return jsonify({'error': f'解压失败: {str(e)}'}), 400
 
         return jsonify({'ok': True, 'message': '数据已成功导入'})
     except zipfile.BadZipFile:
         return jsonify({'error': '无效的 ZIP 文件'}), 400
     except Exception as e:
         return jsonify({'error': f'导入失败: {str(e)}'}), 500
+
 if __name__ == '__main__':
     print(f"[CONFIG] SESSION_COOKIE_SECURE = {app.config['SESSION_COOKIE_SECURE']}")
     print(f"[CONFIG] TRUSTED_PROXIES = {TRUSTED_PROXIES}")
