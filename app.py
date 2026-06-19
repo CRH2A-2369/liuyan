@@ -727,7 +727,7 @@ def get_client_ip():
 
 def get_fp():
     ua = request.headers.get('User-Agent', '')
-    return hashlib.sha256(f"{get_client_ip()}|{ua}".encode()).hexdigest()[:16]
+    return hashlib.sha256(ua.encode()).hexdigest()[:16]
 
 def is_admin():
     return session.get('admin') is True
@@ -3378,8 +3378,13 @@ def import_data():
     except Exception as e:
         return jsonify({'error': f'导入失败: {str(e)}'}), 500
 
+@app.route('/health')
+def health():
+    return "OK", 200
+
 if __name__ == '__main__':
     print(f"[CONFIG] SESSION_COOKIE_SECURE = {app.config['SESSION_COOKIE_SECURE']}")
     print(f"[CONFIG] TRUSTED_PROXIES = {TRUSTED_PROXIES}")
     print(f"[CONFIG] RSA_PUB exists = {os.path.exists(RSA_PUB)}")
-    app.run(debug=False, host='0.0.0.0', port=5033)
+    port = int(os.environ.get('PORT', 5033))
+    app.run(debug=False, host='0.0.0.0', port=port)
