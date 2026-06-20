@@ -360,7 +360,7 @@ for f, default in [
     if not os.path.exists(f):
         atomic_write(f, _captcha_json.dumps(default, ensure_ascii=False))
 
-_captcha_lock = _captcha_threading.Lock()
+_captcha_lock = _captcha_threading.RLock()
 
 def _captcha_load_json(path):
     with _captcha_lock:
@@ -407,10 +407,6 @@ def get_verified_log():
 def save_verified_log(data):
     atomic_write(CAPTCHA_LOG_FILE, json.dumps(data, ensure_ascii=False))
 
-def get_aes_key():
-    config = get_captcha_config()
-    return config.get('aes_key', '')
-
 # ---------- 清理 ----------
 def _cleanup_challenges():
     challenges = get_challenges()
@@ -446,22 +442,29 @@ def is_captcha_needed(ip):
 def mark_captcha_verified(ip):
     config = get_captcha_config()
     duration = config.get('duration_minutes', 30)
-    expiry = time.time() + duration * 60
-    verified_at = time.time()
+    expiry = _captcha_time.time() + duration * 60
+    verified_at = _captcha_time.time()
 
-    verified = get_verified_ips()
-    verified[ip] = expiry
-    save_verified_ips(verified)
+    with _captcha_lock:
+        verified = get_verified_ips()
+        verified[ip] = expiry
+        save_verified_ips(verified)
 
-    # ★ 使用 RSA 加密存储日志
-    plaintext = f"{ip}|{datetime.fromtimestamp(verified_at, CST).strftime('%Y-%m-%d %H:%M:%S')}|{datetime.fromtimestamp(expiry, CST).strftime('%Y-%m-%d %H:%M:%S')}"
-    encrypted = rsa_encrypt_report(plaintext)   # 返回 "RSA:" + base64 或空字符串
-    if encrypted:
-        log = get_verified_log()
-        log.append({'data': encrypted, 'ts': verified_at})
-        if len(log) > 500:
-            log = log[-500:]
-        save_verified_log(log)
+        plaintext = (
+            f"{ip}|"
+            f"{datetime.fromtimestamp(verified_at, CST).strftime('%Y-%m-%d %H:%M:%S')}|"
+            f"{datetime.fromtimestamp(expiry, CST).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        encrypted = rsa_encrypt_report(plaintext)
+        if encrypted:
+            log = get_verified_log()
+            log.append({
+                'data': 'RSA:' + encrypted,
+                'ts': verified_at
+            })
+            if len(log) > 500:
+                log = log[-500:]
+            save_verified_log(log)
 
     return expiry
 
@@ -605,10 +608,14 @@ def api_captcha_verify():
     if not challenge_id or not answer:
         return jsonify({"success": False, "error": "参数不完整"}), 400
 
-    _cleanup_challenges()
-    challenges = get_challenges()
-    challenge = challenges.get(challenge_id)
-    if not challenge or challenge.get('expires_at', 0) < time.time():
+    with _captcha_lock:
+        challenges = _captcha_load_json(CAPTCHA_CHALLENGES_FILE)
+        now = time.time()
+        # 顺带清理过期
+        challenges = {k: v for k, v in challenges.items() if v.get('expires_at', 0) >= now}
+        challenge = challenges.get(challenge_id)
+
+    if not challenge:
         return jsonify({"success": False, "error": "验证码已过期"}), 400
     if challenge.get('ip') != ip:
         return jsonify({"success": False, "error": "挑战与IP不匹配"}), 403
@@ -617,8 +624,10 @@ def api_captcha_verify():
     if answer_hash != challenge['answer_hash']:
         return jsonify({"success": False, "error": "答案错误"}), 400
 
-    del challenges[challenge_id]
-    save_challenges(challenges)
+    with _captcha_lock:
+        challenges = _captcha_load_json(CAPTCHA_CHALLENGES_FILE)
+        challenges.pop(challenge_id, None)
+        _captcha_save_json(CAPTCHA_CHALLENGES_FILE, challenges)
 
     expiry = mark_captcha_verified(ip)
     return jsonify({
@@ -685,26 +694,26 @@ def api_admin_captcha_clear():
 def api_admin_captcha_verified_log():
     if not is_admin():
         return jsonify({'error': '未授权'}), 403
+
     log = get_verified_log()
-    # 直接返回原始加密数据，前端自行解密
-    return jsonify({'entries': log})
+    # ★ 直接返回加密数据，不解密（留给前端 RSA 解密）
+    return jsonify({'entries': list(reversed(log))})
 
 # ═══════════════════════════════════════════════════════════
 # 4.6.5  加密工具（用于已验证 IP 加密存储）
 # ═══════════════════════════════════════════════════════════
-from Crypto.Cipher import AES as _AES_CIPHER
-import base64 as _base64
 
 # ── 已验证 IP 日志文件 ──
 CAPTCHA_LOG_FILE = os.path.join(CAPTCHA_DIR, 'verified_log.json')
 
 def get_verified_log():
-    """获取加密的已验证IP日志"""
-    try:
-        with open(CAPTCHA_LOG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return []
+    """获取已验证IP日志"""
+    with _captcha_lock:
+        try:
+            with open(CAPTCHA_LOG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return []
 
 def save_verified_log(data):
     """保存已验证IP日志"""
@@ -1162,6 +1171,37 @@ def admin_logout():
     session.clear()
     return jsonify({'status': 'ok'})
 
+# ===== 密钥轮换 =====
+@app.route('/api/admin/rotate-key', methods=['POST'])
+@require_csrf
+@require_private_key
+def rotate_rsa_key():
+    """管理员上传新公钥，覆盖 gongyao.txt"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    public_key = data.get('public_key', '').strip()
+    if not public_key:
+        return jsonify({'error': '公钥不能为空'}), 400
+
+    # 简单校验是否为 PEM 格式（包含 BEGIN PUBLIC KEY）
+    if not public_key.startswith('-----BEGIN PUBLIC KEY-----') or '-----END PUBLIC KEY-----' not in public_key:
+        return jsonify({'error': '无效的公钥格式，请上传 PEM 格式公钥'}), 400
+
+    try:
+        # 尝试导入公钥，确认其有效性
+        RSA.importKey(public_key)
+    except Exception as e:
+        return jsonify({'error': f'公钥无效：{str(e)}'}), 400
+
+    # 写入文件（覆盖）
+    try:
+        with open(RSA_PUB, 'w', encoding='utf-8') as f:
+            f.write(public_key)
+        return jsonify({'ok': True, 'message': '公钥已更新'})
+    except Exception as e:
+        return jsonify({'error': f'写入公钥失败：{str(e)}'}), 500
 # === 9. 路由：基础与留言（v2 三部分格式）===
 @app.route('/api/myip')
 def my_ip():
@@ -1602,39 +1642,44 @@ def get_qun():
 @require_csrf
 def post_qun():
     ip = get_client_ip()
-    allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
-    if not allowed:
-        return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
-    if read_perm_file() == '1':
-        return rate_limit_json({"error": "已开启全体禁言"}, 403, in_wl, block_until)
-    data = request.get_json(silent=True) or {}
-    if not data.get('nick') or not data.get('content'):
-        return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
-    if not data.get('key'):
-        return rate_limit_json({"error": "请提供密钥"}, 400, in_wl, block_until)
-    if data['nick'].strip().lower() == 'admin':
-        return rate_limit_json({"error": "禁止使用 admin 作为昵称"}, 400, in_wl, block_until)
+    if not acquire_processing_lock(ip):
+        return rate_limit_json({"error": "请求处理中，请勿重复提交"}, 429, False, 0)
+    try:
+        allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
+        if not allowed:
+            return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
+        if read_perm_file() == '1':
+            return rate_limit_json({"error": "已开启全体禁言"}, 403, in_wl, block_until)
+        data = request.get_json(silent=True) or {}
+        if not data.get('nick') or not data.get('content'):
+            return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
+        if not data.get('key'):
+            return rate_limit_json({"error": "请提供密钥"}, 400, in_wl, block_until)
+        if data['nick'].strip().lower() == 'admin':
+            return rate_limit_json({"error": "禁止使用 admin 作为昵称"}, 400, in_wl, block_until)
 
-    key_hash = sha512(data['key'].strip())
-    content = data['content'][:2048]
-    initial_state = 'disabled' if check_regex_disable(content) else 'enabled'
+        key_hash = sha512(data['key'].strip())
+        content = data['content'][:2048]
+        initial_state = 'disabled' if check_regex_disable(content) else 'enabled'
 
-    msg = {
-        'nick': data['nick'].strip()[:32],
-        'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
-        'ip': encrypt_ip(get_client_ip()),
-        'content': content,
-        'pinned': False,
-        'state': initial_state,
-        'key_hash': key_hash,
-        'reports': []
-    }
-    def updater(chat):
-        chat.append(msg)
-    atomic_chat_update(updater)
+        msg = {
+            'nick': data['nick'].strip()[:32],
+            'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
+            'ip': encrypt_ip(get_client_ip()),
+            'content': content,
+            'pinned': False,
+            'state': initial_state,
+            'key_hash': key_hash,
+            'reports': []
+        }
+        def updater(chat):
+            chat.append(msg)
+        atomic_chat_update(updater)
 
-    block_until = set_rate_limit_after(ip)
-    return rate_limit_json({"status": "ok", "state": initial_state}, 200, in_wl, block_until)
+        block_until = set_rate_limit_after(ip)
+        return rate_limit_json({"status": "ok", "state": initial_state}, 200, in_wl, block_until)
+    finally:
+        release_processing_lock(ip)
 
 @app.route('/api/qun/revoke/<int:index>', methods=['POST'])
 
@@ -3358,13 +3403,16 @@ def import_data():
             # 清空当前 DATA_DIR（保留目录本身）
             data_dir = DATA_DIR
             if os.path.exists(data_dir):
-                # 删除所有子文件和子目录，但保留 data_dir 本身
                 for item in os.listdir(data_dir):
                     item_path = os.path.join(data_dir, item)
-                    if os.path.isfile(item_path) or os.path.islink(item_path):
-                        os.unlink(item_path)
-                    elif os.path.isdir(item_path):
-                        shutil.rmtree(item_path)
+                    try:
+                        if os.path.isfile(item_path) or os.path.islink(item_path):
+                            os.unlink(item_path)
+                        elif os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                    except Exception as e:
+                        # 忽略删除失败（例如 rate_limits.db 被占用），继续执行
+                        print(f"[WARN] 无法删除 {item_path}: {e}")
 
             # 安全解压（防止路径遍历）
             try:
