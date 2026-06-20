@@ -7,6 +7,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js" integrity="sha512-E8QSvWZ0eCLGk4km3hxSsNmGWbLtSCSUcewDQPQWZF6pEU8GlT8a5fF32wOl1i8ftdMhssTrF/OhyGWwonTcXA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg==" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/forge/1.3.1/forge.min.js" integrity="sha512-95iy0RZIbw3H/FgfAj2wnCQJlzFQ+eaSfUeV/l8WVyGHKSRMzm3M/O+85j9ba/HFphkijrCTDjcuDX0BL2lthA==" crossorigin="anonymous"></script>
   <style>
     .copy-btn { background:#eee; border:1px solid #ddd; border-radius:3px; padding:2px 8px; font-size:11px; cursor:pointer; color:#555; margin-left:8px; vertical-align:middle; }
     .copy-btn:hover { background:#ddd; }
@@ -85,6 +87,15 @@
   <button onclick="document.getElementById('import-file-input').click()" style="background:#FF9800;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📥 导入数据并覆盖</button>
   <input type="file" id="import-file-input" accept=".zip" style="display:none" onchange="importData(this)">
 </div>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0">
+  <button onclick="exportPlainData()" style="background:#9C27B0;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导出明文数据</button>
+  <button onclick="document.getElementById('import-plain-input').click()" style="background:#FF5722;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导入明文数据
+  <button onclick="rotateRSAKey()" style="background:#d32f2f;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">🔄 重置 RSA 密钥</button>
+  <span style="font-size:12px;color:#888;margin-left:10px">⚠️ 操作前请先导出明文数据，否则旧数据将无法解密</span>
+</button>
+  <input type="file" id="import-plain-input" accept=".json" style="display:none" onchange="importPlainData(this)">
+</div>
+<div id="plain-status" style="margin:8px 0;padding:8px;background:#f0f0f0;border-radius:4px;font-size:13px;display:none;"></div>
 <p style="font-size:12px;color:#888;margin:4px 0">导出将下载包含所有数据的 ZIP 文件；导入将用所选 ZIP 完全覆盖当前数据，操作不可逆！</p>
 
     <hr><h3>修改底部文字</h3><textarea id="footInput" placeholder="输入新内容"></textarea><button onclick="updateFoot()">保存底部</button>
@@ -97,22 +108,105 @@
 
   // 初始化 JSEncrypt
   try { jse = new JSEncrypt(); } catch(e) {}
+  let dataJse = null;  // 独立的数据解密实例
+  let dataKeyPromptShown = false;
 
   // 工具函数：获取 CSRF Token
   function getCsrfToken() {
     return csrfToken;
   }
 
+  // 修复被浏览器压缩成单行的 PEM 私钥
+  function normalizePemKey(rawKey) {
+    let k = rawKey.trim();
+    if (!k) return k;
+    // 已经是多行，直接返回
+    if (k.includes('\n') && k.includes('-----BEGIN')) return k;
+    // 单行 PEM → 重建换行
+    const h = k.match(/-----BEGIN [^-]+-----/);
+    const f = k.match(/-----END [^-]+-----/);
+    if (h && f) {
+      const header = h[0];
+      const footer = f[0];
+      let body = k.slice(k.indexOf(header) + header.length, k.indexOf(footer)).replace(/\s+/g, '');
+      body = body.match(/.{1,64}/g).join('\n');
+      return header + '\n' + body + '\n' + footer;
+    }
+    return k;
+  }
   // 解密 IP（使用管理员私钥）
   function decryptIP(encrypted) {
-    if (!jse) return '（密钥未加载）';
+    const tryDec = (jseInst) => {
+      if (!jseInst || !jseInst.getPrivateKey()) return null;
+      try {
+        const raw = (encrypted && encrypted.startsWith('RSA:')
+          ? encrypted.slice(4)
+          : (encrypted || '')
+        ).replace(/\s+/g, '');
+        if (!raw) return null;
+        return jseInst.decrypt(raw);
+      } catch(e) { return null; }
+    };
+
+    // 先试登录私钥
+    let dec = tryDec(jse);
+    if (dec) return dec;
+
+    // 再试独立数据私钥
+    if (dataJse) {
+      dec = tryDec(dataJse);
+      if (dec) return dec;
+    }
+
+    return '（解密失败）';
+  }
+
+  async function promptDataKey() {
+    if (dataKeyPromptShown) return false;
+    dataKeyPromptShown = true;
+    const input = prompt(
+      '⚠️ IP数据解密失败，可能需要单独的数据解密私钥。\n\n' +
+      '请粘贴用于解密IP/黑白名单数据的RSA私钥\n' +
+      '（如与登录私钥相同请直接点取消）：'
+    );
+    if (!input || !input.trim()) {
+      dataKeyPromptShown = false;
+      return false;
+    }
+    const normalized = normalizePemKey(input);
+    // 用黑/白名单第一条数据验证
     try {
-      const raw = encrypted && encrypted.startsWith('RSA:') ? encrypted.slice(4) : encrypted;
-      if (!raw) return '（空数据）';
-      const dec = jse.decrypt(raw);
-      return dec || '（解密失败）';
+      let testData = null;
+      const blRes = await fetch('/api/blacklist');
+      const blList = await blRes.json();
+      if (blList.length > 0) testData = blList[0].encrypted;
+      else {
+        const wlRes = await fetch('/api/whitelist');
+        const wlList = await wlRes.json();
+        if (wlList.length > 0) testData = wlList[0].encrypted;
+      }
+      if (testData) {
+        const testJse = new JSEncrypt();
+        testJse.setPrivateKey(normalized);
+        const raw = testData.replace(/\s+/g, '').replace(/^RSA:/, '');
+        const testDec = testJse.decrypt(raw);
+        if (testDec) {
+          dataJse = testJse;
+          sessionStorage.setItem('admin_data_key', normalized);
+          alert('✅ 数据解密私钥设置成功！');
+          return true;
+        } else {
+          alert('❌ 该私钥无法解密当前数据，请检查后重试。');
+          dataKeyPromptShown = false;
+          return false;
+        }
+      }
+      dataKeyPromptShown = false;
+      return false;
     } catch(e) {
-      return '（解密失败）';
+      alert('❌ 验证失败：' + e.message);
+      dataKeyPromptShown = false;
+      return false;
     }
   }
 
@@ -122,8 +216,10 @@
     const list = await res.json();
     const container = document.getElementById('wl-list');
     container.innerHTML = '';
+    let failCount = 0;
     list.forEach(item => {
       const plainIP = decryptIP(item.encrypted);
+      if (plainIP === '（解密失败）') failCount++;
       const div = document.createElement('div');
       div.className = 'bl-item';
       div.innerHTML = `
@@ -132,6 +228,10 @@
       `;
       container.appendChild(div);
     });
+    if (failCount > 0 && failCount === list.length && list.length > 0) {
+      const ok = await promptDataKey();
+      if (ok) loadWL();
+    }
   }
 
   async function addWL(ip) {
@@ -166,8 +266,10 @@
     const list = await res.json();
     const container = document.getElementById('bl-list');
     container.innerHTML = '';
+    let failCount = 0;
     list.forEach(item => {
       const plainIP = decryptIP(item.encrypted);
+      if (plainIP === '（解密失败）') failCount++;
       const div = document.createElement('div');
       div.className = 'bl-item';
       div.innerHTML = `
@@ -176,22 +278,9 @@
       `;
       container.appendChild(div);
     });
-  }
-
-  async function addBL(ip) {
-    const targetIp = ip || document.getElementById('bl-ip').value.trim();
-    if (!targetIp) return alert('请输入IP地址');
-    const res = await fetch('/api/blacklist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({ action: 'add', ip: targetIp })
-    });
-    if (res.ok) {
-      alert('添加黑名单成功');
-      document.getElementById('bl-ip').value = '';
-      loadBL();
-    } else {
-      alert('添加失败：' + await res.text());
+    if (failCount > 0 && failCount === list.length && list.length > 0) {
+      const ok = await promptDataKey();
+      if (ok) loadBL();
     }
   }
 
@@ -271,6 +360,12 @@
   function showAdmin(){
     document.getElementById('login-panel').style.display='none';
     document.getElementById('msg-panel').style.display='block';
+    // 恢复独立数据私钥
+    const savedDataKey = sessionStorage.getItem('admin_data_key');
+    if (savedDataKey) {
+      dataJse = new JSEncrypt();
+      dataJse.setPrivateKey(savedDataKey);
+    }
     fetch('/api/replies', {credentials:'same-origin'}).then(function(r){return r.json();}).then(function(rps){allReplies=rps;render();});
     fetch('/api/footer', {credentials:'same-origin'}).then(function(r){return r.text();}).then(function(t){document.getElementById('footInput').value=t;});
     loadBL();
@@ -535,6 +630,854 @@
       alert('获取当前IP失败：' + e.message);
     }
   }
+// ===== 工具：sleep =====
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+// ===== 解密单条 v2 留言 =====
+function decryptV2Message(lines) {
+    if (!lines || lines.length < 2) return null;
+    const first = lines[0].trim();
+    if (!first.startsWith('v2|')) return null;
+    const parts = first.split('|');
+    if (parts.length < 3) return null;
+    const rsaKey = parts[1];
+    const ivBase64 = parts[2];
+    const aesMsg = lines[1].trim();
+    if (!rsaKey || !ivBase64 || !aesMsg) return null;
+    try {
+        const rawAES = jse.decrypt(rsaKey);
+        if (!rawAES) return null;
+        const key32 = deriveKey(rawAES);
+        const iv = CryptoJS.enc.Base64.parse(ivBase64);
+        const plain = CryptoJS.AES.decrypt(aesMsg, key32, {
+            iv: iv,
+            mode: CryptoJS.mode.CBC,
+            padding: CryptoJS.pad.Pkcs7
+        }).toString(CryptoJS.enc.Utf8);
+        if (!plain) return null;
+        const sep = plain.indexOf(' | ');
+        if (sep === -1) return { nick: '匿名', content: plain };
+        return {
+            nick: plain.substring(0, sep).trim(),
+            content: plain.substring(sep + 3).trim()
+        };
+    } catch (e) {
+        console.warn('解密失败', e);
+        return null;
+    }
+}
+
+// ===== 导出明文数据（完整版，包含所有原始 IP 和时间明文，含黑白名单、人机验证配置） =====
+async function exportPlainData() {
+    const confirmText = prompt('请输入 "确认导出所有明文数据" 以继续：');
+    if (confirmText !== '确认导出所有明文数据') {
+        alert('操作已取消');
+        return;
+    }
+    const statusDiv = document.getElementById('plain-status');
+    statusDiv.style.display = 'block';
+    statusDiv.textContent = '⏳ 正在获取数据...';
+    try {
+        const res = await authFetch('/api/admin/export-data');
+        if (!res.ok) throw new Error('获取导出数据失败');
+        const zipBlob = await res.blob();
+        statusDiv.textContent = '⏳ 正在解压并解密数据...';
+        const zip = await JSZip.loadAsync(zipBlob);
+
+        const result = {
+            messages: [],      // 留言 { nick, content, ip, time }
+            votes: {},         // 投票 { poll_id: { config, votes: [ { seq, content, rawAES, key_hash, iv, ip, time } ] } }
+            notices: [],       // 公告 { content, time, pinned }
+            chat_qun: [],      // 群聊 { nick, time, content, state, pinned, ip }
+            chat_private: [],  // 私聊 { filename, sender_pub, iv, expire_at, wrapped_key, aes_content, ip, time }
+            ip_records: [],    // IP 记录 { date, ip, count }
+            captcha_logs: [],  // 验证日志 { ip, verified_time, expiry_time }
+            configs: {},       // 配置文件 { under, permission, rule, threshold, retention }
+            blacklist: [],     // 黑名单 { hash, ip }
+            whitelist: [],     // 白名单 { hash, ip }
+            captcha_config: null,   // captcha/config.json
+            captcha_verified: null  // captcha/verified.json
+        };
+
+        // 解密辅助：先试登录私钥，再试数据私钥
+        const tryDecrypt = (enc) => {
+            if (!enc || !enc.startsWith('RSA:')) return enc;
+            const raw = enc.slice(4).replace(/\s+/g, '');
+            // 用登录私钥
+            if (jse && jse.getPrivateKey()) {
+                try { const d = jse.decrypt(raw); if (d) return d; } catch(e) {}
+            }
+            // 用数据私钥
+            if (dataJse && dataJse.getPrivateKey()) {
+                try { const d = dataJse.decrypt(raw); if (d) return d; } catch(e) {}
+            }
+            return null; // 解不开
+        };
+
+        const getFileContent = async (path) => {
+            if (zip.files[path] && !zip.files[path].dir) {
+                return await zip.files[path].async('string');
+            }
+            return null;
+        };
+
+        // ---- 配置文件 ----
+        const configFiles = [
+            { key: 'under', path: 'under.txt' },
+            { key: 'permission', path: '群/permission.txt' },
+            { key: 'rule', path: '群/rule.txt' },
+            { key: 'threshold', path: '群/threshold.txt' },
+            { key: 'retention', path: 'chat/retention_hours.txt' }
+        ];
+        for (const { key, path } of configFiles) {
+            const content = await getFileContent(path);
+            if (content !== null) result.configs[key] = content.trim();
+        }
+
+        // ---- 黑白名单 ----
+        for (const [key, filename] of [['blacklist', 'black.txt'], ['whitelist', 'white.txt']]) {
+            const content = await getFileContent(filename);
+            if (content !== null) {
+                const lines = content.split('\n').filter(l => l.trim());
+                const list = [];
+                for (const line of lines) {
+                    const parts = line.split('|');
+                    if (parts.length >= 2) {
+                        const hash = parts[0].trim();
+                        const encIp = parts[1].trim();
+                        let ip = encIp;
+                        const dec = tryDecrypt(encIp);
+                        if (dec) ip = dec;
+                        list.push({ hash, ip });
+                    }
+                }
+                result[key] = list;
+            }
+        }
+
+        // ---- 人机验证配置 ----
+        const captchaConfigRaw = await getFileContent('captcha/config.json');
+        if (captchaConfigRaw) {
+            try {
+                result.captcha_config = JSON.parse(captchaConfigRaw);
+            } catch (e) {}
+        }
+
+        // ---- 人机验证已验证IP ----
+        const captchaVerifiedRaw = await getFileContent('captcha/verified.json');
+        if (captchaVerifiedRaw) {
+            try {
+                result.captcha_verified = JSON.parse(captchaVerifiedRaw);
+            } catch (e) {}
+        }
+
+        // ---- 留言 ----
+        for (const [path, file] of Object.entries(zip.files)) {
+            if (file.dir) continue;
+            if (path.match(/^留言\/留言_\d+\.txt$/)) {
+                const content = await file.async('string');
+                const lines = content.split('\n').filter(l => l.trim());
+                if (lines.length < 3) continue;
+                const first = lines[0];
+                if (!first.startsWith('v2|')) continue;
+                const parts = first.split('|');
+                const rsaKey = parts[1];
+                const iv = parts[2];
+                const serverTime = parts[3] || '';
+                const aesMsg = lines[1];
+                const serverEnc = lines[2] || '';
+
+                // 解密 server_enc 获取 IP 和时间
+                let ip = '127.0.0.1', time = serverTime;
+                if (serverEnc && serverEnc.startsWith('RSA:')) {
+                    try {
+                        const dec = jse.decrypt(serverEnc.slice(4));
+                        if (dec) {
+                            const parts2 = dec.split(' | ');
+                            if (parts2.length >= 2) {
+                                ip = parts2[0];
+                                time = parts2[1];
+                            }
+                        }
+                    } catch (e) {}
+                }
+
+                // 解密内容
+                let nick = '匿名', contentText = '（解密失败）';
+                try {
+                    const rawAES = jse.decrypt(rsaKey);
+                    if (rawAES) {
+                        const key32 = deriveKey(rawAES);
+                        const ivW = CryptoJS.enc.Base64.parse(iv);
+                        const plain = CryptoJS.AES.decrypt(aesMsg, key32, {
+                            iv: ivW,
+                            mode: CryptoJS.mode.CBC,
+                            padding: CryptoJS.pad.Pkcs7
+                        }).toString(CryptoJS.enc.Utf8);
+                        if (plain) {
+                            const sep = plain.indexOf(' | ');
+                            if (sep !== -1) {
+                                nick = plain.substring(0, sep).trim();
+                                contentText = plain.substring(sep + 3).trim();
+                            } else {
+                                contentText = plain;
+                            }
+                        }
+                    }
+                } catch (e) {}
+                result.messages.push({ nick, content: contentText, ip, time });
+            }
+        }
+
+        // ---- 投票 ----
+        const voteDirs = {};
+        for (const [path, file] of Object.entries(zip.files)) {
+            if (file.dir) continue;
+            const match = path.match(/^vote_data\/([^/]+)\/(.+)$/);
+            if (!match) continue;
+            const pollId = match[1];
+            const filename = match[2];
+            if (!voteDirs[pollId]) voteDirs[pollId] = {};
+            voteDirs[pollId][filename] = file;
+        }
+        for (const [pollId, files] of Object.entries(voteDirs)) {
+            let config = {};
+            if (files['config.json']) {
+                try {
+                    const raw = await files['config.json'].async('string');
+                    config = JSON.parse(raw);
+                } catch (e) {}
+            }
+            const votes = [];
+            for (const [fname, file] of Object.entries(files)) {
+                if (!fname.match(/^投票_\d+\.txt$/)) continue;
+                const seq = parseInt(fname.match(/\d+/)[0], 10);
+                const content = await file.async('string');
+                const lines = content.split('\n').filter(l => l.trim());
+                if (lines.length < 6) continue;
+                const first = lines[0];
+                if (!first.startsWith('v2|')) continue;
+                const parts = first.split('|');
+                const rsaKey = parts[1];
+                const iv = parts[2];
+                const aesMsg = lines[1];
+                const serverEnc = lines[2];
+                const editToken = lines[3];
+                const keyHash = lines[4];
+
+                // 解密 server_enc
+                let ip = '127.0.0.1', time = '';
+                if (serverEnc && serverEnc.startsWith('RSA:')) {
+                    try {
+                        const dec = jse.decrypt(serverEnc.slice(4));
+                        if (dec) {
+                            const parts2 = dec.split(' | ');
+                            if (parts2.length >= 2) {
+                                ip = parts2[0];
+                                time = parts2[1];
+                            }
+                        }
+                    } catch (e) {}
+                }
+
+                // 解密内容
+                let contentText = '（解密失败）', rawAES = '';
+                try {
+                    rawAES = jse.decrypt(rsaKey);
+                    if (rawAES) {
+                        const key32 = deriveKey(rawAES);
+                        const ivW = CryptoJS.enc.Base64.parse(iv);
+                        const plain = CryptoJS.AES.decrypt(aesMsg, key32, {
+                            iv: ivW,
+                            mode: CryptoJS.mode.CBC,
+                            padding: CryptoJS.pad.Pkcs7
+                        }).toString(CryptoJS.enc.Utf8);
+                        if (plain) {
+                            const sep = plain.indexOf(' | ');
+                            if (sep !== -1) {
+                                contentText = plain.substring(sep + 3).trim();
+                            } else {
+                                contentText = plain;
+                            }
+                        }
+                    }
+                } catch (e) {}
+                votes.push({
+                    seq,
+                    content: contentText,
+                    rawAES: rawAES,
+                    key_hash: keyHash,
+                    iv: iv,
+                    ip: ip,
+                    time: time
+                });
+            }
+            result.votes[pollId] = { config, votes };
+        }
+
+        // ---- 公告 ----
+        const noticeRaw = await getFileContent('notice_data.json');
+        if (noticeRaw) {
+            try {
+                const notices = JSON.parse(noticeRaw);
+                result.notices = notices.map(n => ({
+                    content: n.content,
+                    time: n.time,
+                    pinned: n.pinned || false
+                }));
+            } catch (e) {}
+        }
+
+        // ---- 群聊 ----
+        const chatRaw = await getFileContent('chat_data.json');
+        if (chatRaw) {
+            try {
+                const chat = JSON.parse(chatRaw);
+                result.chat_qun = chat.map(m => {
+                    let ip = '127.0.0.1';
+                    const rawIp = m.ip || '';
+                    if (rawIp && rawIp.startsWith('RSA:')) {
+                        try {
+                            const dec = jse.decrypt(rawIp.slice(4));
+                            if (dec) ip = dec;
+                        } catch (e) {}
+                    } else if (rawIp && rawIp.startsWith('PLAIN:')) {
+                        ip = rawIp.slice(6);
+                    } else if (rawIp) {
+                        ip = rawIp;
+                    }
+                    return {
+                        nick: m.nick,
+                        time: m.time,
+                        content: m.content,
+                        state: m.state || 'enabled',
+                        pinned: m.pinned || false,
+                        ip: ip
+                    };
+                });
+            } catch (e) {}
+        }
+
+        // ---- 私聊 ----
+        for (const [path, file] of Object.entries(zip.files)) {
+            if (file.dir) continue;
+            const match = path.match(/^chat\/([a-f0-9]{16}_\d{4}\.txt)$/);
+            if (!match) continue;
+            const filename = match[1];
+            const content = await file.async('string');
+            const lines = content.split('\n').filter(l => l.trim());
+            if (lines.length < 4) continue;
+            const first = lines[0];
+            if (!first.startsWith('v2|')) continue;
+            const parts = first.split('|');
+            const senderPub = parts[1] || '';
+            const iv = parts[2] || '';
+            const expireAt = parts[3] || '';
+            const wrappedKey = lines[1] || '';
+            const aesContent = lines[2] || '';
+            const adminLine = lines[3] || '';
+            const adminParts = adminLine.split('|', 2);
+            const adminIpEnc = adminParts[0] || '';
+            const serverTime = adminParts[1] || '';
+            let ip = adminIpEnc;
+            if (adminIpEnc.startsWith('RSA:')) {
+                try { const dec = jse.decrypt(adminIpEnc.slice(4)); if (dec) ip = dec; } catch (e) {}
+            }
+            result.chat_private.push({
+                filename,
+                sender_pub: senderPub,
+                iv,
+                expire_at: expireAt,
+                wrapped_key: wrappedKey,
+                aes_content: aesContent,
+                ip: ip,
+                time: serverTime
+            });
+        }
+
+        // ---- IP 记录 ----
+        for (const [path, file] of Object.entries(zip.files)) {
+            if (file.dir) continue;
+            const match = path.match(/^ip\/ip_(\d{4}-\d{2}-\d{2})$/);
+            if (!match) continue;
+            const date = match[1];
+            const content = await file.async('string');
+            const lines = content.split('\n').filter(l => l.trim());
+            for (const line of lines) {
+                const parts = line.split('|');
+                if (parts.length < 3) continue;
+                const encIp = parts[1].trim();
+                const count = parseInt(parts[2].trim(), 10) || 0;
+                // ★ 使用已有的 decryptIP 函数，无论成功还是失败都返回可读字符串
+                const ip = decryptIP(encIp);
+                result.ip_records.push({ date, ip, count });
+            }
+        }
+
+        // ---- 人机验证日志 ----
+        const captchaLogRaw = await getFileContent('captcha/verified_log.json');
+        if (captchaLogRaw) {
+            try {
+                const logs = JSON.parse(captchaLogRaw);
+                for (const entry of logs) {
+                    const encData = entry.data;
+                    if (encData && encData.startsWith('RSA:')) {
+                        try {
+                            const dec = jse.decrypt(encData.slice(4));
+                            if (dec) {
+                                const parts = dec.split('|');
+                                if (parts.length >= 3) {
+                                    result.captcha_logs.push({
+                                        ip: parts[0],
+                                        verified_time: parts[1],
+                                        expiry_time: parts[2]
+                                    });
+                                }
+                            }
+                        } catch (e) {}
+                    }
+                }
+            } catch (e) {}
+        }
+
+        // ---- 导出 JSON ----
+        statusDiv.textContent = `✅ 导出完成：留言 ${result.messages.length} 条，投票 ${Object.keys(result.votes).length} 个，公告 ${result.notices.length} 条，群聊 ${result.chat_qun.length} 条，私聊 ${result.chat_private.length} 条，IP记录 ${result.ip_records.length} 条，验证日志 ${result.captcha_logs.length} 条，黑名单 ${result.blacklist.length} 条，白名单 ${result.whitelist.length} 条，正在下载...`;
+        const jsonStr = JSON.stringify(result, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `plain_data_${new Date().toISOString().slice(0,10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setTimeout(() => { statusDiv.style.display = 'none'; }, 3000);
+    } catch (e) {
+        statusDiv.textContent = '❌ 导出失败：' + e.message;
+        console.error(e);
+    }
+}
+
+// ===== 导入明文数据（构造 ZIP 并全量覆盖，使用当前公钥重新加密，包含黑白名单、人机验证配置） =====
+async function importPlainData(input) {
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    if (!file.name.endsWith('.json')) {
+        alert('请上传 .json 文件');
+        input.value = '';
+        return;
+    }
+    const confirmMsg = `⚠️ 即将导入文件：${file.name}\n此操作将覆盖当前所有明文数据，不可撤销！\n请输入 "确认导入来自于 ${file.name} 的明文数据并覆盖" 以继续：`;
+    const confirmText = prompt(confirmMsg);
+    if (confirmText !== `确认导入来自于 ${file.name} 的明文数据并覆盖`) {
+        alert('操作已取消');
+        input.value = '';
+        return;
+    }
+
+    const statusDiv = document.getElementById('plain-status');
+    statusDiv.style.display = 'block';
+    statusDiv.textContent = '⏳ 读取文件...';
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+
+        // ---- 获取公钥用于加密 ----
+        const pubRes = await fetch('/gongyao.txt');
+        if (!pubRes.ok) throw new Error('无法获取公钥');
+        const pubKey = await pubRes.text();
+        const encryptor = new JSEncrypt();
+        encryptor.setPublicKey(pubKey);
+
+        // 辅助加密函数
+        const encryptRSA = (plain) => {
+            const enc = encryptor.encrypt(plain);
+            return enc ? 'RSA:' + enc : '';
+        };
+
+        // ---- 创建 ZIP ----
+        const zip = new JSZip();
+
+        const addFile = (path, content) => {
+            zip.file(path, content);
+        };
+
+        // ---- 配置文件 ----
+        const configMap = {
+            under: 'under.txt',
+            permission: '群/permission.txt',
+            rule: '群/rule.txt',
+            threshold: '群/threshold.txt',
+            retention: 'chat/retention_hours.txt'
+        };
+        for (const [key, filename] of Object.entries(configMap)) {
+            if (data.configs && data.configs[key] !== undefined) {
+                addFile(filename, data.configs[key]);
+            }
+        }
+
+        // ---- 黑白名单 ----
+        const writeList = (list, filename) => {
+            // 始终写入文件，即使列表为空也写入空字符串，以确保文件存在
+            if (Array.isArray(list)) {
+                const lines = list.map(item => {
+                    const ip = item.ip || '127.0.0.1';
+                    const hash = item.hash || CryptoJS.SHA512(ip).toString(CryptoJS.enc.Hex);
+                    const encrypted = encryptRSA(ip);
+                    if (!encrypted) return null; // 加密失败跳过
+                    return `${hash} | ${encrypted}`;
+                }).filter(line => line !== null);
+                // 即使 lines 为空，也写入空字符串，创建空文件
+                addFile(filename, lines.join('\n'));
+            }
+        };
+        writeList(data.blacklist, 'black.txt');
+        writeList(data.whitelist, 'white.txt');
+
+        // ---- 人机验证配置 ----
+        if (data.captcha_config && typeof data.captcha_config === 'object') {
+            addFile('captcha/config.json', JSON.stringify(data.captcha_config, null, 2));
+        }
+
+        // ---- 人机验证已验证IP ----
+        if (data.captcha_verified && typeof data.captcha_verified === 'object') {
+            addFile('captcha/verified.json', JSON.stringify(data.captcha_verified, null, 2));
+        }
+
+        // ---- 留言 ----
+        if (Array.isArray(data.messages)) {
+            let seq = 1;
+            for (const msg of data.messages) {
+                if (!msg.nick || !msg.content) continue;
+                // 生成加密
+                const aesKeyBytes = CryptoJS.lib.WordArray.random(32);
+                const aesKeyStr = aesKeyBytes.toString(CryptoJS.enc.Base64);
+                const rsaKey = encryptor.encrypt(aesKeyStr);
+                if (!rsaKey) throw new Error('RSA加密失败');
+                const iv = CryptoJS.lib.WordArray.random(16);
+                const ivBase64 = iv.toString(CryptoJS.enc.Base64);
+                const plainText = `${msg.nick} | ${msg.content}`;
+                const key32 = deriveKey(aesKeyStr);
+                const encrypted = CryptoJS.AES.encrypt(plainText, key32, {
+                    iv: iv,
+                    mode: CryptoJS.mode.CBC,
+                    padding: CryptoJS.pad.Pkcs7
+                }).toString();
+                // 使用导出的 IP 和时间
+                const ip = msg.ip || '127.0.0.1';
+                const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                const serverMeta = `${ip} | ${time}`;
+                const serverEnc = encryptRSA(serverMeta);
+                const fileContent = `v2|${rsaKey}|${ivBase64}|${time}\n${encrypted}\n${serverEnc}`;
+                addFile(`留言/留言_${seq}.txt`, fileContent);
+                seq++;
+            }
+        }
+
+        // ---- 投票 ----
+        if (data.votes && typeof data.votes === 'object') {
+            for (const [pollId, pollData] of Object.entries(data.votes)) {
+                const config = pollData.config || {};
+                const votes = pollData.votes || [];
+                if (!config.options || config.options.length < 2) continue;
+                const dir = `vote_data/${pollId}`;
+                addFile(`${dir}/config.json`, JSON.stringify(config, null, 2));
+                let voteSeq = 1;
+                for (const vote of votes) {
+                    if (!vote.content) continue;
+                    let rawAES = vote.rawAES;
+                    if (!rawAES) {
+                        const aesKeyBytes = CryptoJS.lib.WordArray.random(32);
+                        rawAES = aesKeyBytes.toString(CryptoJS.enc.Base64);
+                    }
+                    const rsaKey = encryptor.encrypt(rawAES);
+                    if (!rsaKey) continue;
+                    const iv = CryptoJS.lib.WordArray.random(16);
+                    const ivBase64 = iv.toString(CryptoJS.enc.Base64);
+                    const plainText = `投票者 | ${vote.content}`;
+                    const key32 = deriveKey(rawAES);
+                    const encrypted = CryptoJS.AES.encrypt(plainText, key32, {
+                        iv: iv,
+                        mode: CryptoJS.mode.CBC,
+                        padding: CryptoJS.pad.Pkcs7
+                    }).toString();
+                    const ip = vote.ip || '127.0.0.1';
+                    const time = vote.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                    const serverMeta = `${ip} | ${time}`;
+                    const serverEnc = encryptRSA(serverMeta);
+                    const editToken = CryptoJS.lib.WordArray.random(24).toString(CryptoJS.enc.Base64).slice(0, 24);
+                    const keyHash = CryptoJS.SHA512(rawAES).toString();
+                    const remarkLine = '';
+                    const fileContent = `v2|${rsaKey}|${ivBase64}\n${encrypted}\n${serverEnc}\n${editToken}\n${keyHash}\n${remarkLine}`;
+                    addFile(`${dir}/投票_${voteSeq}.txt`, fileContent);
+                    voteSeq++;
+                }
+            }
+        }
+
+        // ---- 公告 ----
+        if (Array.isArray(data.notices)) {
+            const notices = data.notices.map(n => ({
+                content: n.content,
+                time: n.time || new Date().toISOString().replace('T', ' ').slice(0, 19),
+                pinned: n.pinned || false
+            }));
+            addFile('notice_data.json', JSON.stringify(notices, null, 2));
+        }
+
+        // ---- 群聊 ----
+        if (Array.isArray(data.chat_qun)) {
+            const chat = data.chat_qun.map(m => {
+                const ip = m.ip || '127.0.0.1';
+                const encryptedIp = encryptRSA(ip);
+                return {
+                    nick: m.nick,
+                    time: m.time || new Date().toISOString().replace('T', ' ').slice(0, 19),
+                    content: m.content,
+                    state: m.state || 'enabled',
+                    pinned: m.pinned || false,
+                    ip: encryptedIp || 'PLAIN:' + ip,
+                    key_hash: '',
+                    reports: []
+                };
+            });
+            addFile('chat_data.json', JSON.stringify(chat, null, 2));
+        }
+
+        // ---- 私聊 ----
+        if (Array.isArray(data.chat_private)) {
+            for (const msg of data.chat_private) {
+                const filename = msg.filename || `unknown_${Date.now()}.txt`;
+                const ip = msg.ip || '127.0.0.1';
+                const encryptedIp = encryptRSA(ip) || 'PLAIN:' + ip;
+                const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                const content = `v2|${msg.sender_pub}|${msg.iv}|${msg.expire_at || ''}\n${msg.wrapped_key}\n${msg.aes_content}\n${encryptedIp} | ${time}`;
+                addFile(`chat/${filename}`, content);
+            }
+        }
+
+        // ---- IP 记录 ----
+        if (Array.isArray(data.ip_records)) {
+            const grouped = {};
+            let skippedCount = 0;
+            let validCount = 0;
+            for (const rec of data.ip_records) {
+                // 1. 获取日期，若缺失则使用当前日期
+                let date = rec.date ? rec.date.trim() : '';
+                if (!date) {
+                    date = new Date().toISOString().slice(0, 10);
+                    console.warn('IP记录缺少日期，使用当前日期:', date);
+                }
+                // 校验日期格式 YYYY-MM-DD
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+                    console.warn('无效日期格式，跳过此记录:', date);
+                    continue;
+                }
+
+                // 2. 获取 IP 并清理
+                let ip = (rec.ip || '').trim();
+                if (!ip) {
+                    console.warn('IP为空，跳过');
+                    continue;
+                }
+
+                // 3. 如果 IP 是加密格式（RSA:开头），说明导出时未解密，跳过（因为我们需要明文）
+                if (ip.startsWith('RSA:')) {
+                    console.warn('跳过已加密的IP记录（导入只接受明文IP）:', ip);
+                    skippedCount++;
+                    continue;
+                }
+
+                // 4. 如果 IP 是解密失败的标识，跳过
+                if (ip === '（解密失败）') {
+                    console.warn('跳过解密失败的IP记录:', ip);
+                    skippedCount++;
+                    continue;
+                }
+
+                // 5. 校验 IP 格式（同时支持 IPv4 和 IPv6）
+                let isValid = false;
+
+                // 5a. 尝试匹配 IPv4（xxx.xxx.xxx.xxx，每段 0-255）
+                const ipv4Parts = ip.split('.');
+                if (ipv4Parts.length === 4) {
+                    let allValid = true;
+                    for (let part of ipv4Parts) {
+                        const num = parseInt(part, 10);
+                        if (isNaN(num) || num < 0 || num > 255) {
+                            allValid = false;
+                            break;
+                        }
+                    }
+                    if (allValid) {
+                        isValid = true;
+                    }
+                }
+
+                // 5b. 如果 IPv4 校验失败，尝试 IPv6（简单判断：包含 ':' 且不含空格）
+                if (!isValid && ip.includes(':') && !/\s/.test(ip)) {
+                    // 更严谨的校验可以添加，但服务端仅作为字符串使用，这样足够
+                    isValid = true;
+                }
+
+                if (!isValid) {
+                    console.warn('IP格式无效（不支持的格式）:', ip);
+                    skippedCount++;
+                    continue;
+                }
+
+                // 6. 获取 count
+                const count = rec.count && !isNaN(rec.count) ? parseInt(rec.count, 10) : 1;
+
+                // 7. 加密 IP
+                const hash = CryptoJS.SHA512(ip).toString(CryptoJS.enc.Hex);
+                const encrypted = encryptRSA(ip);
+                if (!encrypted) {
+                    console.warn('IP加密失败，跳过:', ip);
+                    skippedCount++;
+                    continue;
+                }
+
+                // 8. 分组存储
+                if (!grouped[date]) grouped[date] = [];
+                grouped[date].push(`${hash} | ${encrypted} | ${count}`);
+                validCount++;
+            }
+
+            console.log(`IP记录处理完成：有效 ${validCount} 条，跳过 ${skippedCount} 条`);
+
+            // 9. 写入 ZIP 文件
+            for (const [date, lines] of Object.entries(grouped)) {
+                if (lines.length > 0) {
+                    addFile(`ip/ip_${date}`, lines.join('\n'));
+                }
+            }
+        }
+
+        // ---- 人机验证日志 ----
+        if (Array.isArray(data.captcha_logs)) {
+            const logs = [];
+            for (const entry of data.captcha_logs) {
+                const ip = entry.ip || '127.0.0.1';
+                const verified = entry.verified_time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                const expiry = entry.expiry_time || new Date(Date.now() + 3600000).toISOString().replace('T', ' ').slice(0, 19);
+                const plain = `${ip}|${verified}|${expiry}`;
+                const encrypted = encryptRSA(plain);
+                if (encrypted) {
+                    logs.push({ data: encrypted, ts: Date.now() / 1000 });
+                }
+            }
+            if (logs.length > 0) {
+                addFile('captcha/verified_log.json', JSON.stringify(logs, null, 2));
+            }
+        }
+
+        // ---- 生成 ZIP 并上传 ----
+        statusDiv.textContent = '⏳ 正在打包 ZIP...';
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const formData = new FormData();
+        formData.append('file', zipBlob, 'import.zip');
+
+        statusDiv.textContent = '⏳ 正在上传并覆盖数据...';
+        const res = await authFetch('/api/admin/import-data', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await res.json();
+        if (result.ok) {
+            statusDiv.textContent = '✅ 导入成功！页面即将刷新。';
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            throw new Error(result.error || '导入失败');
+        }
+    } catch (e) {
+        statusDiv.textContent = '❌ 导入失败：' + e.message;
+        console.error(e);
+    } finally {
+        input.value = '';
+    }
+}
+
+// ===== 生成随机字符串 =====
+function generateRandomString(length) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+}
+
+// ===== 重置 RSA 密钥 =====
+async function rotateRSAKey() {
+    // 1. 二次确认：生成随机字符
+    const randomStr = generateRandomString(8);
+    const expectedPhrase = `我已下载明文数据，确定重置RSA密钥${randomStr}`;
+    const userInput = prompt(
+        `⚠️ 即将生成新 RSA 密钥对并替换服务器公钥！\n\n` +
+        `此操作将导致所有用旧公钥加密的数据无法解密。\n` +
+        `请确保您已通过「导出明文数据」功能备份了所有数据。\n\n` +
+        `请输入以下确认短语以继续：\n\n` +
+        `"${expectedPhrase}"\n\n` +
+        `（输入后点击「确定」）`
+    );
+
+    if (userInput === null) return; // 用户取消
+    if (userInput.trim() !== expectedPhrase) {
+        alert('❌ 确认短语输入错误，操作已取消。');
+        return;
+    }
+
+    // 2. 生成密钥对（使用 forge）
+    try {
+        // 检查 forge 是否加载
+        if (typeof forge === 'undefined') {
+            alert('❌ forge 库未加载，请刷新页面后重试。');
+            return;
+        }
+
+        const keypair = forge.pki.rsa.generateKeyPair({ bits: 2048, workers: 2 });
+        const privateKeyPem = forge.pki.privateKeyToPem(keypair.privateKey);
+        const publicKeyPem = forge.pki.publicKeyToPem(keypair.publicKey);
+
+        // 3. 下载私钥（RSA.txt）
+        const blob = new Blob([privateKeyPem], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'RSA.txt';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        alert('✅ 私钥已下载为 RSA.txt，请妥善保管！');
+
+        // 4. 上传公钥到服务器
+        const uploadConfirm = confirm('公钥将上传至服务器，确认继续？');
+        if (!uploadConfirm) return;
+
+        const res = await authFetch('/api/admin/rotate-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ public_key: publicKeyPem })
+        });
+
+        const data = await res.json();
+        if (data.ok) {
+            alert('✅ RSA 公钥已更新成功！');
+            // 可选择刷新页面或提示重新登录
+            if (confirm('公钥已更换，建议重新登录以确保会话安全，是否现在刷新？')) {
+                location.reload();
+            }
+        } else {
+            alert('❌ 上传公钥失败：' + (data.error || '未知错误'));
+        }
+    } catch (e) {
+        alert('❌ 生成或上传密钥失败：' + e.message);
+        console.error(e);
+    }
+}
 </script>
 </body>
 </html>

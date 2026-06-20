@@ -187,7 +187,11 @@ function loadKey() {
 function decryptIP(encrypted) {
   if (!adminJse) return '<span class="decrypt-fail">私钥未加载</span>';
   try {
-    var plain = adminJse.decrypt(encrypted);
+    // ★ 去除 RSA: 前缀，并清理空白字符
+    var raw = encrypted;
+    if (raw.startsWith('RSA:')) raw = raw.slice(4);
+    raw = raw.replace(/\s+/g, '');
+    var plain = adminJse.decrypt(raw);
     if (plain) return '<span class="ip-cell">' + esc(plain) + '</span>';
     return '<span class="decrypt-fail">解密失败</span>';
   } catch(e) {

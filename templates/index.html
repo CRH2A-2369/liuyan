@@ -98,13 +98,12 @@
 // ★ 验证码拦截：如果服务器返回 418，保存状态并跳转
 function handleCaptchaRedirect(res, saveStateFn) {
   if (res.status === 418) {
-    // 保存当前表单状态（可选）
     if (typeof saveStateFn === 'function') saveStateFn();
     var returnUrl = encodeURIComponent(window.location.href);
     window.location.href = '/captcha?redirect=' + returnUrl;
-    return true; // 触发了验证码跳转
+    return true;
   }
-  return false; // 正常响应
+  return false;
 }
 
   var currentQueryTab = 'reply';
@@ -223,6 +222,11 @@ function handleSubmit() {
     var msg = document.getElementById('msg').value;
     if (!nick || !keyIn || !msg) { alert('请填写完整'); return; }
 
+    // ★ 7s 限流检查
+    if (window.isRateLimited && window.isRateLimited()) return;
+
+    var redirected = false;
+
     setLS(LS_NICK, nick);
     setLS(LS_AES, keyIn);
 
@@ -238,7 +242,7 @@ function handleSubmit() {
       var cleanRsaKey = jse.encrypt(keyIn).replace(/[\r\n\s]+/g, '');
       if (!cleanRsaKey) { alert('RSA加密失败'); return; }
 
-      fetch('/', {
+      return fetch('/', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
@@ -246,28 +250,73 @@ function handleSubmit() {
           iv: CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''),
           aes_msg: aesEnc.replace(/[\r\n\s]+/g, '')
         })
-      }).then(function(res){
-        // ★ 验证码拦截
-        if (res.status === 418) {
-          // 保存当前输入以便跳转回来后恢复
-          sessionStorage.setItem('pending_nick', nick);
-          sessionStorage.setItem('pending_key', keyIn);
-          sessionStorage.setItem('pending_msg', msg);
-          window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
-          return;
-        }
-
-        window.handleRateLimitResponse(res);
-        if (res.ok) { alert('✅ 已加密提交'); }
-        else { alert('❌ 提交失败'); }
-      }).finally(function(){
-        closeModal();
-        document.getElementById('msg').value = '';
       });
+    }).then(function(res){
+      if (!res) return;
+      // ★ 验证码拦截
+      if (res.status === 418) {
+        redirected = true;
+        sessionStorage.setItem('pending_nick', nick);
+        sessionStorage.setItem('pending_key', keyIn);
+        sessionStorage.setItem('pending_msg', msg);
+        window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+        return;
+      }
+      window.handleRateLimitResponse(res);
+      if (res.ok) { alert('✅ 已加密提交'); }
+      else { alert('❌ 提交失败'); }
+    }).finally(function(){
+      if (redirected) return;
+      closeModal();
+      document.getElementById('msg').value = '';
     });
   }
 
-checkReply
+  /* ========== 查询管理员回复 ========== */
+  function checkReply() {
+    var nick = document.getElementById('check-nick').value.trim();
+    var keyIn = document.getElementById('check-key').value.trim();
+    if (!nick || !keyIn) { alert('请填写完整'); return; }
+
+    var box = document.getElementById('reply-box');
+    box.innerHTML = '<p style="text-align:center;color:#888">查询中...</p>';
+    box.style.display = 'block';
+
+    fetch('/api/replies').then(function(r){return r.json();}).then(function(reps){
+      var found = [];
+      var key32 = deriveAESKey(keyIn);
+
+      reps.forEach(function(rp){
+        try {
+          var aesData = CryptoJS.AES.decrypt(rp.aes_msg, key32, {
+            iv: CryptoJS.enc.Base64.parse(rp.iv),
+            mode: CryptoJS.mode.CBC,
+            padding: CryptoJS.pad.Pkcs7
+          }).toString(CryptoJS.enc.Utf8);
+
+          if (!aesData) return;
+          var parts = aesData.split(' | ');
+          if (parts.length < 2) return;
+          var metaNick = parts[0];
+          if (metaNick !== nick) return;
+
+          var content = parts.slice(1).join(' | ');
+          if (!content) return;
+
+          found.push({
+            time: rp.server_time || '未知时间',
+            content: content,
+            seq: rp.seq
+          });
+        } catch(e) {}
+      });
+
+      renderResults(box, found, '未找到匹配的回复（请检查昵称和密钥）');
+    }).catch(function(){
+      box.innerHTML = '<p style="color:red;text-align:center">获取回复失败</p>';
+    });
+  }
+
   /* ========== v2 查询：第二行是 AES(nick|content)，不再单独有 meta_msg ========== */
   function checkMyMessages() {
     var nick = document.getElementById('check-nick').value.trim();
@@ -409,6 +458,12 @@ checkReply
   }else{
     updateUI();
   }
+  // ★ 新增
+  window.isRateLimited = function(){
+    var now = Date.now() / 1000;
+    var remaining = Math.ceil(state.blockUntil - now);
+    return !state.whitelisted && remaining > 0;
+  };
 })();
 // ★ 如果从验证码页面跳回，恢复待提交的表单数据
 (function() {
