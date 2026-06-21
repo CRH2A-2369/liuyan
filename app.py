@@ -724,14 +724,29 @@ def save_verified_log(data):
 # ═══════════════════════════════════════════════════════════
 
 # === 5. 核心工具函数 ===
+import ipaddress
+
+def is_private_ip(ip):
+    """判断是否为私有 IP（内网 IP）"""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
 def get_client_ip():
     direct_ip = request.remote_addr or '127.0.0.1'
-    # 仅当 direct_ip 在可信代理列表中时，才信任 X-Forwarded-For
+    xff = request.headers.get('X-Forwarded-For')
+
+    # 核心改动：如果直接连接的 IP 是私有 IP（说明有代理），且 XFF 存在，则取真实 IP
+    if xff and is_private_ip(direct_ip):
+        # 取 X-Forwarded-For 的第一个 IP（最原始的客户端 IP）
+        return xff.split(',')[0].strip()
+
+    # 保留原有的严格校验逻辑，以便兼容非代理环境或特定可信代理
     if TRUSTED_PROXIES and direct_ip in TRUSTED_PROXIES:
-        xff = request.headers.get('X-Forwarded-For')
         if xff:
-            # 取第一个 IP（原始客户端）
             return xff.split(',')[0].strip()
+
     return direct_ip
 
 def get_fp():
