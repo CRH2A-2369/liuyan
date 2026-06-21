@@ -733,19 +733,18 @@ def is_private_ip(ip):
         return False
 
 def get_client_ip():
-    direct_ip = request.remote_addr or '127.0.0.1'
-    xff = request.headers.get('X-Forwarded-For')
+    # 优先使用 X-Real-IP（Railway 提供）
+    real_ip = request.headers.get('X-Real-IP')
+    if real_ip:
+        return real_ip.strip()
     
-    # 如果直连 IP 是私有 IP（说明前面有代理），且 XFF 存在，则信任 XFF 的第一个 IP
-    if xff and is_private_ip(direct_ip):
+    # 其次使用 X-Forwarded-For（PythonAnywhere 及通用代理）
+    xff = request.headers.get('X-Forwarded-For')
+    if xff:
         return xff.split(',')[0].strip()
     
-    # 保留原有的严格校验逻辑，以便兼容非代理环境或特定可信代理
-    if TRUSTED_PROXIES and direct_ip in TRUSTED_PROXIES:
-        if xff:
-            return xff.split(',')[0].strip()
-    
-    return direct_ip
+    # 最后 fallback
+    return request.remote_addr or '127.0.0.1'
 
 def get_fp():
     ua = request.headers.get('User-Agent', '')
