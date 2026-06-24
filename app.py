@@ -1250,12 +1250,15 @@ def index():
             rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
             iv = data['iv'].replace('\n', '').replace('\r', '').strip()
             aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+            # ★ 新增：接收前端计算的身份哈希
+            identity_hash = data.get('identity_hash', '').strip()
 
             server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
             server_meta = f"{get_client_ip()} | {server_time}"
             server_enc = rsa_encrypt_report(server_meta)
 
-            content = f"v2|{rsa_key}|{iv}|{server_time}\n{aes_msg}\n{server_enc}"
+            # ★ v3 格式：v3|rsa_key|iv|server_time|identity_hash
+            content = f"v3|{rsa_key}|{iv}|{server_time}|{identity_hash}\n{aes_msg}\n{server_enc}"
             with _file_lock:
                 seq = get_seq_unlocked()
                 atomic_write_unlocked(os.path.join(MSG_DIR, f"留言_{seq}.txt"), content)
@@ -1278,20 +1281,37 @@ def admin_page():
                 lines = [l.strip() for l in fh.readlines() if l.strip()]
                 if len(lines) < 2:
                     continue
-                is_v2 = lines[0].startswith('v2|')
+                header = lines[0]
                 seq = re.search(r'(\d+)', os.path.basename(f)).group(1)
-                if is_v2:
-                    parts = lines[0].split('|')
-                    # v2|rsa_key|iv[|server_time]
+                if header.startswith('v3|'):
+                    # ★ v3 格式：包含 identity_hash
+                    parts = header.split('|')
+                    server_time = parts[3] if len(parts) >= 4 else ''
+                    identity_hash = parts[4] if len(parts) >= 5 else ''
+                    msgs.append({
+                        'file': os.path.basename(f),
+                        'seq': seq,
+                        'rsa_iv': header,
+                        'aes_msg': lines[1],
+                        'server_enc': lines[2] if len(lines) > 2 else '',
+                        'server_time': server_time,
+                        'identity_hash': identity_hash,
+                        'is_v2': True,
+                        'is_v3': True
+                    })
+                elif header.startswith('v2|'):
+                    parts = header.split('|')
                     server_time = parts[3] if len(parts) >= 4 else ''
                     msgs.append({
                         'file': os.path.basename(f),
                         'seq': seq,
-                        'rsa_iv': lines[0],
+                        'rsa_iv': header,
                         'aes_msg': lines[1],
                         'server_enc': lines[2] if len(lines) > 2 else '',
                         'server_time': server_time,
-                        'is_v2': True
+                        'identity_hash': '',
+                        'is_v2': True,
+                        'is_v3': False
                     })
                 else:
                     if len(lines) < 3:
@@ -1299,20 +1319,24 @@ def admin_page():
                     msgs.append({
                         'file': os.path.basename(f),
                         'seq': seq,
-                        'rsa_iv': lines[0].strip(),
+                        'rsa_iv': header.strip(),
                         'meta_enc': lines[1].strip(),
                         'content_enc': ''.join(lines[2:]).strip(),
-                        'is_v2': False
+                        'identity_hash': '',
+                        'is_v2': False,
+                        'is_v3': False
                     })
         except Exception:
             continue
     return render_template('admin.html', messages=msgs)
 
-# === 10. 路由：回复 ===
-@app.route('/api/replies', methods=['GET'])
-def get_replies():
-    rl = check_rate_limit('read')
-    if rl: return rl
+@app.route('/api/admin/replies', methods=['GET'])
+@require_csrf
+@require_private_key
+def get_admin_replies():
+    """管理员查看全部回复（不过滤 identity_hash）"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
     reps = []
     # 新格式：回复_{seq}_{num}.txt
     for f in glob.glob(os.path.join(REPLY_DIR, '回复_*_*.txt')):
@@ -1322,12 +1346,89 @@ def get_replies():
             with open(f, encoding='utf-8') as fh:
                 lines = fh.readlines()
                 if len(lines) >= 2:
+                    first_line = lines[0].strip()
+                    if '|' in first_line:
+                        parts = first_line.split('|', 1)
+                        reps.append({
+                            'seq': m.group(1),
+                            'num': int(m.group(2)),
+                            'iv': parts[0],
+                            'aes_msg': ''.join(lines[1:]).strip(),
+                            'identity_hash': parts[1] if len(parts) >= 2 else ''
+                        })
+                    else:
+                        reps.append({
+                            'seq': m.group(1),
+                            'num': int(m.group(2)),
+                            'iv': first_line,
+                            'aes_msg': ''.join(lines[1:]).strip(),
+                            'identity_hash': ''
+                        })
+        except Exception:
+            continue
+    # 旧格式兼容
+    for f in glob.glob(os.path.join(REPLY_DIR, '回复_*.txt')):
+        m = re.search(r'回复_(\d+)\.txt', os.path.basename(f))
+        if not m: continue
+        if any(r['seq'] == m.group(1) and r['num'] == 1 for r in reps):
+            continue
+        try:
+            with open(f, encoding='utf-8') as fh:
+                lines = fh.readlines()
+                if len(lines) >= 2:
                     reps.append({
                         'seq': m.group(1),
-                        'num': int(m.group(2)),
+                        'num': 1,
                         'iv': lines[0].strip(),
-                        'aes_msg': ''.join(lines[1:]).strip()
+                        'aes_msg': ''.join(lines[1:]).strip(),
+                        'identity_hash': ''
                     })
+        except Exception:
+            continue
+    return jsonify(reps)
+# === 10. 路由：回复 ===
+@app.route('/api/replies', methods=['GET'])
+def get_replies():
+    rl = check_rate_limit('read')
+    if rl: return rl
+    # ★ 接收前端传来的身份哈希
+    identity_hash = request.args.get('identity_hash', '').strip()
+    reps = []
+    # 新格式：回复_{seq}_{num}.txt
+    for f in glob.glob(os.path.join(REPLY_DIR, '回复_*_*.txt')):
+        m = re.search(r'回复_(\d+)_(\d+)\.txt', os.path.basename(f))
+        if not m: continue
+        try:
+            with open(f, encoding='utf-8') as fh:
+                lines = fh.readlines()
+                if len(lines) >= 2:
+                    first_line = lines[0].strip()
+                    if '|' in first_line:
+                        # ★ 新格式：iv|identity_hash
+                        parts = first_line.split('|', 1)
+                        iv = parts[0]
+                        reply_hash = parts[1] if len(parts) >= 2 else ''
+                        if identity_hash:
+                            # 带哈希查询：仅返回匹配项
+                            if reply_hash != identity_hash:
+                                continue
+                        else:
+                            # ★ 不带哈希：跳过所有新格式回复
+                            continue
+                        reps.append({
+                            'seq': m.group(1),
+                            'num': int(m.group(2)),
+                            'iv': iv,
+                            'aes_msg': ''.join(lines[1:]).strip()
+                        })
+                    else:
+                        # ★ 旧格式：仅 iv（始终返回）
+                        reps.append({
+                            'seq': m.group(1),
+                            'num': int(m.group(2)),
+                            'iv': first_line,
+                            'aes_msg': ''.join(lines[1:]).strip()
+                        })
         except Exception:
             continue
     # 旧格式兼容：回复_{seq}.txt → 视为 num=1
@@ -1335,7 +1436,7 @@ def get_replies():
         m = re.search(r'回复_(\d+)\.txt', os.path.basename(f))
         if not m: continue
         if any(r['seq'] == m.group(1) and r['num'] == 1 for r in reps):
-            continue       # 已有 _1 文件则跳过旧文件
+            continue
         try:
             with open(f, encoding='utf-8') as fh:
                 lines = fh.readlines()
@@ -1354,6 +1455,8 @@ def get_replies():
 def get_messages():
     rl = check_rate_limit('read')
     if rl: return rl
+    # ★ 接收前端传来的身份哈希
+    identity_hash = request.args.get('identity_hash', '').strip()
     msgs = []
     for f in sorted(
         glob.glob(os.path.join(MSG_DIR, '留言_*.txt')),
@@ -1366,10 +1469,30 @@ def get_messages():
                 lines = [l.strip() for l in fh.readlines() if l.strip()]
                 if len(lines) < 2:
                     continue
-                is_v2 = lines[0].startswith('v2|')
-                if is_v2:
-                    parts = lines[0].split('|')
-                    # v2|rsa_key|iv[|server_time]
+                header = lines[0]
+
+                if header.startswith('v3|'):
+                    # ★ 新格式：包含 identity_hash
+                    parts = header.split('|')
+                    msg_hash = parts[4] if len(parts) >= 5 else ''
+                    if identity_hash:
+                        # 带哈希查询：仅返回匹配项
+                        if msg_hash != identity_hash:
+                            continue
+                    else:
+                        # ★ 不带哈希：跳过所有新格式数据，不返回加密新数据
+                        continue
+                    server_time = parts[3] if len(parts) >= 4 else ''
+                    msgs.append({
+                        'seq': m.group(1),
+                        'iv': parts[2] if len(parts) >= 3 else '',
+                        'aes_msg': lines[1],
+                        'server_enc': lines[2] if len(lines) > 2 else '',
+                        'server_time': server_time
+                    })
+                elif header.startswith('v2|'):
+                    # ★ 旧 v2 格式：始终返回（legacy 数据）
+                    parts = header.split('|')
                     server_time = parts[3] if len(parts) >= 4 else ''
                     msgs.append({
                         'seq': m.group(1),
@@ -1379,9 +1502,10 @@ def get_messages():
                         'server_time': server_time
                     })
                 else:
+                    # ★ 更旧格式：始终返回（legacy 数据）
                     if len(lines) < 3:
                         continue
-                    parts = lines[0].split('|')
+                    parts = header.split('|')
                     msgs.append({
                         'seq': m.group(1),
                         'iv': parts[1] if len(parts) >= 2 else '',
@@ -1393,7 +1517,6 @@ def get_messages():
     return jsonify(msgs)
 
 @app.route('/api/reply', methods=['POST'])
-@require_captcha
 @require_csrf
 def save_reply():
     if not is_admin(): return "未授权", 403
@@ -1401,6 +1524,8 @@ def save_reply():
     if not data.get('seq'): return "缺少序号", 400
     seq = data['seq']
     if not re.match(r'^\d+$', str(seq)): return "无效序号", 400
+    # ★ 新增：接收身份哈希（来自原留言）
+    identity_hash = data.get('identity_hash', '').strip()
 
     # 找出下一个编号
     max_num = 0
@@ -1412,7 +1537,8 @@ def save_reply():
             max_num = max(max_num, 1)
 
     next_num = max_num + 1
-    content = f"{data['iv']}\n{data['aes_msg']}"
+    # ★ 新格式：iv|identity_hash\naes_msg
+    content = f"{data['iv']}|{identity_hash}\n{data['aes_msg']}"
     atomic_write(os.path.join(REPLY_DIR, f"回复_{seq}_{next_num}.txt"), content)
     return jsonify({"status": "ok", "num": next_num})
 
