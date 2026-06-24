@@ -95,6 +95,16 @@
   <footer id="footer"></footer>
 
 <script>
+async function calcIdentityHash(nick, aesKey) {
+    const encoder = new TextEncoder();
+    // 拼接方式与后端约定一致：用户名 + 密钥
+    const data = encoder.encode(nick + '|' + aesKey);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+
 // ★ 验证码拦截：如果服务器返回 418，保存状态并跳转
 function handleCaptchaRedirect(res, saveStateFn) {
   if (res.status === 418) {
@@ -216,39 +226,37 @@ function closeReplyModal() {
   }
 
   /* ========== v2 提交：不再携带 IP 与时间，仅提交 AES(nick|content) ========== */
-function handleSubmit() {
+async function handleSubmit() {
     var nick = document.getElementById('nick').value.trim();
     var keyIn = document.getElementById('aesKey').value.trim();
     var msg = document.getElementById('msg').value;
     if (!nick || !keyIn || !msg) { alert('请填写完整'); return; }
 
     // ★ 7s 限流检查
-    if (window.isRateLimited && window.isRateLimited()) return;
-
     var redirected = false;
-
     setLS(LS_NICK, nick);
     setLS(LS_AES, keyIn);
-
     var iv = CryptoJS.lib.WordArray.random(16);
     var key32 = deriveAESKey(keyIn);
-
     var userContent = nick + ' | ' + msg;
     var aesEnc = CryptoJS.AES.encrypt(userContent, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
+
+    // ★★★ 计算身份哈希 ★★★
+    var identityHash = await calcIdentityHash(nick, keyIn);
 
     fetch('/gongyao.txt').then(function(r){return r.text();}).then(function(pub){
       var jse = new JSEncrypt();
       jse.setPublicKey(pub);
       var cleanRsaKey = jse.encrypt(keyIn).replace(/[\r\n\s]+/g, '');
       if (!cleanRsaKey) { alert('RSA加密失败'); return; }
-
       return fetch('/', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
           rsa_key: cleanRsaKey,
           iv: CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''),
-          aes_msg: aesEnc.replace(/[\r\n\s]+/g, '')
+          aes_msg: aesEnc.replace(/[\r\n\s]+/g, ''),
+          identity_hash: identityHash
         })
       });
     }).then(function(res){
@@ -273,16 +281,19 @@ function handleSubmit() {
   }
 
   /* ========== 查询管理员回复 ========== */
-  function checkReply() {
+async function checkReply() {           // ★ 添加 async
     var nick = document.getElementById('check-nick').value.trim();
     var keyIn = document.getElementById('check-key').value.trim();
     if (!nick || !keyIn) { alert('请填写完整'); return; }
-
     var box = document.getElementById('reply-box');
     box.innerHTML = '<p style="text-align:center;color:#888">查询中...</p>';
     box.style.display = 'block';
-
-    fetch('/api/replies').then(function(r){return r.json();}).then(function(reps){
+    // ★★★ 新增：计算身份哈希 ★★★
+    var identityHash = await calcIdentityHash(nick, keyIn);
+    // ★★★ 修改：URL 拼接哈希参数 ★★★
+    fetch('/api/replies?identity_hash=' + encodeURIComponent(identityHash))
+    .then(function(r){return r.json();})
+    .then(function(reps){
       var found = [];
       var key32 = deriveAESKey(keyIn);
 
@@ -296,15 +307,16 @@ function handleSubmit() {
 
           if (!aesData) return;
           var parts = aesData.split(' | ');
-          if (parts.length < 2) return;
+          if (parts.length < 3) return;                    // ★ 至少需要 nick | time | content
           var metaNick = parts[0];
           if (metaNick !== nick) return;
 
-          var content = parts.slice(1).join(' | ');
+          var replyTime = parts[1];                        // ★ 回复时间单独提取
+          var content = parts.slice(2).join(' | ');        // ★ 纯内容，不含时间
           if (!content) return;
 
           found.push({
-            time: rp.server_time || '未知时间',
+            time: replyTime,
             content: content,
             seq: rp.seq
           });
@@ -318,7 +330,7 @@ function handleSubmit() {
   }
 
   /* ========== v2 查询：第二行是 AES(nick|content)，不再单独有 meta_msg ========== */
-  function checkMyMessages() {
+async function checkMyMessages() {      // ★ 添加 async
     var nick = document.getElementById('check-nick').value.trim();
     var keyIn = document.getElementById('check-key').value.trim();
     if (!nick || !keyIn) { alert('请填写完整'); return; }
@@ -327,7 +339,13 @@ function handleSubmit() {
     box.innerHTML = '<p style="text-align:center;color:#888">查询中...</p>';
     box.style.display = 'block';
 
-    fetch('/api/messages').then(function(r){return r.json();}).then(function(msgs){
+    // ★★★ 新增：计算身份哈希 ★★★
+    var identityHash = await calcIdentityHash(nick, keyIn);
+
+    // ★★★ 修改：URL 拼接哈希参数 ★★★
+    fetch('/api/messages?identity_hash=' + encodeURIComponent(identityHash))
+    .then(function(r){return r.json();})
+    .then(function(msgs){
       var found = [];
       var key32 = deriveAESKey(keyIn);
 

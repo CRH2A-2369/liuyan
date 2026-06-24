@@ -316,6 +316,14 @@
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
   function deriveKey(str) { return CryptoJS.enc.Hex.parse(CryptoJS.SHA256(str).toString()); }
+// ★★★ 新增：与前端一致的 SHA-256 身份哈希计算 ★★★
+  async function calcIdentityHash(nick, aesKey) {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(nick + '|' + aesKey);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
 
   const authFetch = async (url, opts={}) => {
     const headers = { ...opts.headers };
@@ -366,7 +374,7 @@
       dataJse = new JSEncrypt();
       dataJse.setPrivateKey(savedDataKey);
     }
-    fetch('/api/replies', {credentials:'same-origin'}).then(function(r){return r.json();}).then(function(rps){allReplies=rps;render();});
+    authFetch('/api/admin/replies').then(function(r){return r.json();}).then(function(rps){allReplies=rps;render();});
     fetch('/api/footer', {credentials:'same-origin'}).then(function(r){return r.text();}).then(function(t){document.getElementById('footInput').value=t;});
     loadBL();
     loadWL();
@@ -538,12 +546,29 @@
     document.getElementById('reply-panel').scrollIntoView({behavior:'smooth'});
   }
   function closeReply(){ document.getElementById('reply-panel').style.display='none'; document.getElementById('rep-content').value=''; }
-  function submitReply(){
-    const s = document.getElementById('rep-seq').value, k = document.getElementById('rep-key').value, t = document.getElementById('rep-content').value.trim();
-    if (!t) return alert('内容不能为空');
-    const iv = CryptoJS.lib.WordArray.random(16), pld = `${document.getElementById('rep-nick').value} | ${new Date().toLocaleString()} | ${t}`;
-    const enc = CryptoJS.AES.encrypt(pld, deriveKey(k), {iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
-    authFetch('/api/reply', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({seq:s, iv:CryptoJS.enc.Base64.stringify(iv), aes_msg:enc})}).then(r=>r.ok?(alert('已发送'),closeReply(),location.reload()):alert('失败'));
+  async function submitReply(){          // ★ 添加 async
+      const s = document.getElementById('rep-seq').value,
+            k = document.getElementById('rep-key').value,
+            t = document.getElementById('rep-content').value.trim(),
+            n = document.getElementById('rep-nick').value;  // ★ 单独提取 nick
+      if (!t) return alert('内容不能为空');
+      const iv = CryptoJS.lib.WordArray.random(16),
+            pld = `${n} | ${new Date().toLocaleString()} | ${t}`;
+      const enc = CryptoJS.AES.encrypt(pld, deriveKey(k), {iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
+
+      // ★★★ 新增：计算身份哈希 ★★★
+      const identityHash = await calcIdentityHash(n, k);
+
+      authFetch('/api/reply', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({
+              seq: s,
+              iv: CryptoJS.enc.Base64.stringify(iv),
+              aes_msg: enc,
+              identity_hash: identityHash   // ★★★ 新增字段 ★★★
+          })
+      }).then(r=>r.ok?(alert('已发送'),closeReply(),location.reload()):alert('失败'));
   }
   function updateFoot(){ authFetch('/api/footer',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'content='+encodeURIComponent(document.getElementById('footInput').value)}).then(()=>{alert('已更新');location.reload();}); }
   function logout(){ sessionStorage.removeItem('admin_has_key'); sessionStorage.removeItem('admin_priv_key'); authFetch('/api/admin/logout').then(()=>location.reload()); }
