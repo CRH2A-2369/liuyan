@@ -81,8 +81,20 @@
     <a href="/qun">👥 讨论群</a>
     <a href="/chat" style="color:#D500FF;border-color:#FF57FB">💬 私聊</a>
   </div>
-
+<!-- 文件列表区域（普通用户） -->
+  <div class="file-section" style="margin-top: 30px; border-top: 1px solid #eee; padding-top: 20px;">
+      <h2 style="font-size: 18px; font-weight: 600; margin-bottom: 12px;">📁 文件下载</h2>
+      <div id="fileList" class="file-grid">
+          <div class="empty-state">加载中...</div>
+      </div>
+  </div>
   <script>
+    var currentPath = '';   // 当前相对路径（例如 'subfolder'）
+    var csrfToken = '';    // 用于 CSRF
+    fetch('/api/csrf', { credentials: 'same-origin' })
+        .then(r => r.json())
+        .then(data => { csrfToken = data.token; })
+        .catch(() => {});
     async function loadNotices() {
       try {
         var res = await fetch('/api/notice');
@@ -125,6 +137,100 @@
 
     loadNotices();
     fetch('/api/footer').then(function(r){return r.text();}).then(function(t){document.getElementById('footer').textContent=t;});
+// 加载文件列表
+function loadFiles() {
+    const url = '/api/files' + (currentPath ? '?path=' + encodeURIComponent(currentPath) : '');
+    fetch(url)
+        .then(r => r.json())
+        .then(data => {
+            const container = document.getElementById('fileList');
+            if (!data.length) {
+                container.innerHTML = '<div class="empty-state">📭 此目录为空</div>';
+                return;
+            }
+            let html = '<div style="display: flex; flex-wrap: wrap; gap: 12px;">';
+            // 显示“返回上级”按钮（若不在根目录）
+            if (currentPath) {
+                html += `
+                    <div class="file-item" style="background:#fff;border-radius:6px;padding:12px 16px;box-shadow:0 1px 4px rgba(0,0,0,0.06);display:flex;align-items:center;gap:12px;flex:1 0 200px;">
+                        <span style="font-size:14px;font-weight:500;">📂 ..</span>
+                        <button class="btn btn-primary btn-sm" onclick="goUp()">返回上级</button>
+                    </div>
+                `;
+            }
+            data.forEach(item => {
+                const isDir = item.is_dir;
+                const icon = isDir ? '📁' : '📄';
+                const btnText = isDir ? '进入' : '下载';
+                const action = isDir ? `enterDir('${item.rel_path}')` : `downloadFile('${item.rel_path}')`;
+                html += `
+                    <div class="file-item" style="background:#fff;border-radius:6px;padding:12px 16px;box-shadow:0 1px 4px rgba(0,0,0,0.06);display:flex;align-items:center;gap:12px;flex:1 0 200px;">
+                        <span style="font-size:14px;font-weight:500;">${icon} ${esc(item.name)}</span>
+                        ${!isDir ? `<span style="font-size:12px;color:#999;">${(item.size/1024).toFixed(1)} KB</span>` : ''}
+                        <button class="btn btn-primary btn-sm" onclick="${action}">${btnText}</button>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            container.innerHTML = html;
+        })
+        .catch(() => { document.getElementById('fileList').innerHTML = '<div class="empty-state">加载失败</div>'; });
+}
+
+function downloadFile(relPath) {
+    fetch('/api/files/download/request', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        },
+        body: JSON.stringify({ filename: relPath }),
+        credentials: 'same-origin'
+    })
+    .then(r => {
+        if (r.status === 418) {
+            return r.json().then(data => {
+                if (data.captcha_url) {
+                    window.location.href = data.captcha_url + '?redirect=' + encodeURIComponent(window.location.href);
+                }
+                throw new Error('需要验证码');
+            });
+        }
+        return r.json();
+    })
+    .then(data => {
+        if (data.download_url) {
+            window.location.href = data.download_url;
+        } else {
+            alert('下载失败: ' + (data.error || '未知错误'));
+        }
+    })
+    .catch(err => {
+        alert('请求失败: ' + err.message);
+    });
+}
+
+
+function enterDir(relPath) {
+    currentPath = relPath;
+    loadFiles();
+}
+
+function goUp() {
+    // 去掉最后一级目录
+    const parts = currentPath.split('/');
+    parts.pop();
+    currentPath = parts.join('/');
+    loadFiles();
+}
+// 获取 CSRF token
+fetch('/api/csrf', { credentials: 'same-origin' })
+    .then(r => r.json())
+    .then(data => { csrfToken = data.token; })
+    .catch(() => {});
+
+// 页面加载时执行
+loadFiles();
   </script>
 <footer id="footer"></footer>
 </body>

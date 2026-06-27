@@ -130,10 +130,24 @@
 
       <!-- 公告列表 -->
       <div id="noticeList"><div class="empty-state">加载中...</div></div>
+      <!-- 文件管理（管理员） -->
+      <div class="file-admin" style="margin-bottom: 30px; background:#fff; border-radius:10px; padding:18px 20px; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+          <h2 style="font-size:18px; font-weight:600; margin-bottom:12px;">📁 文件管理</h2>
+          <div style="margin-bottom:10px;">
+              <input type="file" id="uploadInput" style="display:none;" multiple>
+              <button class="btn btn-primary" onclick="document.getElementById('uploadInput').click()">📤 上传文件</button>
+              <button class="btn btn-primary" onclick="adminMkdir()">📁 新建文件夹</button>
+              <span id="uploadStatus" style="margin-left:10px;font-size:13px;color:#666;"></span>
+          </div>
+          <div id="adminFileList" style="margin-top:10px;">
+              <div class="empty-state">加载中...</div>
+          </div>
+      </div>
     </div>
   </div>
 
   <script>
+    var currentPath = '';   // 管理员当前浏览的子目录
     var csrfToken = '';
 
     // ★ authFetch：自动带 CSRF token 和 credentials
@@ -283,6 +297,181 @@
     }
 
     init();
+// ---- 文件管理 ----
+function loadAdminFiles() {
+    const url = '/api/files' + (currentPath ? '?path=' + encodeURIComponent(currentPath) : '');
+    fetch(url)
+        .then(r => r.json())
+        .then(data => {
+            const container = document.getElementById('adminFileList');
+            if (!data.length) {
+                container.innerHTML = '<div class="empty-state">📭 此目录为空</div>';
+                return;
+            }
+            let html = '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
+            html += '<tr><th style="text-align:left;padding:6px 8px;">名称</th><th style="text-align:left;padding:6px 8px;">大小</th><th style="text-align:left;padding:6px 8px;">修改时间</th><th style="text-align:left;padding:6px 8px;">操作</th></tr>';
+            // 返回上级
+            if (currentPath) {
+                html += `<tr>
+                    <td style="padding:6px 8px;">📂 ..</td>
+                    <td></td><td></td>
+                    <td style="padding:6px 8px;"><button class="btn btn-primary btn-sm" onclick="goUp()">返回上级</button></td>
+                </tr>`;
+            }
+            data.forEach(item => {
+                const isDir = item.is_dir;
+                const icon = isDir ? '📁' : '📄';
+                const actions = isDir
+                    ? `
+                        <button class="btn btn-primary btn-sm" onclick="enterDir('${item.rel_path}')">进入</button>
+                        <button class="btn btn-danger btn-sm" onclick="adminDelete('${item.rel_path}')">删除</button>
+                    `
+                    : `
+                        <button class="btn btn-primary btn-sm" onclick="adminDownload('${item.rel_path}')">下载</button>
+                        <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','move')">移动</button>
+                        <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','copy')">复制</button>
+                        <button class="btn btn-danger btn-sm" onclick="adminDelete('${item.rel_path}')">删除</button>
+                    `;
+                if (isDir) {
+                    // 可额外添加删除文件夹按钮，可选
+                }
+                html += `<tr>
+                    <td style="padding:6px 8px;">${icon} ${esc(item.name)}</td>
+                    <td style="padding:6px 8px;">${isDir ? '-' : (item.size/1024).toFixed(1)+' KB'}</td>
+                    <td style="padding:6px 8px;">${esc(item.mtime)}</td>
+                    <td style="padding:6px 8px;">${actions}</td>
+                </tr>`;
+            });
+            html += '</table>';
+            container.innerHTML = html;
+        })
+        .catch(() => { document.getElementById('adminFileList').innerHTML = '<div class="empty-state">加载失败</div>'; });
+}
+
+// 上传文件
+document.getElementById('uploadInput').addEventListener('change', function(e) {
+    const files = e.target.files;
+    if (!files.length) return;
+    const formData = new FormData();
+    for (let f of files) {
+        formData.append('file', f);
+    }
+    // 添加当前路径
+    if (currentPath) {
+        formData.append('path', currentPath);
+    }
+    fetch('/api/admin/files/upload', {
+        method: 'POST',
+        body: formData,
+        credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': csrfToken }   // 注意：上传时 headers 不能设置 Content-Type，让浏览器自动处理
+    })
+    .then(r => r.json())
+    .then(data => {
+        document.getElementById('uploadStatus').textContent = data.ok ? '✅ 上传成功' : '❌ ' + (data.error || '失败');
+        if (data.ok) loadAdminFiles();
+    })
+    .catch(() => { document.getElementById('uploadStatus').textContent = '❌ 上传失败'; });
+    this.value = '';
+});
+
+function adminMkdir() {
+    const dirname = prompt('请输入文件夹名称（仅字母、数字、中文、下划线、横线）:');
+    if (!dirname) return;
+    if (!/^[\w\u4e00-\u9fff\-]+$/.test(dirname)) {
+        alert('文件夹名包含非法字符，请重新输入');
+        return;
+    }
+    fetch('/api/admin/files/mkdir', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken
+        },
+        body: JSON.stringify({ 
+            path: currentPath,   // 加上当前路径
+            dirname: dirname 
+        }),
+        credentials: 'same-origin'
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.ok) {
+            alert('文件夹创建成功！');
+            loadAdminFiles();   // 刷新文件列表（但当前列表只显示文件，可考虑也显示目录）
+        } else {
+            alert('创建失败: ' + (data.error || '未知错误'));
+        }
+    })
+    .catch(() => alert('网络错误'));
+}
+
+// 管理员下载（直接下载，不触发验证码，因为管理员已登录）
+function adminDownload(filename) {
+    fetch('/api/admin/files/download/request', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken   // 添加这一行
+        },
+        body: JSON.stringify({ filename: filename }),
+        credentials: 'same-origin'
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.download_url) window.location.href = data.download_url;
+        else alert('下载失败: ' + (data.error || '未知错误'));
+    });
+}
+
+// 删除文件
+function adminDelete(filename) {
+    if (!confirm(`确定删除文件 "${filename}" 吗？`)) return;
+    fetch('/api/admin/files/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ filename: filename }),
+        credentials: 'same-origin'
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.ok) { alert('已删除'); loadAdminFiles(); }
+        else alert('删除失败: ' + (data.error || ''));
+    });
+}
+
+// 移动/复制
+function adminMoveCopy(filename, action) {
+    const dest = prompt(`请输入目标文件名（${action}）:`, filename);
+    if (dest === null) return;
+    if (dest === filename) { alert('目标与源相同'); return; }
+    const endpoint = action === 'move' ? '/api/admin/files/move' : '/api/admin/files/copy';
+    fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ source: filename, destination: dest }),
+        credentials: 'same-origin'
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.ok) { alert('操作成功'); loadAdminFiles(); }
+        else alert('操作失败: ' + (data.error || ''));
+    });
+}
+
+function enterDir(relPath) {
+    currentPath = relPath;
+    loadAdminFiles();
+}
+function goUp() {
+    const parts = currentPath.split('/');
+    parts.pop();
+    currentPath = parts.join('/');
+    loadAdminFiles();
+}
+
+// 页面加载
+loadAdminFiles();
   </script>
 </body>
 </html>
