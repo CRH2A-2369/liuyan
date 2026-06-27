@@ -1,4 +1,5 @@
 from flask import Flask, request, render_template, jsonify, session, make_response, Response
+from flask import send_file
 import os, re, glob, base64, json, secrets, time, hashlib, threading, tempfile, shutil
 from collections import OrderedDict
 from functools import wraps
@@ -111,6 +112,16 @@ LOG_FILE = os.path.join(DATA_DIR, 'log.txt')
 CHAT_DIR = os.path.join(DATA_DIR, 'chat')
 REPORT_DIR = os.path.join(DATA_DIR, 'chat_reports')
 CHAT_RETENTION_FILE = os.path.join(CHAT_DIR, 'retention_hours.txt')
+# ===== 文件管理配置 =====
+FILES_DIR = os.path.join(DATA_DIR, 'files')
+os.makedirs(FILES_DIR, exist_ok=True)
+
+# 临时下载令牌存储 {token: {'path': str, 'expire': float}}
+_download_tokens = {}
+_token_lock = threading.Lock()
+
+# 令牌有效期（秒）
+DOWNLOAD_TOKEN_EXPIRE = 15 * 60  # 15分钟
 
 for d in [MSG_DIR, REPLY_DIR, QUN_DIR, VOTE_DIR, IP_DIR, CHAT_DIR, REPORT_DIR]:
     os.makedirs(d, exist_ok=True)
@@ -211,6 +222,37 @@ def safe_resolve(base_dir, filename):
     if not full.startswith(base + os.sep) and full != base:
         return None
     return full
+
+def generate_download_token(file_path):
+    """生成一次性下载令牌"""
+    token = secrets.token_urlsafe(32)
+    with _token_lock:
+        _download_tokens[token] = {
+            'path': file_path,
+            'expire': time.time() + DOWNLOAD_TOKEN_EXPIRE
+        }
+    return token
+
+def get_download_token_path(token):
+    """获取令牌对应的文件路径，若无效或过期则返回None"""
+    with _token_lock:
+        entry = _download_tokens.get(token)
+        if not entry:
+            return None
+        if time.time() > entry['expire']:
+            _download_tokens.pop(token, None)
+            return None
+        # 一次性使用：取出后即删除
+        _download_tokens.pop(token, None)
+        return entry['path']
+
+def cleanup_expired_tokens():
+    """清理过期令牌（可定时调用）"""
+    now = time.time()
+    with _token_lock:
+        expired = [t for t, e in _download_tokens.items() if now > e['expire']]
+        for t in expired:
+            _download_tokens.pop(t, None)
 
 def read_perm_file():
     with _file_lock:
@@ -3568,6 +3610,288 @@ def import_data():
 def health():
     return "OK", 200
 
+@app.route('/api/files', methods=['GET'])
+def list_files():
+    """获取文件列表，支持子目录浏览"""
+    rl = check_rate_limit('read')
+    if rl:
+        return rl
+
+    # 获取当前目录路径（相对路径，防止目录遍历）
+    raw_path = request.args.get('path', '').strip()
+    if raw_path:
+        # 禁止绝对路径和 '..'
+        if raw_path.startswith('/') or '..' in raw_path:
+            return jsonify({'error': '非法路径'}), 400
+        # 标准化路径，去除多余斜杠和 ./
+        raw_path = os.path.normpath(raw_path)
+        # 如果标准化后为 '.' 或空，视为根目录
+        if raw_path == '.':
+            raw_path = ''
+    target_dir = os.path.join(FILES_DIR, raw_path) if raw_path else FILES_DIR
+
+    # 确保目标目录在 FILES_DIR 下（使用 realpath 解析符号链接）
+    real_target = os.path.realpath(target_dir)
+    real_base = os.path.realpath(FILES_DIR)
+    if not real_target.startswith(real_base + os.sep) and real_target != real_base:
+        return jsonify({'error': '非法路径'}), 400
+
+    if not os.path.isdir(target_dir):
+        return jsonify({'error': '目录不存在'}), 404
+
+    items = []
+    try:
+        for name in os.listdir(target_dir):
+            full_path = os.path.join(target_dir, name)
+            stat = os.stat(full_path)
+            is_dir = os.path.isdir(full_path)
+            # 计算相对路径（用于前端点击进入或下载）
+            rel_path = os.path.join(raw_path, name).replace('\\', '/')
+            items.append({
+                'name': name,
+                'rel_path': rel_path,       # 相对于 FILES_DIR 的路径
+                'is_dir': is_dir,
+                'size': stat.st_size if not is_dir else 0,
+                'mtime': datetime.fromtimestamp(stat.st_mtime, CST).strftime('%Y-%m-%d %H:%M:%S')
+            })
+        items.sort(key=lambda x: (not x['is_dir'], x['name']))  # 目录在前，按名称排序
+        return jsonify(items)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/files/upload', methods=['POST'])
+@require_csrf
+@require_private_key
+def upload_file():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    # 获取目标路径（可选）
+    target_path = request.form.get('path', '').strip()
+    if target_path and ('..' in target_path or target_path.startswith('/')):
+        return jsonify({'error': '非法路径'}), 400
+    target_dir = os.path.join(FILES_DIR, target_path) if target_path else FILES_DIR
+    if not os.path.isdir(target_dir):
+        return jsonify({'error': '目标目录不存在'}), 404
+
+    if 'file' not in request.files:
+        return jsonify({'error': '未选择文件'}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': '文件名为空'}), 400
+
+    # 安全检查：文件名不能包含路径分隔符
+    filename = os.path.basename(file.filename)
+    if not filename or filename.startswith('.') or '/' in filename or '\\' in filename:
+        return jsonify({'error': '非法文件名'}), 400
+
+    save_path = os.path.join(target_dir, filename)
+    try:
+        file.save(save_path)
+    except Exception as e:
+        return jsonify({'error': f'保存失败: {str(e)}'}), 500
+
+    return jsonify({'ok': True, 'filename': filename})
+
+@app.route('/api/admin/files/delete', methods=['POST'])
+@require_csrf
+@require_private_key
+def delete_file():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    rel_path = data.get('filename', '').strip()   # 相对路径
+    if not rel_path:
+        return jsonify({'error': '缺少文件路径'}), 400
+
+    if '..' in rel_path or rel_path.startswith('/'):
+        return jsonify({'error': '非法路径'}), 400
+
+    full_path = os.path.join(FILES_DIR, rel_path)
+    if not os.path.exists(full_path):
+        return jsonify({'error': '文件或目录不存在'}), 404
+
+    # 如果是目录，递归删除（谨慎）
+    try:
+        if os.path.isdir(full_path):
+            shutil.rmtree(full_path)
+        else:
+            os.remove(full_path)
+    except Exception as e:
+        return jsonify({'error': f'删除失败: {str(e)}'}), 500
+
+    return jsonify({'ok': True})
+
+@app.route('/api/admin/files/move', methods=['POST'])
+@require_csrf
+@require_private_key
+def move_file():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    source = data.get('source', '').strip()
+    dest = data.get('destination', '').strip()
+    if not source or not dest:
+        return jsonify({'error': '缺少源或目标路径'}), 400
+
+    # 安全检查
+    if '..' in source or source.startswith('/') or '..' in dest or dest.startswith('/'):
+        return jsonify({'error': '非法路径'}), 400
+
+    src_path = os.path.join(FILES_DIR, source)
+    dst_path = os.path.join(FILES_DIR, dest)
+
+    if not os.path.exists(src_path):
+        return jsonify({'error': '源文件不存在'}), 404
+    if os.path.exists(dst_path):
+        return jsonify({'error': '目标已存在'}), 409
+
+    try:
+        shutil.move(src_path, dst_path)
+    except Exception as e:
+        return jsonify({'error': f'移动失败: {str(e)}'}), 500
+
+    return jsonify({'ok': True})
+
+@app.route('/api/admin/files/copy', methods=['POST'])
+@require_csrf
+@require_private_key
+def copy_file():
+    """管理员复制文件或目录（支持跨目录）"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    source = data.get('source', '').strip()
+    dest = data.get('destination', '').strip()
+    if not source or not dest:
+        return jsonify({'error': '缺少源或目标路径'}), 400
+
+    # 安全检查：禁止 '..' 和绝对路径
+    if '..' in source or source.startswith('/') or '..' in dest or dest.startswith('/'):
+        return jsonify({'error': '非法路径'}), 400
+
+    src_path = os.path.join(FILES_DIR, source)
+    dst_path = os.path.join(FILES_DIR, dest)
+
+    if not os.path.exists(src_path):
+        return jsonify({'error': '源文件或目录不存在'}), 404
+    if os.path.exists(dst_path):
+        return jsonify({'error': '目标已存在'}), 409
+
+    try:
+        if os.path.isdir(src_path):
+            # 复制目录（递归）
+            shutil.copytree(src_path, dst_path)
+        else:
+            # 复制文件
+            shutil.copy2(src_path, dst_path)
+    except Exception as e:
+        return jsonify({'error': f'复制失败: {str(e)}'}), 500
+
+    return jsonify({'ok': True})
+
+@app.route('/api/admin/files/mkdir', methods=['POST'])
+@require_csrf
+@require_private_key
+def mkdir_file():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    # 需要指定父目录路径（path）和新建的目录名（dirname）
+    parent_path = data.get('path', '').strip()
+    dirname = data.get('dirname', '').strip()
+    if not dirname:
+        return jsonify({'error': '文件夹名不能为空'}), 400
+    if not re.match(r'^[\w\u4e00-\u9fff\-]+$', dirname):
+        return jsonify({'error': '文件夹名包含非法字符'}), 400
+
+    if parent_path and ('..' in parent_path or parent_path.startswith('/')):
+        return jsonify({'error': '非法路径'}), 400
+
+    target_dir = os.path.join(FILES_DIR, parent_path, dirname) if parent_path else os.path.join(FILES_DIR, dirname)
+    if os.path.exists(target_dir):
+        return jsonify({'error': '目标已存在'}), 409
+
+    try:
+        os.makedirs(target_dir, exist_ok=False)
+    except Exception as e:
+        return jsonify({'error': f'创建失败: {str(e)}'}), 500
+
+    return jsonify({'ok': True})
+
+@app.route('/api/files/download/request', methods=['POST'])
+@require_captcha   # 自动检查验证码，未通过则返回 418
+@require_csrf
+def request_download():
+    """普通用户下载请求（需验证码）"""
+    data = request.get_json(silent=True) or {}
+    rel_path = data.get('filename', '').strip()
+    if not rel_path:
+        return jsonify({'error': '缺少文件路径'}), 400
+
+    if '..' in rel_path or rel_path.startswith('/'):
+        return jsonify({'error': '非法路径'}), 400
+
+    file_path = os.path.join(FILES_DIR, rel_path)
+    if not os.path.isfile(file_path):
+        return jsonify({'error': '文件不存在'}), 404
+
+    token = generate_download_token(file_path)
+    return jsonify({'download_url': f'/api/files/download/{token}'})
+
+@app.route('/api/admin/files/download/request', methods=['POST'])
+@require_csrf
+@require_private_key
+def admin_request_download():
+    """管理员专用：生成文件下载临时链接（无需验证码）"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    rel_path = data.get('filename', '').strip()
+    if not rel_path:
+        return jsonify({'error': '缺少文件路径'}), 400
+
+    if '..' in rel_path or rel_path.startswith('/'):
+        return jsonify({'error': '非法路径'}), 400
+
+    file_path = os.path.join(FILES_DIR, rel_path)
+    if not os.path.isfile(file_path):
+        return jsonify({'error': '文件不存在'}), 404
+
+    token = generate_download_token(file_path)
+    return jsonify({'download_url': f'/api/files/download/{token}'})
+
+@app.route('/api/files/download/<token>', methods=['GET'])
+def download_file(token):
+    file_path = get_download_token_path(token)
+    if not file_path:
+        return "下载链接无效或已过期", 410
+
+    # 再次确认文件存在
+    if not os.path.isfile(file_path):
+        return "文件已不存在", 404
+
+    try:
+        return send_file(file_path, as_attachment=True)
+    except Exception as e:
+        return f"下载失败: {str(e)}", 500
+
+def token_cleanup_loop():
+    while True:
+        time.sleep(60)  # 每分钟清理一次
+        try:
+            cleanup_expired_tokens()
+        except Exception:
+            pass
+
+# 启动令牌清理线程
+_thread = threading.Thread(target=token_cleanup_loop, daemon=True)
+_thread.start()
 if __name__ == '__main__':
     print(f"[CONFIG] SESSION_COOKIE_SECURE = {app.config['SESSION_COOKIE_SECURE']}")
     print(f"[CONFIG] TRUSTED_PROXIES = {TRUSTED_PROXIES}")
