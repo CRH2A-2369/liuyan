@@ -304,26 +304,35 @@ function loadAdminFiles() {
         .then(r => r.json())
         .then(data => {
             const container = document.getElementById('adminFileList');
+            let html = '';
+
+            // ---- 固定导航区域（始终显示） ----
+            let pathDisplay = currentPath || '根目录';
+            html += `
+                <div style="margin-bottom: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: #f9f9f9; padding: 8px 12px; border-radius: 6px;">
+                    <span style="font-size: 14px; color: #666;">📂 当前路径：<strong>${pathDisplay}</strong></span>
+                    <button class="btn btn-primary btn-sm" onclick="goRootAdmin()">🏠 返回根目录</button>
+                    ${currentPath ? `<button class="btn btn-primary btn-sm" onclick="goUpAdmin()">⬆ 返回上级</button>` : ''}
+                </div>
+            `;
+
+            // ---- 内容区域 ----
             if (!data.length) {
-                container.innerHTML = '<div class="empty-state">📭 此目录为空</div>';
+                html += '<div class="empty-state">📭 此目录为空</div>';
+                container.innerHTML = html;
                 return;
             }
-            let html = '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
+
+            html += '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
             html += '<tr><th style="text-align:left;padding:6px 8px;">名称</th><th style="text-align:left;padding:6px 8px;">大小</th><th style="text-align:left;padding:6px 8px;">修改时间</th><th style="text-align:left;padding:6px 8px;">操作</th></tr>';
-            // 返回上级
-            if (currentPath) {
-                html += `<tr>
-                    <td style="padding:6px 8px;">📂 ..</td>
-                    <td></td><td></td>
-                    <td style="padding:6px 8px;"><button class="btn btn-primary btn-sm" onclick="goUp()">返回上级</button></td>
-                </tr>`;
-            }
             data.forEach(item => {
                 const isDir = item.is_dir;
                 const icon = isDir ? '📁' : '📄';
                 const actions = isDir
                     ? `
-                        <button class="btn btn-primary btn-sm" onclick="enterDir('${item.rel_path}')">进入</button>
+                        <button class="btn btn-primary btn-sm" onclick="enterDirAdmin('${item.rel_path}')">进入</button>
+                        <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','move')">移动</button>
+                        <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','copy')">复制</button>
                         <button class="btn btn-danger btn-sm" onclick="adminDelete('${item.rel_path}')">删除</button>
                     `
                     : `
@@ -332,9 +341,6 @@ function loadAdminFiles() {
                         <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','copy')">复制</button>
                         <button class="btn btn-danger btn-sm" onclick="adminDelete('${item.rel_path}')">删除</button>
                     `;
-                if (isDir) {
-                    // 可额外添加删除文件夹按钮，可选
-                }
                 html += `<tr>
                     <td style="padding:6px 8px;">${icon} ${esc(item.name)}</td>
                     <td style="padding:6px 8px;">${isDir ? '-' : (item.size/1024).toFixed(1)+' KB'}</td>
@@ -459,14 +465,18 @@ function adminMoveCopy(filename, action) {
     });
 }
 
-function enterDir(relPath) {
+function enterDirAdmin(relPath) {
     currentPath = relPath;
     loadAdminFiles();
 }
-function goUp() {
+function goUpAdmin() {
     const parts = currentPath.split('/');
     parts.pop();
     currentPath = parts.join('/');
+    loadAdminFiles();
+}
+function goRootAdmin() {
+    currentPath = '';
     loadAdminFiles();
 }
 

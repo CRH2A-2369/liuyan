@@ -144,20 +144,28 @@ function loadFiles() {
         .then(r => r.json())
         .then(data => {
             const container = document.getElementById('fileList');
+            let html = '';
+
+            // ---- 路径显示 + 返回根目录 + 返回上级 ----
+            let pathDisplay = '根目录';
+            if (currentPath) {
+                pathDisplay = currentPath;
+            }
+            html += `
+                <div style="margin-bottom: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <span style="font-size: 14px; color: #666;">📂 当前路径：<strong>${pathDisplay}</strong></span>
+                    <button class="btn btn-primary btn-sm" onclick="goRoot()">🏠 返回根目录</button>
+                    ${currentPath ? `<button class="btn btn-primary btn-sm" onclick="goUp()">⬆ 返回上级</button>` : ''}
+                </div>
+            `;
+
             if (!data.length) {
-                container.innerHTML = '<div class="empty-state">📭 此目录为空</div>';
+                html += '<div class="empty-state">📭 此目录为空</div>';
+                container.innerHTML = html;
                 return;
             }
-            let html = '<div style="display: flex; flex-wrap: wrap; gap: 12px;">';
-            // 显示“返回上级”按钮（若不在根目录）
-            if (currentPath) {
-                html += `
-                    <div class="file-item" style="background:#fff;border-radius:6px;padding:12px 16px;box-shadow:0 1px 4px rgba(0,0,0,0.06);display:flex;align-items:center;gap:12px;flex:1 0 200px;">
-                        <span style="font-size:14px;font-weight:500;">📂 ..</span>
-                        <button class="btn btn-primary btn-sm" onclick="goUp()">返回上级</button>
-                    </div>
-                `;
-            }
+
+            html += '<div style="display: flex; flex-wrap: wrap; gap: 12px;">';
             data.forEach(item => {
                 const isDir = item.is_dir;
                 const icon = isDir ? '📁' : '📄';
@@ -175,6 +183,12 @@ function loadFiles() {
             container.innerHTML = html;
         })
         .catch(() => { document.getElementById('fileList').innerHTML = '<div class="empty-state">加载失败</div>'; });
+}
+
+// 返回根目录
+function goRoot() {
+    currentPath = '';
+    loadFiles();
 }
 
 function downloadFile(relPath) {
