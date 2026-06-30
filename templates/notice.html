@@ -192,35 +192,78 @@ function goRoot() {
 }
 
 function downloadFile(relPath) {
+    console.log('[下载] 开始，文件路径:', relPath);
+
+    if (!csrfToken) {
+        console.error('[下载] CSRF Token 未加载');
+        alert('CSRF Token 未加载，请刷新页面后重试');
+        return;
+    }
+    console.log('[下载] CSRF Token 已加载:', csrfToken.substring(0, 8) + '...');
+
+    const requestBody = JSON.stringify({ filename: relPath });
+    console.log('[下载] 发送请求到 /api/files/download/request，body:', requestBody);
+
     fetch('/api/files/download/request', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
             'X-CSRF-Token': csrfToken
         },
-        body: JSON.stringify({ filename: relPath }),
+        body: requestBody,
         credentials: 'same-origin'
     })
     .then(r => {
+        console.log('[下载] 收到响应，状态码:', r.status);
         if (r.status === 418) {
+            console.warn('[下载] 需要人机验证 (418)');
             return r.json().then(data => {
+                console.log('[下载] 验证码响应数据:', data);
                 if (data.captcha_url) {
-                    window.location.href = data.captcha_url + '?redirect=' + encodeURIComponent(window.location.href);
+                    const redirectUrl = data.captcha_url + '?redirect=' + encodeURIComponent(window.location.href);
+                    console.log('[下载] 跳转到验证码页面:', redirectUrl);
+                    window.location.href = redirectUrl;
                 }
                 throw new Error('需要验证码');
+            });
+        }
+        if (!r.ok) {
+            console.error('[下载] HTTP 错误:', r.status);
+            return r.json().then(data => {
+                console.error('[下载] 错误详情:', data);
+                throw new Error(data.error || `请求失败 (HTTP ${r.status})`);
             });
         }
         return r.json();
     })
     .then(data => {
-        if (data.download_url) {
-            window.location.href = data.download_url;
-        } else {
-            alert('下载失败: ' + (data.error || '未知错误'));
+        console.log('[下载] 成功解析 JSON 响应:', data);
+        const downloadUrl = data.download_url;
+        if (!downloadUrl) {
+            console.warn('[下载] 响应中缺少 download_url 字段');
+            alert('下载失败: ' + (data.error || '未知错误（未返回下载链接）'));
+            return;
         }
+        console.log('[下载] 获取到下载链接:', downloadUrl);
+
+        // ★ 使用 iframe 触发下载（兼容性最好，不刷新页面）
+        const iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.src = downloadUrl;
+        document.body.appendChild(iframe);
+        console.log('[下载] 已创建 iframe，加载下载链接:', downloadUrl);
+
+        // 10秒后自动移除 iframe（防止内存泄漏）
+        setTimeout(() => {
+            if (iframe.parentNode) {
+                document.body.removeChild(iframe);
+                console.log('[下载] iframe 已移除');
+            }
+        }, 10000);
     })
     .catch(err => {
-        alert('请求失败: ' + err.message);
+        console.error('[下载] 整个流程捕获异常:', err);
+        alert('下载请求失败: ' + err.message);
     });
 }
 
@@ -237,14 +280,17 @@ function goUp() {
     currentPath = parts.join('/');
     loadFiles();
 }
-// 获取 CSRF token
+// 获取 CSRF token，然后加载文件
 fetch('/api/csrf', { credentials: 'same-origin' })
     .then(r => r.json())
-    .then(data => { csrfToken = data.token; })
-    .catch(() => {});
-
-// 页面加载时执行
-loadFiles();
+    .then(data => {
+        csrfToken = data.token;
+        loadFiles();   // ★ 拿到 token 后才加载文件列表
+    })
+    .catch(() => {
+        // 获取失败仍尝试加载，但下载时会因缺少 token 报错，提示用户刷新
+        loadFiles();
+    });
   </script>
 <footer id="footer"></footer>
 </body>
