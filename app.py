@@ -112,16 +112,24 @@ LOG_FILE = os.path.join(DATA_DIR, 'log.txt')
 CHAT_DIR = os.path.join(DATA_DIR, 'chat')
 REPORT_DIR = os.path.join(DATA_DIR, 'chat_reports')
 CHAT_RETENTION_FILE = os.path.join(CHAT_DIR, 'retention_hours.txt')
+TOKEN_DIR = os.path.join(DATA_DIR, 'download_tokens')
+DOWNLOAD_TOKEN_EXPIRE = 15 * 60  # 15分钟
+_token_lock = threading.Lock()
+_download_counts_lock = threading.Lock()
+DOWNLOAD_COUNT_FILE = os.path.join(DATA_DIR, 'download_counts.json')
 # ===== 文件管理配置 =====
 FILES_DIR = os.path.join(DATA_DIR, 'files')
 os.makedirs(FILES_DIR, exist_ok=True)
+os.makedirs(TOKEN_DIR, exist_ok=True)
 
-# 临时下载令牌存储 {token: {'path': str, 'expire': float}}
-_download_tokens = {}
-_token_lock = threading.Lock()
-
-# 令牌有效期（秒）
-DOWNLOAD_TOKEN_EXPIRE = 15 * 60  # 15分钟
+def save_download_counts(counts):
+    """原子保存下载计数，失败时记录错误"""
+    try:
+        # 确保 DATA_DIR 存在
+        os.makedirs(os.path.dirname(DOWNLOAD_COUNT_FILE), exist_ok=True)
+        atomic_write(DOWNLOAD_COUNT_FILE, json.dumps(counts, ensure_ascii=False))
+    except Exception as e:
+        app.logger.error(f"保存下载计数失败: {type(e).__name__}: {e} (文件: {DOWNLOAD_COUNT_FILE})")
 
 for d in [MSG_DIR, REPLY_DIR, QUN_DIR, VOTE_DIR, IP_DIR, CHAT_DIR, REPORT_DIR]:
     os.makedirs(d, exist_ok=True)
@@ -223,36 +231,31 @@ def safe_resolve(base_dir, filename):
         return None
     return full
 
-def generate_download_token(file_path):
-    """生成一次性下载令牌"""
+def generate_download_token(file_path, admin=False):
+    """生成一次性下载令牌（文件存储，多 worker 安全）"""
     token = secrets.token_urlsafe(32)
+    entry = {
+        'path': file_path,
+        'expire': time.time() + DOWNLOAD_TOKEN_EXPIRE,
+        'admin': admin,
+        'use_count': 0
+    }
     with _token_lock:
-        _download_tokens[token] = {
-            'path': file_path,
-            'expire': time.time() + DOWNLOAD_TOKEN_EXPIRE
-        }
+        with open(os.path.join(TOKEN_DIR, token), 'w') as f:
+            json.dump(entry, f)
     return token
 
-def get_download_token_path(token):
-    """获取令牌对应的文件路径，若无效或过期则返回None"""
-    with _token_lock:
-        entry = _download_tokens.get(token)
-        if not entry:
-            return None
-        if time.time() > entry['expire']:
-            _download_tokens.pop(token, None)
-            return None
-        # 一次性使用：取出后即删除
-        _download_tokens.pop(token, None)
-        return entry['path']
-
-def cleanup_expired_tokens():
-    """清理过期令牌（可定时调用）"""
-    now = time.time()
-    with _token_lock:
-        expired = [t for t, e in _download_tokens.items() if now > e['expire']]
-        for t in expired:
-            _download_tokens.pop(t, None)
+def load_download_counts():
+    """读取下载计数，失败时返回空字典并记录错误"""
+    try:
+        if os.path.exists(DOWNLOAD_COUNT_FILE):
+            with open(DOWNLOAD_COUNT_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except json.JSONDecodeError as e:
+        app.logger.error(f"下载计数 JSON 解析失败: {e} (文件: {DOWNLOAD_COUNT_FILE})")
+    except Exception as e:
+        app.logger.error(f"加载下载计数文件失败: {type(e).__name__}: {e} (文件: {DOWNLOAD_COUNT_FILE})")
+    return {}
 
 def read_perm_file():
     with _file_lock:
@@ -3862,32 +3865,111 @@ def admin_request_download():
     file_path = os.path.join(FILES_DIR, rel_path)
     if not os.path.isfile(file_path):
         return jsonify({'error': '文件不存在'}), 404
-
-    token = generate_download_token(file_path)
+    # ★ 生成 token 时标记为管理员下载
+    token = generate_download_token(file_path, admin=True)
     return jsonify({'download_url': f'/api/files/download/{token}'})
+
+def _update_download_count_async(file_path):
+    """后台线程更新下载计数，任何异常均记录详细日志"""
+    try:
+        # 计算相对路径（若失败则记录详细错误）
+        try:
+            rel_path = os.path.relpath(file_path, FILES_DIR)
+        except ValueError as e:
+            app.logger.error(f"计算相对路径失败: {e} (file_path={file_path}, FILES_DIR={FILES_DIR})")
+            return  # 无法计算路径，放弃计数
+
+        with _download_counts_lock:
+            counts = load_download_counts()
+            counts[rel_path] = counts.get(rel_path, 0) + 1
+            save_download_counts(counts)
+        app.logger.info(f"下载计数更新成功: {rel_path} -> {counts[rel_path]}")
+    except Exception as e:
+        app.logger.error(f"更新下载计数未预期异常: {type(e).__name__}: {e} (file_path={file_path})")
 
 @app.route('/api/files/download/<token>', methods=['GET'])
 def download_file(token):
-    file_path = get_download_token_path(token)
-    if not file_path:
-        return "下载链接无效或已过期", 410
+    token_file = os.path.join(TOKEN_DIR, token)
+    with _token_lock:
+        if not os.path.exists(token_file):
+            return "下载链接无效或已过期", 410
+        try:
+            with open(token_file, 'r', encoding='utf-8') as f:
+                entry = json.load(f)
+        except Exception:
+            return "下载链接无效", 410
 
-    # 再次确认文件存在
-    if not os.path.isfile(file_path):
-        return "文件已不存在", 404
+        now = time.time()
+        if now > entry.get('expire', 0):
+            os.remove(token_file)
+            return "下载链接已过期", 410
 
+        file_path = entry.get('path')
+        if not file_path or not os.path.isfile(file_path):
+            return "文件已不存在", 404
+
+        # 更新令牌使用次数（同步，必须保证令牌状态正确）
+        entry['use_count'] = entry.get('use_count', 0) + 1
+        if entry['use_count'] == 1:
+            entry['first_use'] = now
+        first_use = entry.get('first_use', now)
+
+        # 判断是否销毁令牌
+        if entry['use_count'] >= 4 or (now - first_use > 300):
+            try:
+                os.remove(token_file)
+            except OSError:
+                pass
+        else:
+            with open(token_file, 'w', encoding='utf-8') as f:
+                json.dump(entry, f)
+
+    # ★ 核心修改：普通用户下载计数改为异步后台执行，不等待、不阻塞 ★
+    if not entry.get('admin', False):
+        threading.Thread(target=_update_download_count_async, args=(file_path,), daemon=True).start()
+
+    # 发送文件（主线程立即返回）
     try:
-        return send_file(file_path, as_attachment=True)
+        return send_file(
+            file_path,
+            as_attachment=True,
+            conditional=True,
+            download_name=os.path.basename(file_path)
+        )
     except Exception as e:
+        app.logger.error(f"Download failed for {file_path}: {e}")
         return f"下载失败: {str(e)}", 500
 
 def token_cleanup_loop():
     while True:
-        time.sleep(60)  # 每分钟清理一次
+        time.sleep(60)
         try:
-            cleanup_expired_tokens()
+            now = time.time()
+            for fname in os.listdir(TOKEN_DIR):
+                fpath = os.path.join(TOKEN_DIR, fname)
+                try:
+                    with open(fpath, 'r') as f:
+                        entry = json.load(f)
+                    if now > entry.get('expire', 0):
+                        os.remove(fpath)
+                except Exception:
+                    # 损坏的文件也清理
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
         except Exception:
             pass
+
+@app.route('/api/admin/files/download-counts', methods=['GET'])
+@require_csrf
+@require_private_key
+def get_download_counts():
+    """管理员获取所有文件的下载次数统计"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+    counts = load_download_counts()
+    return jsonify(counts)
 
 # 启动令牌清理线程
 _thread = threading.Thread(target=token_cleanup_loop, daemon=True)
