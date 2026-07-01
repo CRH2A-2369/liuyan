@@ -11,6 +11,8 @@ from PIL import Image, ImageDraw, ImageFont
 import io
 import random
 import string
+from kyber_py.ml_kem import ML_KEM_1024
+from Crypto.Cipher import AES
 
 load_dotenv()
 app = Flask(__name__)
@@ -117,6 +119,7 @@ DOWNLOAD_TOKEN_EXPIRE = 15 * 60  # 15分钟
 _token_lock = threading.Lock()
 _download_counts_lock = threading.Lock()
 DOWNLOAD_COUNT_FILE = os.path.join(DATA_DIR, 'download_counts.json')
+PQC_PUB_KEY_PATH = os.path.join(BASE_DIR, 'gongyaoPQC.txt')
 # ===== 文件管理配置 =====
 FILES_DIR = os.path.join(DATA_DIR, 'files')
 os.makedirs(FILES_DIR, exist_ok=True)
@@ -1154,7 +1157,7 @@ def secure_headers(response):
         response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
+        "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: https:; "
         "connect-src 'self' https:; "
@@ -1184,41 +1187,69 @@ def admin_challenge():
     if rl: return rl
     if is_admin():
         return jsonify({'error': '已登录'}), 400
-    nonce = secrets.token_urlsafe(32)
-    session['challenge_nonce'] = nonce
-    session['challenge_time'] = time.time()
+
     try:
-        pub = RSA.importKey(open(RSA_PUB, 'rb').read())
-        encrypted = base64.b64encode(PKCS1_v1_5.new(pub).encrypt(nonce.encode())).decode()
-        return jsonify({'challenge': encrypted})
+        pub_bytes = load_pqc_public_key_bytes()
+        if pub_bytes is None:
+            app.logger.error("PQC公钥加载失败")
+            return jsonify({'error': 'PQC公钥无效，请检查 gongyaoPQC.txt 文件内容'}), 500
+        app.logger.info(f"公钥长度: {len(pub_bytes)}")
+        # ★ ML-KEM 封装（API 不同：先 key 后 ct）
+        shared_secret, ciphertext = ML_KEM_1024.encaps(pub_bytes)
+        
+        app.logger.info(f"shared_secret 长度: {len(shared_secret)}")   # 应为 32
+        app.logger.info(f"ciphertext 长度: {len(ciphertext)}")        # 应为 1568
+        # 验证密文长度
+        if len(ciphertext) != 1568:
+            app.logger.error(f"密文长度异常: {len(ciphertext)}，预期 1568")
+            return jsonify({'error': 'ML-KEM封装结果异常（密文长度错误）'}), 500
+        # 生成 nonce 并用共享密钥加密
+        nonce = secrets.token_bytes(16)
+        key = hashlib.sha256(shared_secret).digest()
+        iv = secrets.token_bytes(16)
+        # ★ PKCS7 填充：兼容前端 Web Crypto API
+        pad_len = 16 - (len(nonce) % 16)
+        padded_nonce = nonce + bytes([pad_len] * pad_len)
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        enc_nonce = cipher.encrypt(padded_nonce)
+        session['pqc_challenge'] = {
+            'nonce': nonce.hex(),
+            'shared': shared_secret.hex(),
+            'expire': time.time() + 120
+        }
+        return jsonify({
+            'ciphertext': base64.b64encode(ciphertext).decode(),
+            'iv': base64.b64encode(iv).decode(),
+            'enc_nonce': base64.b64encode(enc_nonce).decode()
+        })
     except Exception as e:
-        print(f"[ERROR] 公钥加载失败: {e}")
-        return jsonify({'challenge': 'ERROR'})
+        app.logger.error(f"admin_challenge 异常: {type(e).__name__}: {e}")
+        import traceback
+        app.logger.error(traceback.format_exc())
+        return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
 
 @app.route('/api/admin/verify', methods=['POST'])
 @require_csrf
 def admin_verify():
     rl = check_rate_limit('write')
-    if rl:
-        return rl
+    if rl: return rl
+
     data = request.get_json(silent=True) or {}
-    plaintext = (data.get('plaintext') or request.form.get('plaintext', '')).strip()
-    stored = session.get('challenge_nonce')
-    ctime = session.get('challenge_time', 0)
-    if not plaintext:
-        return "解密结果为空（请检查私钥）", 401
-    if not stored:
-        return "Session 丢失（请清除 Cookie 后重试）", 401
-    if time.time() - ctime > 120:
+    nonce_hex = (data.get('nonce') or '').strip()
+
+    challenge = session.get('pqc_challenge')
+    if not challenge:
+        return "Session 丢失或挑战已过期", 401
+    if time.time() - challenge.get('expire', 0) > 120:
         return "挑战已过期（请刷新页面重新验证）", 401
-    if plaintext != stored:
-        return "解密值不匹配（私钥错误或已失效）", 401
+    if nonce_hex != challenge.get('nonce'):
+        return "nonce 不匹配（私钥错误或已失效）", 401
+
     # 登录成功
     session['admin'] = True
     session['admin_has_key'] = True
     session['fp'] = get_fp()
-    session.pop('challenge_nonce', None)
-    session.pop('challenge_time', None)
+    session.pop('pqc_challenge', None)
     generate_csrf()
     return jsonify({'status': 'ok'})
 
@@ -1259,6 +1290,32 @@ def rotate_rsa_key():
         return jsonify({'ok': True, 'message': '公钥已更新'})
     except Exception as e:
         return jsonify({'error': f'写入公钥失败：{str(e)}'}), 500
+
+@app.route('/api/admin/rotate-pqc-key', methods=['POST'])
+@require_csrf
+@require_private_key
+def rotate_pqc_key():
+    """管理员上传新 PQC 公钥，覆盖 gongyaoPQC.txt"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    public_key = data.get('public_key', '').strip()
+    if not public_key:
+        return jsonify({'error': '公钥不能为空'}), 400
+
+    try:
+        pub_bytes = base64.b64decode(public_key)
+        if len(pub_bytes) != 1568:
+            return jsonify({'error': f'无效的 PQC 公钥长度: {len(pub_bytes)}，预期 1568 字节'}), 400
+    except Exception as e:
+        return jsonify({'error': f'公钥 Base64 解码失败: {str(e)}'}), 400
+
+    try:
+        atomic_write(PQC_PUB_KEY_PATH, public_key)
+        return jsonify({'ok': True, 'message': 'PQC 公钥已更新'})
+    except Exception as e:
+        return jsonify({'error': f'写入公钥失败: {str(e)}'}), 500
 # === 9. 路由：基础与留言（v2 三部分格式）===
 @app.route('/api/myip')
 def my_ip():
@@ -1273,6 +1330,29 @@ def pub_key():
         return "公钥文件未配置", 404
     except Exception:
         return "公钥读取失败", 500
+
+def load_pqc_public_key_bytes():
+    """返回 ML-KEM-1024 公钥的字节串，失败时返回 None"""
+    try:
+        with open(PQC_PUB_KEY_PATH, 'r', encoding='utf-8-sig') as f:
+            b64 = f.read().strip()
+        b64 = ''.join(b64.split())
+        pub = base64.b64decode(b64)
+        if len(pub) != 1568:          # ML-KEM-1024 公钥 = 1568 字节（不变）
+            app.logger.error(f"公钥长度错误: {len(pub)}，预期 1568")
+            return None
+        app.logger.info(f"公钥前16字节: {pub[:16].hex()}")
+        return pub
+    except Exception as e:
+        app.logger.error(f"加载 PQC 公钥失败: {e}")
+        return None
+
+@app.route('/gongyaoPQC.txt')
+def pqc_pub_key():
+    try:
+        return open(os.path.join(BASE_DIR, 'gongyaoPQC.txt'), 'r', encoding='utf-8').read()
+    except:
+        return "PQC公钥未配置", 404
 
 @app.route('/api/footer', methods=['GET'])
 def get_footer():
@@ -1289,28 +1369,78 @@ def index():
             allowed, in_wl, block_until, remaining = check_rate_limit_before(ip)
             if not allowed:
                 return rate_limit_json({"error": f"操作过于频繁，请 {remaining} 秒后再试"}, 429, in_wl, block_until)
+
             data = request.get_json(silent=True) or {}
-            if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv')):
-                return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
-            rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
-            iv = data['iv'].replace('\n', '').replace('\r', '').strip()
-            aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
-            # ★ 新增：接收前端计算的身份哈希
+            version = data.get('version', 'v2')  # 默认 v2
             identity_hash = data.get('identity_hash', '').strip()
 
-            server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
-            server_meta = f"{get_client_ip()} | {server_time}"
-            server_enc = rsa_encrypt_report(server_meta)
+            if version == 'v3':
+                # ---- PQC 加密模式 ----
+                required = ('pqc_ciphertext', 'iv_shared', 'iv_content', 'encAESKey', 'encContent')
+                if not all(data.get(k) for k in required):
+                    return rate_limit_json({"error": "PQC数据不完整"}, 400, in_wl, block_until)
 
-            # ★ v3 格式：v3|rsa_key|iv|server_time|identity_hash
-            content = f"v3|{rsa_key}|{iv}|{server_time}|{identity_hash}\n{aes_msg}\n{server_enc}"
-            with _file_lock:
-                seq = get_seq_unlocked()
-                atomic_write_unlocked(os.path.join(MSG_DIR, f"留言_{seq}.txt"), content)
-            block_until = set_rate_limit_after(ip)
-            return rate_limit_json({"status": "ok"}, 200, in_wl, block_until)
+                server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
+
+                # 1) 用 PQC 公钥封装，生成共享密钥用于加密 IP 和时间
+                pub_bytes = load_pqc_public_key_bytes()
+                if pub_bytes is None:
+                    return rate_limit_json({"error": "PQC公钥未配置"}, 500, in_wl, block_until)
+
+                shared_ip, ciphertext_ip = ML_KEM_1024.encaps(pub_bytes)
+                key_ip = hashlib.sha256(shared_ip).digest()
+                iv_ip = secrets.token_bytes(16)
+                cipher_ip = AES.new(key_ip, AES.MODE_CBC, iv_ip)
+
+                plain_ip = f"{get_client_ip()} | {server_time}"
+                # PKCS7 填充
+                pad_len = 16 - (len(plain_ip) % 16)
+                padded = plain_ip + chr(pad_len) * pad_len
+                enc_ip = cipher_ip.encrypt(padded.encode())
+
+                ip_data = {
+                    'ciphertext_ip': base64.b64encode(ciphertext_ip).decode(),
+                    'iv_ip': base64.b64encode(iv_ip).decode(),
+                    'enc_ip': base64.b64encode(enc_ip).decode()
+                }
+
+                # 2) 构造存储内容：v3|pqc_ciphertext|iv_shared|iv_content|server_time
+                header = f"v3|{data['pqc_ciphertext']}|{data['iv_shared']}|{data['iv_content']}|{server_time}|{identity_hash}"
+                content = f"{header}\n{data['encAESKey']}\n{data['encContent']}\n{json.dumps(ip_data)}"
+
+                with _file_lock:
+                    seq = get_seq_unlocked()
+                    atomic_write_unlocked(os.path.join(MSG_DIR, f"留言_{seq}.txt"), content)
+
+                block_until = set_rate_limit_after(ip)
+                return rate_limit_json({"status": "ok"}, 200, in_wl, block_until)
+
+            else:
+                # ---- v2 原有 RSA 加密模式 ----
+                if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv')):
+                    return rate_limit_json({"error": "数据不完整"}, 400, in_wl, block_until)
+
+                rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
+                iv = data['iv'].replace('\n', '').replace('\r', '').strip()
+                aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+
+                server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
+                server_meta = f"{get_client_ip()} | {server_time}"
+                server_enc = rsa_encrypt_report(server_meta)
+
+                # v2 格式：v2|rsa_key|iv|server_time|identity_hash
+                content = f"v2|{rsa_key}|{iv}|{server_time}|{identity_hash}\n{aes_msg}\n{server_enc}"
+                with _file_lock:
+                    seq = get_seq_unlocked()
+                    atomic_write_unlocked(os.path.join(MSG_DIR, f"留言_{seq}.txt"), content)
+
+                block_until = set_rate_limit_after(ip)
+                return rate_limit_json({"status": "ok"}, 200, in_wl, block_until)
+
         finally:
             release_processing_lock(ip)
+
+    # GET 请求：渲染页面
     return render_template('index.html')
 
 @app.route('/admin')
@@ -1320,6 +1450,7 @@ def admin_page():
         glob.glob(os.path.join(MSG_DIR, '留言_*.txt')),
         key=lambda x: int(m.group(1)) if (m := re.search(r'(\d+)', os.path.basename(x))) else 0
     )
+
     for f in files:
         try:
             with open(f, encoding='utf-8') as fh:
@@ -1328,8 +1459,29 @@ def admin_page():
                     continue
                 header = lines[0]
                 seq = re.search(r'(\d+)', os.path.basename(f)).group(1)
+
                 if header.startswith('v3|'):
-                    # ★ v3 格式：包含 identity_hash
+                    # v3|pqc_ciphertext|iv_shared|iv_content|server_time|identity_hash
+                    parts = header.split('|')
+                    if len(parts) < 6:
+                        continue
+                    msgs.append({
+                        'file': os.path.basename(f),
+                        'seq': seq,
+                        'is_v3': True,
+                        'is_v2': False,
+                        'version': 'v3',
+                        'pqc_ciphertext': parts[1],
+                        'iv_shared': parts[2],
+                        'iv_content': parts[3],
+                        'server_time': parts[4],
+                        'identity_hash': parts[5],
+                        'encAESKey': lines[1] if len(lines) >= 2 else '',
+                        'encContent': lines[2] if len(lines) >= 3 else '',
+                        'ip_data': lines[3] if len(lines) >= 4 else ''
+                    })
+                elif header.startswith('v2|'):
+                    # v2 格式：v2|rsa_key|iv|server_time|identity_hash
                     parts = header.split('|')
                     server_time = parts[3] if len(parts) >= 4 else ''
                     identity_hash = parts[4] if len(parts) >= 5 else ''
@@ -1340,25 +1492,12 @@ def admin_page():
                         'aes_msg': lines[1],
                         'server_enc': lines[2] if len(lines) > 2 else '',
                         'server_time': server_time,
-                        'identity_hash': identity_hash,
-                        'is_v2': True,
-                        'is_v3': True
-                    })
-                elif header.startswith('v2|'):
-                    parts = header.split('|')
-                    server_time = parts[3] if len(parts) >= 4 else ''
-                    msgs.append({
-                        'file': os.path.basename(f),
-                        'seq': seq,
-                        'rsa_iv': header,
-                        'aes_msg': lines[1],
-                        'server_enc': lines[2] if len(lines) > 2 else '',
-                        'server_time': server_time,
-                        'identity_hash': '',
+                        'identity_hash': parts[4] if len(parts) >= 5 else '',
                         'is_v2': True,
                         'is_v3': False
                     })
                 else:
+                    # 更旧的格式（兼容）
                     if len(lines) < 3:
                         continue
                     msgs.append({
@@ -1371,8 +1510,10 @@ def admin_page():
                         'is_v2': False,
                         'is_v3': False
                     })
-        except Exception:
+        except Exception as e:
+            print(f"读取留言文件 {f} 出错: {e}")
             continue
+
     return render_template('admin.html', messages=msgs)
 
 @app.route('/api/admin/replies', methods=['GET'])
@@ -1517,22 +1658,22 @@ def get_messages():
                 header = lines[0]
 
                 if header.startswith('v3|'):
-                    # ★ 新格式：包含 identity_hash
+                    # v3|pqc_ciphertext|iv_shared|iv_content|server_time|identity_hash
                     parts = header.split('|')
-                    msg_hash = parts[4] if len(parts) >= 5 else ''
+                    if len(parts) < 6:
+                        continue
+                    msg_hash = parts[5]
                     if identity_hash:
-                        # 带哈希查询：仅返回匹配项
                         if msg_hash != identity_hash:
                             continue
                     else:
-                        # ★ 不带哈希：跳过所有新格式数据，不返回加密新数据
-                        continue
-                    server_time = parts[3] if len(parts) >= 4 else ''
+                        continue  # 无哈希跳过 v3
+                    server_time = parts[4]
                     msgs.append({
                         'seq': m.group(1),
-                        'iv': parts[2] if len(parts) >= 3 else '',
-                        'aes_msg': lines[1],
-                        'server_enc': lines[2] if len(lines) > 2 else '',
+                        'is_v3': True,
+                        'iv_content': parts[3],
+                        'encContent': lines[2] if len(lines) >= 3 else '',
                         'server_time': server_time
                     })
                 elif header.startswith('v2|'):
