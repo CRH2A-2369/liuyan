@@ -9,6 +9,13 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" integrity="sha512-XMVd28F1oH/O71fzwBnV7HucLxVwtxf26XV8P4wPk26EDxuGZ91N8bsOttmnomcCD3CS5ZMRL50H0GgOHvegtg==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/forge/1.3.1/forge.min.js" integrity="sha512-95iy0RZIbw3H/FgfAj2wnCQJlzFQ+eaSfUeV/l8WVyGHKSRMzm3M/O+85j9ba/HFphkijrCTDjcuDX0BL2lthA==" crossorigin="anonymous"></script>
+  <script type="importmap">
+  {
+      "imports": {
+          "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+      }
+  }
+</script>
   <style>
     .copy-btn { background:#eee; border:1px solid #ddd; border-radius:3px; padding:2px 8px; font-size:11px; cursor:pointer; color:#555; margin-left:8px; vertical-align:middle; }
     .copy-btn:hover { background:#ddd; }
@@ -46,9 +53,12 @@
   <script id="raw-data" type="application/json">{{ messages | tojson }}</script>
 
   <div id="login-panel" class="login">
-    <h2>管理员验证</h2><p>输入私钥完成认证</p>
+    <h2>管理员验证</h2>
+    <p>输入 RSA 私钥（用于解密旧留言）和 PQC 私钥（用于登录及解密 PQC 留言）</p>
     <textarea id="privKey" placeholder="-----BEGIN RSA PRIVATE KEY-----..."></textarea>
-    <div id="err" class="err"></div><button onclick="verify()">验证并进入</button>
+    <textarea id="pqcPrivKey" placeholder="Base64 编码的 Kyber-1024 私钥"></textarea>
+    <div id="err" class="err"></div>
+    <button onclick="verify()">验证并进入</button>
   </div>
 
   <div id="msg-panel" style="display:none">
@@ -89,8 +99,9 @@
 </div>
 <div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0">
   <button onclick="exportPlainData()" style="background:#9C27B0;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导出明文数据</button>
-  <button onclick="document.getElementById('import-plain-input').click()" style="background:#FF5722;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导入明文数据
+ <button onclick="document.getElementById('import-plain-input').click()" style="background:#FF5722;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导入明文数据</button>
   <button onclick="rotateRSAKey()" style="background:#d32f2f;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">🔄 重置 RSA 密钥</button>
+  <button onclick="rotatePQCKey()" style="background:#9C27B0;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">🔄 重置 PQC 密钥</button>
   <span style="font-size:12px;color:#888;margin-left:10px">⚠️ 操作前请先导出明文数据，否则旧数据将无法解密</span>
 </button>
   <input type="file" id="import-plain-input" accept=".json" style="display:none" onchange="importPlainData(this)">
@@ -103,6 +114,9 @@
   <footer id="footer"></footer>
 
 <script>
+  let pqcPrivateKeyBytes = null;      // PQC 私钥（Uint8Array）
+  let rsaPrivateKeyPem = null;       // RSA 私钥字符串
+  let ml_kem1024 = null;             // 懒加载
   const rawData = JSON.parse(document.getElementById('raw-data').textContent);
   let allReplies = [], jse = null, csrfToken = '';
 
@@ -316,6 +330,17 @@
   const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
   function deriveKey(str) { return CryptoJS.enc.Hex.parse(CryptoJS.SHA256(str).toString()); }
+// ★ 新增：Web Crypto AES-CBC 加密（与 index.html v3 提交一致）
+async function encryptAES(plaintext, keyBytes) {
+    const iv = crypto.getRandomValues(new Uint8Array(16));
+    const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']);
+    const enc = await crypto.subtle.encrypt(
+        { name: 'AES-CBC', iv: iv },
+        cryptoKey,
+        new TextEncoder().encode(plaintext)
+    );
+    return { iv: iv, ciphertext: new Uint8Array(enc) };
+}
 // ★★★ 新增：与前端一致的 SHA-256 身份哈希计算 ★★★
   async function calcIdentityHash(nick, aesKey) {
       const encoder = new TextEncoder();
@@ -339,7 +364,17 @@
       const status = await fetch('/api/admin/status', {credentials:'same-origin'}).then(r=>r.json());
       if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
         const savedKey = sessionStorage.getItem('admin_priv_key');
-        if (savedKey) { jse.setPrivateKey(savedKey); showAdmin(); }
+        if (savedKey) {
+          jse.setPrivateKey(savedKey);
+          // ★ 恢复 PQC 私钥
+          const savedPQCKey = sessionStorage.getItem('admin_pqc_priv_key');
+          if (savedPQCKey) {
+            try {
+              pqcPrivateKeyBytes = Uint8Array.from(atob(savedPQCKey), c => c.charCodeAt(0));
+            } catch(e) { console.warn('恢复PQC私钥失败', e); }
+          }
+          showAdmin();
+        }
         else { await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}}); sessionStorage.clear(); location.reload(); }
       } else if (status.logged_in) {
         await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}}); sessionStorage.clear(); location.reload();
@@ -351,19 +386,97 @@
   }
   init();
 
-  async function verify(){
-    if(!jse||!window.challenge) return;
-    const k = document.getElementById('privKey').value.trim(); if(!k) return;
-    jse.setPrivateKey(k);
-    try{
-      const plain = jse.decrypt(window.challenge);
-      if(!plain) throw new Error('RSA解密为空');
-      const fd = new FormData(); fd.append('plaintext', plain);
-      const r = await authFetch('/api/admin/verify',{method:'POST',body:fd});
-      if(r.ok){ sessionStorage.setItem('admin_has_key', 'true'); sessionStorage.setItem('admin_priv_key', k); location.reload(); }
-      else document.getElementById('err').textContent = await r.text();
-    }catch(e){ document.getElementById('err').textContent = '私钥无效'; }
-  }
+  async function verify() {
+    const rsaKey = document.getElementById('privKey').value.trim();
+    const pqcKeyB64 = document.getElementById('pqcPrivKey').value.trim();
+    if (!rsaKey || !pqcKeyB64) { alert('请同时输入RSA私钥和PQC私钥'); return; }
+
+    if (!rsaKey.includes('BEGIN RSA PRIVATE KEY')) {
+        document.getElementById('err').textContent = 'RSA私钥格式无效';
+        return;
+    }
+    rsaPrivateKeyPem = rsaKey;
+    jse.setPrivateKey(rsaKey);
+
+    try {
+        pqcPrivateKeyBytes = Uint8Array.from(atob(pqcKeyB64), c => c.charCodeAt(0));
+    } catch (e) {
+        document.getElementById('err').textContent = 'PQC私钥Base64解码失败';
+        return;
+    }
+
+    try {
+        const chalRes = await fetch('/api/admin/challenge', { credentials: 'same-origin' });
+        if (!chalRes.ok) throw new Error('获取挑战失败');
+        const chal = await chalRes.json();
+        if (!chal.ciphertext) {
+            document.getElementById('err').textContent = '挑战响应缺少 ciphertext';
+            return;
+        }
+
+        const { ciphertext, iv, enc_nonce } = chal;
+        const ct = Uint8Array.from(atob(ciphertext), c => c.charCodeAt(0));
+        const ivBytes = Uint8Array.from(atob(iv), c => c.charCodeAt(0));
+        const encNonce = Uint8Array.from(atob(enc_nonce), c => c.charCodeAt(0));
+
+        console.log('ct 长度:', ct.length);
+        console.log('ivBytes 长度:', ivBytes.length);
+        console.log('encNonce 长度:', encNonce.length);
+
+        // 加载 Kyber 库
+        if (!ml_kem1024) {
+            const mod = await import('@noble/post-quantum/ml-kem');
+            ml_kem1024 = mod.ml_kem1024;
+        }
+
+        // 解封
+        const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+        console.log('shared 长度:', shared.length);
+
+        if (shared.length !== 32) {
+            document.getElementById('err').textContent = 'PQC解封失败，共享密钥长度错误';
+            return;
+        }
+
+        const sharedKey = await crypto.subtle.digest('SHA-256', shared);
+        const aesKey = new Uint8Array(sharedKey);
+
+        // 解密 nonce
+        try {
+            const decrypted = await crypto.subtle.decrypt(
+                { name: 'AES-CBC', iv: ivBytes },
+                await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['decrypt']),
+                encNonce
+            );
+            const nonceBytes = new Uint8Array(decrypted);
+            console.log('nonce 长度:', nonceBytes.length);
+            const nonceHex = Array.from(nonceBytes).map(b => b.toString(16).padStart(2,'0')).join('');
+
+            // 提交验证
+            const verifyRes = await fetch('/api/admin/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+                body: JSON.stringify({ nonce: nonceHex })
+            });
+            if (!verifyRes.ok) {
+                const errText = await verifyRes.text();
+                document.getElementById('err').textContent = errText || '验证失败';
+                return;
+            }
+            // 登录成功
+            sessionStorage.setItem('admin_has_key', 'true');
+            sessionStorage.setItem('admin_priv_key', rsaKey);
+            sessionStorage.setItem('admin_pqc_priv_key', pqcKeyB64);
+            location.reload();
+        } catch (decErr) {
+            console.error('解密 nonce 失败:', decErr);
+            document.getElementById('err').textContent = '解密挑战失败，请检查 PQC 私钥是否正确';
+        }
+    } catch (e) {
+        document.getElementById('err').textContent = '验证出错: ' + e.message;
+        console.error(e);
+    }
+}
 
   function showAdmin(){
     document.getElementById('login-panel').style.display='none';
@@ -380,163 +493,200 @@
     loadWL();
   }
 
-  function render(){
+async function render() {
     const list = document.getElementById('list');
     list.innerHTML = '';
-    if(!rawData.length){ list.innerHTML='<p style="color:#888;text-align:center">暂无留言</p>'; return; }
+    if (!rawData.length) { list.innerHTML = '<p style="color:#888;text-align:center">暂无留言</p>'; return; }
 
-    rawData.forEach(m => {
-      const isV2 = m.is_v2;
-      let rk, ivStr, aesEnc, serverEnc, metaEnc, contentEnc;
+    for (const m of rawData) {
+        const isV3 = m.is_v3;
+        const card = document.createElement('div');
+        card.className = 'card';
 
-      if (isV2) {
-        const parts = m.rsa_iv.split('|');
-        rk = (parts[1] || '').replace(/\s+/g, '');
-        ivStr = (parts[2] || '').replace(/\s+/g, '');
-        aesEnc = (m.aes_msg || '').replace(/\s+/g, '');
-        serverEnc = (m.server_enc || '').replace(/\s+/g, '');
-      } else {
-        const parts = m.rsa_iv.split('|');
-        rk = parts[0].replace(/\s+/g, '');
-        ivStr = (parts[1] || '').replace(/\s+/g, '');
-        metaEnc = (m.meta_enc || '').replace(/\s+/g, '');
-        contentEnc = (m.content_enc || '').replace(/\s+/g, '');
-      }
+        // 删除按钮
+        const delBtn = document.createElement('button');
+        delBtn.className = 'del';
+        delBtn.textContent = '删除留言';
+        delBtn.dataset.file = m.file;
+        card.appendChild(delBtn);
 
-      let meta = '解密失败', txt = '解密失败', rawAES = '', serverMeta = '', nick = '匿名';
-      try {
-        rawAES = jse.decrypt(rk);
-        if (!rawAES) throw new Error('RSA解密失败，请检查私钥');
-        const key32 = deriveKey(rawAES);
-        const ivW = CryptoJS.enc.Base64.parse(ivStr);
-        const opts = { iv: ivW, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 };
+        // 加密方式标签
+        const tag = document.createElement('span');
+        tag.style.cssText = 'display:inline-block;background:' + (isV3 ? '#9C27B0' : '#2196F3') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;margin-right:8px;';
+        tag.textContent = isV3 ? '🔐 PQC加密' : '🔐 RSA加密';
+        card.appendChild(tag);
 
-        if (isV2) {
-          const plain = CryptoJS.AES.decrypt(aesEnc, key32, opts).toString(CryptoJS.enc.Utf8);
-          if (!plain) throw new Error('AES解密结果为空');
-          const p = plain.indexOf(' | ');
-          if (p !== -1) {
-            nick = plain.substring(0, p);
-            txt = plain.substring(p + 3);
-            meta = '👤 ' + nick;
-          } else {
-            txt = plain;
-            meta = '（格式异常）';
-          }
-          if (serverEnc) {
-            const sm = jse.decrypt(serverEnc);
-            if (sm) serverMeta = ' | 🌐🕒 ' + sm;
-          }
-        } else {
-          meta = CryptoJS.AES.decrypt(metaEnc, key32, opts).toString(CryptoJS.enc.Utf8);
-          txt  = CryptoJS.AES.decrypt(contentEnc, key32, opts).toString(CryptoJS.enc.Utf8);
-          if (!meta || !txt) throw new Error('AES解密结果为空');
-          const mp = meta.split(' | ');
-          nick = mp[2] || '匿名';
-        }
-      } catch(e) {
-        console.warn(`[留言${m.seq}]`, e.message);
-        meta = txt = `❌ ${e.message}`;
-      }
-
-      const card = document.createElement('div');
-      card.className = 'card';
-
-      const delBtn = document.createElement('button');
-      delBtn.className = 'del';
-      delBtn.textContent = '删除留言';
-      delBtn.dataset.file = m.file;
-      card.appendChild(delBtn);
-
-      const metaDiv = document.createElement('div');
-      metaDiv.className = 'meta';
-      metaDiv.textContent = isV2 ? (meta + serverMeta) : ('📦 ' + meta);
-      card.appendChild(metaDiv);
-
-      const keySpan = document.createElement('span');
-      keySpan.className = 'key-display';
-      keySpan.textContent = '🔑 AES密钥: ' + (rawAES || '解密失败');
-      card.appendChild(keySpan);
-
-      const contentDiv = document.createElement('div');
-      contentDiv.className = 'md-content';
-      contentDiv.style.cssText = 'margin:4px 0 0;word-break:break-all';
-      contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(txt));
-      card.appendChild(contentDiv);
-
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'copy-btn';
-      copyBtn.textContent = '复制原文';
-      copyBtn.dataset.copy = txt;
-      card.appendChild(copyBtn);
-
-      const reps = allReplies.filter(r => r.seq == m.seq);
-      reps.sort((a, b) => (a.num || 1) - (b.num || 1));
-      reps.forEach(rep => {
+        let nick = '匿名', content = '解密失败', meta = '', rawAES = '';
         try {
-          const rKey = deriveKey(rawAES);
-          const rTxt = CryptoJS.AES.decrypt(
-            rep.aes_msg.replace(/\s+/g, ''),
-            rKey,
-            { iv: CryptoJS.enc.Base64.parse(rep.iv.replace(/\s+/g, '')),
-              mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
-          ).toString(CryptoJS.enc.Utf8);
-          if (rTxt) {
-            const p = rTxt.split(' | ');
-            const replyBox = document.createElement('div');
-            replyBox.className = 'reply-box';
+            if (isV3) {
+                // ---- PQC 解密 ----
+                if (!pqcPrivateKeyBytes) throw new Error('PQC私钥未加载');
+                if (!ml_kem1024) {
+                    const mod = await import('@noble/post-quantum/ml-kem');
+                    ml_kem1024 = mod.ml_kem1024;
+                }
 
-            const rDelBtn = document.createElement('button');
-            rDelBtn.className = 'reply-del';
-            rDelBtn.textContent = '删除回复';
-            rDelBtn.dataset.file = `回复_${m.seq}_${rep.num || 1}.txt`;
-            replyBox.appendChild(rDelBtn);
+                // 1) 解封主密文获取共享密钥
+                const ct = Uint8Array.from(atob(m.pqc_ciphertext), c => c.charCodeAt(0));
+                const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+                const sharedKey = await crypto.subtle.digest('SHA-256', shared);
+                const aesKeyShared = new Uint8Array(sharedKey);
 
-            const rMeta = document.createElement('div');
-            rMeta.className = 'reply-meta';
-            rMeta.textContent = `📝 回复 #${rep.num || 1} ${p[0]} | 🕒 ${p[1] || ''}`;
-            replyBox.appendChild(rMeta);
+                // 2) 解密用户 AES 密钥
+                const ivShared = Uint8Array.from(atob(m.iv_shared), c => c.charCodeAt(0));
+                const encAESKeyBytes = Uint8Array.from(atob(m.encAESKey), c => c.charCodeAt(0));
+                const decryptedKey = await crypto.subtle.decrypt(
+                    { name: 'AES-CBC', iv: ivShared },
+                    await crypto.subtle.importKey('raw', aesKeyShared, { name: 'AES-CBC' }, false, ['decrypt']),
+                    encAESKeyBytes
+                );
+                const userAESKey = new Uint8Array(decryptedKey);
+                rawAES = new TextDecoder().decode(userAESKey);
 
-            const rContent = document.createElement('div');
-            rContent.className = 'md-content';
-            rContent.style.margin = '0';
-            rContent.innerHTML = DOMPurify.sanitize(marked.parse(p.slice(2).join(' | ')));
-            replyBox.appendChild(rContent);
+                // 3) 解密内容 — 先 SHA-256 哈希用户密钥再解密
+                const userAESKeyDigest = await crypto.subtle.digest('SHA-256', userAESKey);
+                const ivContent = Uint8Array.from(atob(m.iv_content), c => c.charCodeAt(0));
+                const encContentBytes = Uint8Array.from(atob(m.encContent), c => c.charCodeAt(0));
+                const decContent = await crypto.subtle.decrypt(
+                    { name: 'AES-CBC', iv: ivContent },
+                    await crypto.subtle.importKey('raw', new Uint8Array(userAESKeyDigest), { name: 'AES-CBC' }, false, ['decrypt']),
+                    encContentBytes
+                );
+                const plain = new TextDecoder().decode(decContent);
+                const sep = plain.indexOf(' | ');
+                if (sep !== -1) { nick = plain.substring(0, sep).trim(); content = plain.substring(sep + 3).trim(); }
+                else { content = plain; }
 
-            const rCopyBtn = document.createElement('button');
-            rCopyBtn.className = 'copy-btn';
-            rCopyBtn.textContent = '复制回复';
-            rCopyBtn.dataset.copy = p.slice(2).join(' | ');
-            replyBox.appendChild(rCopyBtn);
-
-            card.appendChild(replyBox);
-          }
-        } catch(e) { console.warn(`[回复${m.seq}#${rep.num}]`, e.message); }
-      });
-
-      const replyBtn = document.createElement('button');
-      replyBtn.className = 'reply-btn';
-      replyBtn.textContent = '回复';
-      replyBtn.dataset.seq = m.seq;
-      replyBtn.dataset.nick = nick;
-      replyBtn.dataset.key = rawAES;
-      card.appendChild(replyBtn);
-
-      list.appendChild(card);
-    });
-
-    list.onclick = e => {
-      const t = e.target;
-      if (t.matches('.del')) { if(confirm('确定？')) authFetch(`/admin/delete/${t.dataset.file}`, {method:'POST'}).then(()=>location.reload()); }
-      if (t.matches('.reply-btn')) { openReply(t.dataset.seq, t.dataset.nick, t.dataset.key); }
-      if (t.matches('.reply-del')) {
-        if (confirm('确定删除这条回复？')) {
-          authFetch(`/admin/delete_reply_file/${t.dataset.file}`, { method: 'POST' })
-            .then(() => location.reload());
+                // 4) 解密 IP 数据（如果存在）
+                if (m.ip_data) {
+                    const ipData = JSON.parse(m.ip_data);
+                    const ctIp = Uint8Array.from(atob(ipData.ciphertext_ip), c => c.charCodeAt(0));
+                    const sharedIp = ml_kem1024.decapsulate(ctIp, pqcPrivateKeyBytes);
+                    const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
+                    const aesKeyIp = new Uint8Array(keyIp);
+                    const ivIp = Uint8Array.from(atob(ipData.iv_ip), c => c.charCodeAt(0));
+                    const encIpBytes = Uint8Array.from(atob(ipData.enc_ip), c => c.charCodeAt(0));
+                    const decIp = await crypto.subtle.decrypt(
+                        { name: 'AES-CBC', iv: ivIp },
+                        await crypto.subtle.importKey('raw', aesKeyIp, { name: 'AES-CBC' }, false, ['decrypt']),
+                        encIpBytes
+                    );
+                    const ipPlain = new TextDecoder().decode(decIp);
+                    meta = '🌐 ' + ipPlain;
+                }
+            } else {
+                // ---- v2 RSA 解密（原有逻辑） ----
+                const parts = m.rsa_iv.split('|');
+                const rk = parts[1] ? parts[1].replace(/\s+/g, '') : '';
+                const ivStr = parts[2] ? parts[2].replace(/\s+/g, '') : '';
+                const aesEnc = m.aes_msg ? m.aes_msg.replace(/\s+/g, '') : '';
+                const serverEnc = m.server_enc ? m.server_enc.replace(/\s+/g, '') : '';
+                rawAES = jse.decrypt(rk);
+                if (!rawAES) throw new Error('RSA解密失败');
+                const key32 = deriveKey(rawAES);
+                const ivW = CryptoJS.enc.Base64.parse(ivStr);
+                const plain = CryptoJS.AES.decrypt(aesEnc, key32, { iv: ivW, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString(CryptoJS.enc.Utf8);
+                if (!plain) throw new Error('AES解密失败');
+                const p = plain.indexOf(' | ');
+                if (p !== -1) { nick = plain.substring(0, p); content = plain.substring(p + 3); }
+                else { content = plain; }
+                if (serverEnc) {
+                    const sm = jse.decrypt(serverEnc);
+                    meta = sm ? '🌐🕒 ' + sm : '';
+                }
+            }
+        } catch(e) {
+            console.warn(`[留言${m.seq}]`, e.message);
+            content = '❌ 解密失败: ' + e.message;
+            meta = '';
         }
-      }
+
+        // --- 构建 UI（与原有相同）---
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'meta';
+        metaDiv.textContent = meta || '无元数据';
+        card.appendChild(metaDiv);
+
+        const keySpan = document.createElement('span');
+        keySpan.className = 'key-display';
+        keySpan.textContent = '🔑 密钥: ' + (rawAES || '解密失败');
+        card.appendChild(keySpan);
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'md-content';
+        contentDiv.style.cssText = 'margin:4px 0 0;word-break:break-all';
+        contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(content));
+        card.appendChild(contentDiv);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'copy-btn';
+        copyBtn.textContent = '复制原文';
+        copyBtn.dataset.copy = content;
+        card.appendChild(copyBtn);
+
+        // --- 显示回复（原有逻辑，回复用RSA加密，仍用jse）---
+        const reps = allReplies.filter(r => r.seq == m.seq);
+        reps.sort((a, b) => (a.num || 1) - (b.num || 1));
+        for (const rep of reps) {
+            try {
+                const rKey = deriveKey(rawAES);
+                const rTxt = CryptoJS.AES.decrypt(
+                    rep.aes_msg.replace(/\s+/g, ''),
+                    rKey,
+                    { iv: CryptoJS.enc.Base64.parse(rep.iv.replace(/\s+/g, '')), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+                ).toString(CryptoJS.enc.Utf8);
+                if (rTxt) {
+                    const p = rTxt.split(' | ');
+                    const replyBox = document.createElement('div');
+                    replyBox.className = 'reply-box';
+                    const rDelBtn = document.createElement('button');
+                    rDelBtn.className = 'reply-del';
+                    rDelBtn.textContent = '删除回复';
+                    rDelBtn.dataset.file = `回复_${m.seq}_${rep.num || 1}.txt`;
+                    replyBox.appendChild(rDelBtn);
+                    const rMeta = document.createElement('div');
+                    rMeta.className = 'reply-meta';
+                    rMeta.textContent = `📝 回复 #${rep.num || 1} ${p[0]} | 🕒 ${p[1] || ''}`;
+                    replyBox.appendChild(rMeta);
+                    const rContent = document.createElement('div');
+                    rContent.className = 'md-content';
+                    rContent.style.margin = '0';
+                    rContent.innerHTML = DOMPurify.sanitize(marked.parse(p.slice(2).join(' | ')));
+                    replyBox.appendChild(rContent);
+                    const rCopyBtn = document.createElement('button');
+                    rCopyBtn.className = 'copy-btn';
+                    rCopyBtn.textContent = '复制回复';
+                    rCopyBtn.dataset.copy = p.slice(2).join(' | ');
+                    replyBox.appendChild(rCopyBtn);
+                    card.appendChild(replyBox);
+                }
+            } catch(e) { console.warn(`[回复${m.seq}#${rep.num}]`, e.message); }
+        }
+
+        // 回复按钮
+        const replyBtn = document.createElement('button');
+        replyBtn.className = 'reply-btn';
+        replyBtn.textContent = '回复';
+        replyBtn.dataset.seq = m.seq;
+        replyBtn.dataset.nick = nick;
+        replyBtn.dataset.key = rawAES;
+        card.appendChild(replyBtn);
+
+        list.appendChild(card);
+    }
+
+    // 事件绑定（删除、回复等）
+    list.onclick = e => {
+        const t = e.target;
+        if (t.matches('.del')) { if(confirm('确定？')) authFetch(`/admin/delete/${t.dataset.file}`, {method:'POST'}).then(()=>location.reload()); }
+        if (t.matches('.reply-btn')) { openReply(t.dataset.seq, t.dataset.nick, t.dataset.key); }
+        if (t.matches('.reply-del')) {
+            if (confirm('确定删除这条回复？')) {
+                authFetch(`/admin/delete_reply_file/${t.dataset.file}`, { method: 'POST' }).then(() => location.reload());
+            }
+        }
     };
-  }
+}
 
   function openReply(s,n,k){
     document.getElementById('reply-panel').style.display='block';
@@ -804,55 +954,149 @@ async function exportPlainData() {
                 const lines = content.split('\n').filter(l => l.trim());
                 if (lines.length < 3) continue;
                 const first = lines[0];
-                if (!first.startsWith('v2|')) continue;
-                const parts = first.split('|');
-                const rsaKey = parts[1];
-                const iv = parts[2];
-                const serverTime = parts[3] || '';
-                const aesMsg = lines[1];
-                const serverEnc = lines[2] || '';
-
-                // 解密 server_enc 获取 IP 和时间
-                let ip = '127.0.0.1', time = serverTime;
-                if (serverEnc && serverEnc.startsWith('RSA:')) {
-                    try {
-                        const dec = jse.decrypt(serverEnc.slice(4));
-                        if (dec) {
-                            const parts2 = dec.split(' | ');
-                            if (parts2.length >= 2) {
-                                ip = parts2[0];
-                                time = parts2[1];
-                            }
-                        }
-                    } catch (e) {}
-                }
-
-                // 解密内容
-                let nick = '匿名', contentText = '（解密失败）';
-                try {
-                    const rawAES = jse.decrypt(rsaKey);
-                    if (rawAES) {
-                        const key32 = deriveKey(rawAES);
-                        const ivW = CryptoJS.enc.Base64.parse(iv);
-                        const plain = CryptoJS.AES.decrypt(aesMsg, key32, {
-                            iv: ivW,
-                            mode: CryptoJS.mode.CBC,
-                            padding: CryptoJS.pad.Pkcs7
-                        }).toString(CryptoJS.enc.Utf8);
-                        if (plain) {
-                            const sep = plain.indexOf(' | ');
-                            if (sep !== -1) {
-                                nick = plain.substring(0, sep).trim();
-                                contentText = plain.substring(sep + 3).trim();
-                            } else {
-                                contentText = plain;
-                            }
-                        }
+                if (first.startsWith('v3|')) {
+                    // ========== PQC v3 解密 ==========
+                    if (!pqcPrivateKeyBytes) continue;
+                    if (!ml_kem1024) {
+                        const mod = await import('@noble/post-quantum/ml-kem');
+                        ml_kem1024 = mod.ml_kem1024;
                     }
-                } catch (e) {}
-                result.messages.push({ nick, content: contentText, ip, time });
-            }
-        }
+
+                    // 解析 v3 头部: v3|pqc_ciphertext|iv_shared|iv_content|encAESKey|encContent|identity_hash
+                    const v3parts = first.split('|');
+                    if (v3parts.length < 6) continue;
+                    const pqcCiphertextB64 = v3parts[1];
+                    const ivSharedB64 = v3parts[2];
+                    const ivContentB64 = v3parts[3];
+                    // encAESKey 和 encContent 在独立行
+                    const encAESKeyB64 = (lines[1] || '').trim();
+                    const encContentB64 = (lines[2] || '').trim();
+                    if (!encAESKeyB64 || !encContentB64) continue;
+
+                    try {
+                        // 1) 解封主密文，获取共享密钥
+                        const ct = Uint8Array.from(atob(pqcCiphertextB64), c => c.charCodeAt(0));
+                        const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+                        const sharedKey = await crypto.subtle.digest('SHA-256', shared);
+                        const aesKeyShared = new Uint8Array(sharedKey);
+
+                        // 2) 用共享密钥解密用户 AES 密钥
+                        const ivShared = Uint8Array.from(atob(ivSharedB64), c => c.charCodeAt(0));
+                        const encAESKeyBytes = Uint8Array.from(atob(encAESKeyB64), c => c.charCodeAt(0));
+                        const decKey = await crypto.subtle.decrypt(
+                            { name: 'AES-CBC', iv: ivShared },
+                            await crypto.subtle.importKey('raw', aesKeyShared, { name: 'AES-CBC' }, false, ['decrypt']),
+                            encAESKeyBytes
+                        );
+                        const rawAES = new TextDecoder().decode(new Uint8Array(decKey));
+                        const userAESKeyDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rawAES));
+
+                        // 3) 用用户 AES 密钥解密内容
+                        const ivContent = Uint8Array.from(atob(ivContentB64), c => c.charCodeAt(0));
+                        const encContentBytes = Uint8Array.from(atob(encContentB64), c => c.charCodeAt(0));
+                        const decContent = await crypto.subtle.decrypt(
+                            { name: 'AES-CBC', iv: ivContent },
+                            await crypto.subtle.importKey('raw', new Uint8Array(userAESKeyDigest), { name: 'AES-CBC' }, false, ['decrypt']),
+                            encContentBytes
+                        );
+                        const plain = new TextDecoder().decode(decContent);
+
+                        // 分离昵称和内容
+                        let nick = '匿名', contentText = plain;
+                        const sep = plain.indexOf(' | ');
+                        if (sep !== -1) {
+                            nick = plain.substring(0, sep).trim();
+                            contentText = plain.substring(sep + 3).trim();
+                        }
+
+                        // 4) 解密 IP 数据（第二行 JSON）
+                        let ip = '127.0.0.1', time = '';
+                        if (lines.length >= 4) {
+                            try {
+                                const ipData = JSON.parse(lines[3]);
+                                const ctIp = Uint8Array.from(atob(ipData.ciphertext_ip), c => c.charCodeAt(0));
+                                const sharedIp = ml_kem1024.decapsulate(ctIp, pqcPrivateKeyBytes);
+                                const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
+                                const aesKeyIp = new Uint8Array(keyIp);
+                                const ivIp = Uint8Array.from(atob(ipData.iv_ip), c => c.charCodeAt(0));
+                                const encIpBytes = Uint8Array.from(atob(ipData.enc_ip), c => c.charCodeAt(0));
+                                const decIp = await crypto.subtle.decrypt(
+                                    { name: 'AES-CBC', iv: ivIp },
+                                    await crypto.subtle.importKey('raw', aesKeyIp, { name: 'AES-CBC' }, false, ['decrypt']),
+                                    encIpBytes
+                                );
+                                const ipPlain = new TextDecoder().decode(decIp);
+                                const ipParts = ipPlain.split(' | ');
+                                if (ipParts.length >= 2) {
+                                    ip = ipParts[0];
+                                    time = ipParts[1];
+                                } else {
+                                    ip = ipPlain;
+                                }
+                            } catch(e) { console.warn('v3 IP解密失败', e); }
+                        }
+
+                        result.messages.push({
+                            version: 'v3',
+                            nick, content: contentText, ip, time,
+                            rawAES: rawAES
+                        });
+                    } catch(e) {
+                        console.warn('v3 留言解密失败', e);
+                    }
+                } else if (first.startsWith('v2|')) {
+                    // ========== RSA v2 解密（原有逻辑，增加 rawAES 和 version 导出）==========
+                    const parts = first.split('|');
+                    const rsaKey = parts[1];
+                    const iv = parts[2];
+                    const serverTime = parts[3] || '';
+                    const aesMsg = lines[1];
+                    const serverEnc = lines[2] || '';
+
+                    // 解密 server_enc 获取 IP 和时间
+                    let ip = '127.0.0.1', time = serverTime;
+                    if (serverEnc && serverEnc.startsWith('RSA:')) {
+                        try {
+                            const dec = jse.decrypt(serverEnc.slice(4));
+                            if (dec) {
+                                const parts2 = dec.split(' | ');
+                                if (parts2.length >= 2) {
+                                    ip = parts2[0];
+                                    time = parts2[1];
+                                }
+                            }
+                        } catch(e) {}
+                    }
+
+                    // 解密内容
+                    let nick = '匿名', contentText = '（解密失败）', rawAES = '';
+                    try {
+                        rawAES = jse.decrypt(rsaKey);
+                        if (rawAES) {
+                            const key32 = deriveKey(rawAES);
+                            const ivW = CryptoJS.enc.Base64.parse(iv);
+                            const plain = CryptoJS.AES.decrypt(aesMsg, key32, {
+                                iv: ivW, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+                            }).toString(CryptoJS.enc.Utf8);
+                            if (plain) {
+                                const sep = plain.indexOf(' | ');
+                                if (sep !== -1) {
+                                    nick = plain.substring(0, sep).trim();
+                                    contentText = plain.substring(sep + 3).trim();
+                                } else {
+                                    contentText = plain;
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                    result.messages.push({
+                        version: 'v2',
+                        nick, content: contentText, ip, time,
+                        rawAES: rawAES
+                    });
+                }
+                }
+       }
 
         // ---- 投票 ----
         const voteDirs = {};
@@ -1170,33 +1414,127 @@ async function importPlainData(input) {
             addFile('captcha/verified.json', JSON.stringify(data.captcha_verified, null, 2));
         }
 
+        // ★ Web Crypto AES-CBC 加密辅助函数（与 index.html v3 提交一致）
+        async function encryptAES(plaintext, keyBytes) {
+                const iv = crypto.getRandomValues(new Uint8Array(16));
+                const cryptoKey = await crypto.subtle.importKey(
+                        'raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']
+                );
+                const enc = await crypto.subtle.encrypt(
+                        { name: 'AES-CBC', iv: iv },
+                        cryptoKey,
+                        new TextEncoder().encode(plaintext)
+                );
+                return { iv: iv, ciphertext: new Uint8Array(enc) };
+        }
+
         // ---- 留言 ----
         if (Array.isArray(data.messages)) {
+            // ★ 检测是否有 v3 消息，如有则提前加载 PQC 公钥
+            let pqcPubBytes = null;
+            let ml_kem1024_import = null;
+            const hasV3 = data.messages.some(m => m.version === 'v3');
+            if (hasV3) {
+                try {
+                    const pubRes = await fetch('/gongyaoPQC.txt');
+                    if (pubRes.ok) {
+                        const pubB64 = await pubRes.text();
+                        pqcPubBytes = Uint8Array.from(atob(pubB64.trim()), c => c.charCodeAt(0));
+                        const mod = await import('@noble/post-quantum/ml-kem');
+                        ml_kem1024_import = mod.ml_kem1024;
+                    }
+                } catch(e) { console.warn('加载PQC公钥失败，v3消息将回退到v2', e); }
+            }
+
             let seq = 1;
             for (const msg of data.messages) {
                 if (!msg.nick || !msg.content) continue;
-                // 生成加密
-                const aesKeyBytes = CryptoJS.lib.WordArray.random(32);
-                const aesKeyStr = aesKeyBytes.toString(CryptoJS.enc.Base64);
-                const rsaKey = encryptor.encrypt(aesKeyStr);
-                if (!rsaKey) throw new Error('RSA加密失败');
-                const iv = CryptoJS.lib.WordArray.random(16);
-                const ivBase64 = iv.toString(CryptoJS.enc.Base64);
-                const plainText = `${msg.nick} | ${msg.content}`;
-                const key32 = deriveKey(aesKeyStr);
-                const encrypted = CryptoJS.AES.encrypt(plainText, key32, {
-                    iv: iv,
-                    mode: CryptoJS.mode.CBC,
-                    padding: CryptoJS.pad.Pkcs7
-                }).toString();
-                // 使用导出的 IP 和时间
-                const ip = msg.ip || '127.0.0.1';
-                const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
-                const serverMeta = `${ip} | ${time}`;
-                const serverEnc = encryptRSA(serverMeta);
-                const fileContent = `v2|${rsaKey}|${ivBase64}|${time}\n${encrypted}\n${serverEnc}`;
-                addFile(`留言/留言_${seq}.txt`, fileContent);
-                seq++;
+                const isV3 = msg.version === 'v3' && pqcPubBytes && ml_kem1024_import;
+
+                if (isV3) {
+                    // ========== PQC v3 重新加密 ==========
+                    // 加密数据的 AES 密钥 rawAES 保持不变，
+                    // 但共同密钥（ML-KEM 封装）重新生成
+                    let rawAES = msg.rawAES;
+                    if (!rawAES) {
+                        // 无原始 AES 密钥则生成新密钥
+                        const aesKeyBytes = crypto.getRandomValues(new Uint8Array(32));
+                        rawAES = new TextDecoder().decode(aesKeyBytes);
+                    }
+                    const userAESKeyRaw = new TextEncoder().encode(rawAES);
+                    const userAESKeyDigest = await crypto.subtle.digest('SHA-256', userAESKeyRaw);
+
+                    // ★ 重新生成共同密钥（新 ML-KEM 封装）
+                    const { cipherText, sharedSecret } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                    const sharedKey = await crypto.subtle.digest('SHA-256', sharedSecret);
+                    const aesKeyShared = new Uint8Array(sharedKey);
+
+                    // 用新共享密钥加密用户 AES 密钥
+                    const encAESKeyResult = await encryptAES(rawAES, aesKeyShared);
+
+                    // 用用户 AES 密钥加密内容
+                    const contentPlain = `${msg.nick} | ${msg.content}`;
+                    const encContentResult = await encryptAES(contentPlain, new Uint8Array(userAESKeyDigest));
+
+                    // 加密 IP 数据（新的 ML-KEM 封装）
+                    const ip = msg.ip || '127.0.0.1';
+                    const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                    const ipPlain = `${ip} | ${time}`;
+                    const { cipherText: ctIp, sharedSecret: sharedIp } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                    const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
+                    const aesKeyIp = new Uint8Array(keyIp);
+                    const encIpResult = await encryptAES(ipPlain, aesKeyIp);
+                    const ipData = {
+                        ciphertext_ip: btoa(String.fromCharCode(...ctIp)),
+                        iv_ip: btoa(String.fromCharCode(...encIpResult.iv)),
+                        enc_ip: btoa(String.fromCharCode(...encIpResult.ciphertext))
+                    };
+
+                    // 计算身份哈希
+                    const identityData = new TextEncoder().encode(`${msg.nick}|${rawAES}`);
+                    const hashBuf = await crypto.subtle.digest('SHA-256', identityData);
+                    const identityHash = Array.from(new Uint8Array(hashBuf))
+                        .map(b => b.toString(16).padStart(2, '0')).join('');
+
+                    // 组装 v3 文件内容
+                    const v3Header = [
+                        'v3',
+                        btoa(String.fromCharCode(...cipherText)),
+                        btoa(String.fromCharCode(...encAESKeyResult.iv)),
+                        btoa(String.fromCharCode(...encContentResult.iv)),
+                        btoa(String.fromCharCode(...encAESKeyResult.ciphertext)),
+                        btoa(String.fromCharCode(...encContentResult.ciphertext)),
+                        identityHash
+                    ].join('|');
+
+                    const fileContent = v3Header + '\n' + JSON.stringify(ipData);
+                    addFile(`留言/留言_${seq}.txt`, fileContent);
+                    seq++;
+                } else {
+                    // ========== RSA v2 重新加密（原有逻辑）==========
+                    let rawAES = msg.rawAES;
+                    if (!rawAES) {
+                        // 无原始 AES 密钥则生成新密钥
+                        const aesKeyBytes = CryptoJS.lib.WordArray.random(32);
+                        rawAES = aesKeyBytes.toString(CryptoJS.enc.Base64);
+                    }
+                    const rsaKey = encryptor.encrypt(rawAES);
+                    if (!rsaKey) throw new Error('RSA加密失败');
+                    const iv = CryptoJS.lib.WordArray.random(16);
+                    const ivBase64 = iv.toString(CryptoJS.enc.Base64);
+                    const plainText = `${msg.nick} | ${msg.content}`;
+                    const key32 = deriveKey(rawAES);
+                    const encrypted = CryptoJS.AES.encrypt(plainText, key32, {
+                        iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+                    }).toString();
+                    const ip = msg.ip || '127.0.0.1';
+                    const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                    const serverMeta = `${ip} | ${time}`;
+                    const serverEnc = encryptRSA(serverMeta);
+                    const fileContent = `v2|${rsaKey}|${ivBase64}|${time}\n${encrypted}\n${serverEnc}`;
+                    addFile(`留言/留言_${seq}.txt`, fileContent);
+                    seq++;
+                }
             }
         }
 
@@ -1500,6 +1838,74 @@ async function rotateRSAKey() {
         }
     } catch (e) {
         alert('❌ 生成或上传密钥失败：' + e.message);
+        console.error(e);
+    }
+}
+// ===== 重置 PQC 密钥 =====
+async function rotatePQCKey() {
+    const randomStr = generateRandomString(8);
+    const expectedPhrase = `我已下载明文数据，确定重置PQC密钥${randomStr}`;
+    const userInput = prompt(
+        `⚠️ 即将生成新 Kyber-1024 密钥对并替换服务器 PQC 公钥！\n\n` +
+        `此操作将导致所有用旧 PQC 公钥加密的数据无法解密。\n` +
+        `请确保您已通过「导出明文数据」功能备份了所有数据。\n\n` +
+        `请输入以下确认短语以继续：\n\n` +
+        `"${expectedPhrase}"\n\n` +
+        `（输入后点击「确定」）`
+    );
+
+    if (userInput === null) return;
+    if (userInput.trim() !== expectedPhrase) {
+        alert('❌ 确认短语输入错误，操作已取消。');
+        return;
+    }
+
+    try {
+        // 加载 Kyber 库
+        const mod = await import('@noble/post-quantum/ml-kem');
+        const ml_kem1024_local = mod.ml_kem1024;
+
+        // 生成密钥对
+        const keys = ml_kem1024_local.keygen();
+        const privBytes = new Uint8Array(keys.secretKey);  // Kyber-1024 私钥 3168 字节
+        const pubBytes = new Uint8Array(keys.publicKey);   // Kyber-1024 公钥 1568 字节
+
+        const privB64 = btoa(String.fromCharCode(...privBytes));
+        const pubB64 = btoa(String.fromCharCode(...pubBytes));
+
+        // 下载私钥
+        const blob = new Blob([privB64], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'PQC私钥.txt';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        alert('✅ PQC 私钥已下载为 PQC私钥.txt，请妥善保管！');
+
+        // 上传公钥
+        const uploadConfirm = confirm('PQC 公钥将上传至服务器，确认继续？');
+        if (!uploadConfirm) return;
+
+        const res = await authFetch('/api/admin/rotate-pqc-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ public_key: pubB64 })
+        });
+
+        const data = await res.json();
+        if (data.ok) {
+            alert('✅ PQC 公钥已更新成功！');
+            if (confirm('公钥已更换，建议重新登录以确保会话安全，是否现在刷新？')) {
+                location.reload();
+            }
+        } else {
+            alert('❌ 上传 PQC 公钥失败：' + (data.error || '未知错误'));
+        }
+    } catch (e) {
+        alert('❌ 生成或上传 PQC 密钥失败：' + e.message);
         console.error(e);
     }
 }

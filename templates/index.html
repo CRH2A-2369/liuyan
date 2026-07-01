@@ -7,6 +7,13 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+  <script type="importmap">
+  {
+      "imports": {
+          "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+      }
+  }
+</script>
   <style>
     body{font-family:sans-serif;max-width:600px;margin:40px auto;padding:20px;min-height:100vh;display:flex;flex-direction:column}
     .box{display:flex;flex-direction:column;gap:12px}
@@ -55,6 +62,9 @@
   <p style="color:#666;margin:0 0 10px">8.本网站验证码部分基于https://github.com/TianmuTNT/zzyCaptcha/，若您无法通过验证码，请联系作者2449974736@qq .com申请添加白名单</p>
 
   <form id="form" class="box" onsubmit="return false">
+    <label style="display:block;margin:6px 0;">
+      <input type="checkbox" id="pqcToggle"> 开启PQC加密试点（实验性）
+    </label>
     <input id="nick" placeholder="昵称（≤32字）" maxlength="32" required>
     <div style="display:flex;gap:8px;align-items:center">
       <input id="aesKey" placeholder="本地AES密钥（≤64字符）" maxlength="64" required style="flex:1;padding:8px">
@@ -95,6 +105,14 @@
   <footer id="footer"></footer>
 
 <script>
+// AES-CBC 加密，返回 { iv, ciphertext }
+async function encryptAES(plaintext, keyBytes) {
+    const iv = crypto.getRandomValues(new Uint8Array(16));
+    const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']);
+    const enc = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: iv }, cryptoKey, new TextEncoder().encode(plaintext));
+    return { iv: iv, ciphertext: new Uint8Array(enc) };
+}
+
 async function calcIdentityHash(nick, aesKey) {
     const encoder = new TextEncoder();
     // 拼接方式与后端约定一致：用户名 + 密钥
@@ -128,13 +146,59 @@ var LS_AES = 'msg_aes';
 
 // 迁移旧 Cookie → localStorage（一次性）
 (function(){
-  var m = document.cookie.match('(^|;)\\s*msg_nick=([^;]*)');
-  if(m && !localStorage.getItem(LS_NICK)) localStorage.setItem(LS_NICK, decodeURIComponent(m[2]));
-  m = document.cookie.match('(^|;)\\s*msg_aes=([^;]*)');
-  if(m && !localStorage.getItem(LS_AES)) localStorage.setItem(LS_AES, decodeURIComponent(m[2]));
-  // 清除旧 Cookie
-  document.cookie = 'msg_nick=;max-age=0;path=/';
-  document.cookie = 'msg_aes=;max-age=0;path=/';
+  var STORAGE_KEY = 'rate_limit_state_v1';
+  var state = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{"blockUntil":0,"whitelisted":false}');
+  var timer = null;
+
+  function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+
+  function updateUI(){
+    var now = Date.now() / 1000;
+    var remaining = Math.ceil(state.blockUntil - now);
+    var disabled = !state.whitelisted && remaining > 0;
+
+    document.querySelectorAll('.rate-limited-btn').forEach(function(btn){
+      btn.disabled = disabled;
+      if(disabled){
+        if(!btn.dataset.origText) btn.dataset.origText = btn.textContent;
+        btn.textContent = btn.dataset.origText + ' (' + remaining + 's)';
+      }else{
+        if(btn.dataset.origText) btn.textContent = btn.dataset.origText;
+      }
+    });
+  }
+
+  function start(){
+    if(timer) clearInterval(timer);
+    updateUI();
+    timer = setInterval(function(){
+      var remaining = Math.ceil(state.blockUntil - Date.now()/1000);
+      if(remaining <= 0){
+        clearInterval(timer); timer = null;
+        state.blockUntil = 0;
+      }
+      updateUI(); save();
+    }, 200);
+  }
+
+  window.handleRateLimitResponse = function(response){
+    var wl = response.headers.get('X-RateLimit-Whitelisted') === '1';
+    var bu = parseFloat(response.headers.get('X-RateLimit-BlockUntil') || '0');
+    state.whitelisted = wl;
+    state.blockUntil = bu || 0;
+    save();
+    if(!wl && state.blockUntil > Date.now()/1000) start();
+    else updateUI();
+  };
+
+  // ★ 暴露 updateUI 供模态框调用
+  window.updateRateLimitUI = updateUI;
+
+  if(!state.whitelisted && state.blockUntil > Date.now()/1000){
+    start();
+  }else{
+    updateUI();
+  }
 })();
 
 function getLS(k){ return localStorage.getItem(k) || ''; }
@@ -166,7 +230,13 @@ function loadFooter(retries, delay) {
 loadFooter();
 
 function showModal() {
-  try { document.getElementById('modal').style.display = 'flex'; } catch(e){}
+  try {
+    document.getElementById('modal').style.display = 'flex';
+    // ★ 打开模态框时刷新限流状态
+    if (typeof window.updateRateLimitUI === 'function') {
+      window.updateRateLimitUI();
+    }
+  } catch(e) {}
 }
 function closeModal() {
   try { document.getElementById('modal').style.display = 'none'; } catch(e){}
@@ -227,58 +297,126 @@ function closeReplyModal() {
 
   /* ========== v2 提交：不再携带 IP 与时间，仅提交 AES(nick|content) ========== */
 async function handleSubmit() {
-    var nick = document.getElementById('nick').value.trim();
-    var keyIn = document.getElementById('aesKey').value.trim();
-    var msg = document.getElementById('msg').value;
+    const nick = document.getElementById('nick').value.trim();
+    const keyIn = document.getElementById('aesKey').value.trim();
+    const msg = document.getElementById('msg').value;
     if (!nick || !keyIn || !msg) { alert('请填写完整'); return; }
 
-    // ★ 7s 限流检查
-    var redirected = false;
     setLS(LS_NICK, nick);
     setLS(LS_AES, keyIn);
-    var iv = CryptoJS.lib.WordArray.random(16);
-    var key32 = deriveAESKey(keyIn);
-    var userContent = nick + ' | ' + msg;
-    var aesEnc = CryptoJS.AES.encrypt(userContent, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
 
-    // ★★★ 计算身份哈希 ★★★
-    var identityHash = await calcIdentityHash(nick, keyIn);
+    const usePQC = document.getElementById('pqcToggle').checked;
 
-    fetch('/gongyao.txt').then(function(r){return r.text();}).then(function(pub){
-      var jse = new JSEncrypt();
-      jse.setPublicKey(pub);
-      var cleanRsaKey = jse.encrypt(keyIn).replace(/[\r\n\s]+/g, '');
-      if (!cleanRsaKey) { alert('RSA加密失败'); return; }
-      return fetch('/', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          rsa_key: cleanRsaKey,
-          iv: CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''),
-          aes_msg: aesEnc.replace(/[\r\n\s]+/g, ''),
-          identity_hash: identityHash
-        })
-      });
-    }).then(function(res){
-      if (!res) return;
-      // ★ 验证码拦截
-      if (res.status === 418) {
-        redirected = true;
-        sessionStorage.setItem('pending_nick', nick);
-        sessionStorage.setItem('pending_key', keyIn);
-        sessionStorage.setItem('pending_msg', msg);
-        window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
-        return;
-      }
-      window.handleRateLimitResponse(res);
-      if (res.ok) { alert('✅ 已加密提交'); }
-      else { alert('❌ 提交失败'); }
-    }).finally(function(){
-      if (redirected) return;
-      closeModal();
-      document.getElementById('msg').value = '';
-    });
-  }
+    if (usePQC) {
+        // ---- PQC 模式 ----
+        try {
+            // 1. 获取 PQC 公钥
+            const pubRes = await fetch('/gongyaoPQC.txt');
+            if (!pubRes.ok) throw new Error('获取PQC公钥失败');
+            const pubB64 = await pubRes.text();
+            const pubBytes = Uint8Array.from(atob(pubB64.trim()), c => c.charCodeAt(0));
+
+            // 2. 加载 Kyber-1024 并封装
+            const { ml_kem1024 } = await import('@noble/post-quantum/ml-kem');
+            const { cipherText, sharedSecret } = ml_kem1024.encapsulate(pubBytes);
+
+            // 3. 派生共享密钥的 AES 密钥
+            const sharedKey = await crypto.subtle.digest('SHA-256', sharedSecret);
+            const aesKeyShared = new Uint8Array(sharedKey);
+
+            // 4. 用共享密钥加密用户输入的 AES 密钥
+            const encAESKey = await encryptAES(keyIn, aesKeyShared);
+
+            // 5. 用用户输入的 AES 密钥加密内容（昵称 + 内容）
+            const userAESKey = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyIn));
+            const contentPlain = nick + ' | ' + msg;
+            const encContent = await encryptAES(contentPlain, new Uint8Array(userAESKey));
+
+            // 6. 计算身份哈希
+            const identityHash = await calcIdentityHash(nick, keyIn);
+
+            // 7. 构造请求体
+            const payload = {
+                version: 'v3',
+                pqc_ciphertext: btoa(String.fromCharCode(...cipherText)),
+                iv_shared: btoa(String.fromCharCode(...encAESKey.iv)),
+                iv_content: btoa(String.fromCharCode(...encContent.iv)),
+                encAESKey: btoa(String.fromCharCode(...encAESKey.ciphertext)),
+                encContent: btoa(String.fromCharCode(...encContent.ciphertext)),
+                identity_hash: identityHash
+            };
+
+            const res = await fetch('/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            // 处理验证码重定向
+            if (res.status === 418) {
+                sessionStorage.setItem('pending_pqc_data', JSON.stringify(payload));
+                window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+                return;
+            }
+            window.handleRateLimitResponse(res);
+            if (res.ok) {
+                alert('✅ PQC加密提交成功');
+                document.getElementById('msg').value = '';
+            } else {
+                alert('❌ 提交失败');
+            }
+            closeModal();
+        } catch (e) {
+            alert('PQC加密失败: ' + e.message);
+            console.error(e);
+            closeModal();
+        }
+    } else {
+        // ---- 原有 RSA 模式 ----
+        const iv = CryptoJS.lib.WordArray.random(16);
+        const key32 = deriveAESKey(keyIn);
+        const userContent = nick + ' | ' + msg;
+        const aesEnc = CryptoJS.AES.encrypt(userContent, key32, { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }).toString();
+        const identityHash = await calcIdentityHash(nick, keyIn);
+
+        fetch('/gongyao.txt')
+            .then(r => r.text())
+            .then(pub => {
+                const jse = new JSEncrypt();
+                jse.setPublicKey(pub);
+                const cleanRsaKey = jse.encrypt(keyIn).replace(/[\r\n\s]+/g, '');
+                if (!cleanRsaKey) { alert('RSA加密失败'); return; }
+                return fetch('/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        rsa_key: cleanRsaKey,
+                        iv: CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''),
+                        aes_msg: aesEnc.replace(/[\r\n\s]+/g, ''),
+                        identity_hash: identityHash,
+                        version: 'v2'
+                    })
+                });
+            })
+            .then(res => {
+                if (!res) return;
+                if (res.status === 418) {
+                    sessionStorage.setItem('pending_nick', nick);
+                    sessionStorage.setItem('pending_key', keyIn);
+                    sessionStorage.setItem('pending_msg', msg);
+                    window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+                    return;
+                }
+                window.handleRateLimitResponse(res);
+                alert(res.ok ? '✅ 已加密提交' : '❌ 提交失败');
+            })
+            .catch(() => {})
+            .finally(() => {
+                closeModal();
+                document.getElementById('msg').value = '';
+            });
+    }
+}
 
   /* ========== 查询管理员回复 ========== */
 async function checkReply() {           // ★ 添加 async
@@ -329,8 +467,8 @@ async function checkReply() {           // ★ 添加 async
     });
   }
 
-  /* ========== v2 查询：第二行是 AES(nick|content)，不再单独有 meta_msg ========== */
-async function checkMyMessages() {      // ★ 添加 async
+  /* ========== v2/v3 查询：兼容 RSA 和 PQC 加密的留言 ========== */
+async function checkMyMessages() {
     var nick = document.getElementById('check-nick').value.trim();
     var keyIn = document.getElementById('check-key').value.trim();
     if (!nick || !keyIn) { alert('请填写完整'); return; }
@@ -339,40 +477,61 @@ async function checkMyMessages() {      // ★ 添加 async
     box.innerHTML = '<p style="text-align:center;color:#888">查询中...</p>';
     box.style.display = 'block';
 
-    // ★★★ 新增：计算身份哈希 ★★★
     var identityHash = await calcIdentityHash(nick, keyIn);
 
-    // ★★★ 修改：URL 拼接哈希参数 ★★★
     fetch('/api/messages?identity_hash=' + encodeURIComponent(identityHash))
     .then(function(r){return r.json();})
-    .then(function(msgs){
+    .then(async function(msgs){                          // ★ async
       var found = [];
-      var key32 = deriveAESKey(keyIn);
 
-      msgs.forEach(function(m){
+      for (const m of msgs) {                            // ★ for...of 支持 await
         try {
-          var aesData = CryptoJS.AES.decrypt(m.aes_msg, key32, {
-            iv: CryptoJS.enc.Base64.parse(m.iv),
-            mode: CryptoJS.mode.CBC,
-            padding: CryptoJS.pad.Pkcs7
-          }).toString(CryptoJS.enc.Utf8);
-
-          if (!aesData) return;
-          var parts = aesData.split(' | ');
-          if (parts.length < 2) return;
-          var metaNick = parts[0];
-          if (metaNick !== nick) return;
-
-          var content = parts.slice(1).join(' | ');
-          if (!content) return;
-
-          found.push({
-            time: m.server_time || '未知时间',
-            content: content,
-            seq: m.seq
-          });
+          if (m.is_v3) {
+              // ---- v3 PQC 解密：直接用用户 AES 密钥 ----
+              const userAESKeyDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyIn));
+              const ivContent = Uint8Array.from(atob(m.iv_content), c => c.charCodeAt(0));
+              const encContent = Uint8Array.from(atob(m.encContent), c => c.charCodeAt(0));
+              const decContent = await crypto.subtle.decrypt(
+                  { name: 'AES-CBC', iv: ivContent },
+                  await crypto.subtle.importKey('raw', new Uint8Array(userAESKeyDigest), { name: 'AES-CBC' }, false, ['decrypt']),
+                  encContent
+              );
+              const plain = new TextDecoder().decode(decContent);
+              if (!plain) continue;
+              var parts = plain.split(' | ');
+              if (parts.length < 2) continue;
+              var metaNick = parts[0];
+              if (metaNick !== nick) continue;
+              var content = parts.slice(1).join(' | ');
+              if (!content) continue;
+              found.push({
+                  time: m.server_time || '未知时间',
+                  content: content,
+                  seq: m.seq
+              });
+          } else {
+              // ---- v2 RSA 解密（原有逻辑） ----
+              var key32 = deriveAESKey(keyIn);
+              var aesData = CryptoJS.AES.decrypt(m.aes_msg, key32, {
+                  iv: CryptoJS.enc.Base64.parse(m.iv),
+                  mode: CryptoJS.mode.CBC,
+                  padding: CryptoJS.pad.Pkcs7
+              }).toString(CryptoJS.enc.Utf8);
+              if (!aesData) continue;
+              var parts = aesData.split(' | ');
+              if (parts.length < 2) continue;
+              var metaNick = parts[0];
+              if (metaNick !== nick) continue;
+              var content = parts.slice(1).join(' | ');
+              if (!content) continue;
+              found.push({
+                  time: m.server_time || '未知时间',
+                  content: content,
+                  seq: m.seq
+              });
+          }
         } catch(e) {}
-      });
+      }
 
       renderResults(box, found, '未找到匹配的留言（请检查昵称和密钥）');
     }).catch(function(){
@@ -425,78 +584,51 @@ async function checkMyMessages() {      // ★ 添加 async
     }).catch(function(){ alert('复制失败，请手动选择'); });
   });
 
-(function(){
-  var STORAGE_KEY = 'rate_limit_state_v1';
-  var state = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{"blockUntil":0,"whitelisted":false}');
-  var timer = null;
-
-  function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
-
-  function updateUI(){
-    var now = Date.now() / 1000;
-    var remaining = Math.ceil(state.blockUntil - now);
-    var disabled = !state.whitelisted && remaining > 0;
-
-    document.querySelectorAll('.rate-limited-btn').forEach(function(btn){
-      btn.disabled = disabled;
-      if(disabled){
-        if(!btn.dataset.origText) btn.dataset.origText = btn.textContent;
-        btn.textContent = btn.dataset.origText + ' (' + remaining + 's)';
-      }else{
-        if(btn.dataset.origText) btn.textContent = btn.dataset.origText;
-      }
-    });
-  }
-
-  function start(){
-    if(timer) clearInterval(timer);
-    updateUI();
-    timer = setInterval(function(){
-      var remaining = Math.ceil(state.blockUntil - Date.now()/1000);
-      if(remaining <= 0){
-        clearInterval(timer); timer = null;
-        state.blockUntil = 0;
-      }
-      updateUI(); save();
-    }, 200);
-  }
-
-  window.handleRateLimitResponse = function(response){
-    var wl = response.headers.get('X-RateLimit-Whitelisted') === '1';
-    var bu = parseFloat(response.headers.get('X-RateLimit-BlockUntil') || '0');
-    state.whitelisted = wl;
-    state.blockUntil = bu || 0;
-    save();
-    if(!wl && state.blockUntil > Date.now()/1000) start();
-    else updateUI();
-  };
-
-  if(!state.whitelisted && state.blockUntil > Date.now()/1000){
-    start();
-  }else{
-    updateUI();
-  }
-  // ★ 新增
-  window.isRateLimited = function(){
-    var now = Date.now() / 1000;
-    var remaining = Math.ceil(state.blockUntil - now);
-    return !state.whitelisted && remaining > 0;
-  };
-})();
-// ★ 如果从验证码页面跳回，恢复待提交的表单数据
 (function() {
-  var pendingMsg = sessionStorage.getItem('pending_msg');
-  var pendingNick = sessionStorage.getItem('pending_nick');
-  if (pendingMsg && pendingNick) {
-    document.getElementById('nick').value = pendingNick;
-    document.getElementById('aesKey').value = sessionStorage.getItem('pending_key') || '';
-    document.getElementById('msg').value = pendingMsg;
-    sessionStorage.removeItem('pending_nick');
-    sessionStorage.removeItem('pending_key');
-    sessionStorage.removeItem('pending_msg');
-    // 自动弹出确认框
-    showModal();
-  }
+    // ========== 1. 恢复 PQC 待提交数据 ==========
+    const pendingPQC = sessionStorage.getItem('pending_pqc_data');
+    if (pendingPQC) {
+        try {
+            const data = JSON.parse(pendingPQC);
+            if (confirm('检测到未提交的 PQC 留言，是否立即提交？')) {
+                fetch('/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                })
+                .then(res => {
+                    if (res.ok) {
+                        alert('✅ PQC 留言提交成功');
+                    } else {
+                        alert('❌ 提交失败，请重试');
+                    }
+                })
+                .catch(() => alert('请求失败'))
+                .finally(() => {
+                    sessionStorage.removeItem('pending_pqc_data');
+                });
+            } else {
+                sessionStorage.removeItem('pending_pqc_data');
+            }
+        } catch(e) {
+            console.warn('恢复 PQC 数据失败', e);
+            sessionStorage.removeItem('pending_pqc_data');
+        }
+    }
+
+    // ========== 2. 恢复 RSA 待提交数据（原有） ==========
+    const pendingMsg = sessionStorage.getItem('pending_msg');
+    const pendingNick = sessionStorage.getItem('pending_nick');
+    if (pendingMsg && pendingNick) {
+        document.getElementById('nick').value = pendingNick;
+        document.getElementById('aesKey').value = sessionStorage.getItem('pending_key') || '';
+        document.getElementById('msg').value = pendingMsg;
+        sessionStorage.removeItem('pending_nick');
+        sessionStorage.removeItem('pending_key');
+        sessionStorage.removeItem('pending_msg');
+        // 自动弹出确认框
+        showModal();
+    }
 })();
 </script>
 </body>
