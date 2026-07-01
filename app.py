@@ -1667,7 +1667,7 @@ def get_messages():
                         if msg_hash != identity_hash:
                             continue
                     else:
-                        continue  # 无哈希跳过 v3
+                        continue
                     server_time = parts[4]
                     msgs.append({
                         'seq': m.group(1),
