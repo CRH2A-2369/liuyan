@@ -614,6 +614,11 @@ async function render() {
                 }
                 content = CryptoJS.AES.decrypt(contentEnc, key32, opts).toString(CryptoJS.enc.Utf8) || '解密失败';
             }
+        } catch(e) {
+            console.warn(`[留言${m.seq}]`, e.message);
+            content = '❌ 解密失败: ' + e.message;
+            meta = '';
+        }
 
         // --- 构建 UI（与原有相同）---
         const metaDiv = document.createElement('div');
