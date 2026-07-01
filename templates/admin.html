@@ -574,7 +574,7 @@ async function render() {
                     const ipPlain = new TextDecoder().decode(decIp);
                     meta = '🌐 ' + ipPlain;
                 }
-            } else {
+            } else if (m.is_v2) {
                 // ---- v2 RSA 解密（原有逻辑） ----
                 const parts = m.rsa_iv.split('|');
                 const rk = parts[1] ? parts[1].replace(/\s+/g, '') : '';
@@ -594,12 +594,26 @@ async function render() {
                     const sm = jse.decrypt(serverEnc);
                     meta = sm ? '🌐🕒 ' + sm : '';
                 }
+            } else {
+                // ---- 最旧格式兼容（非v2非v3）----
+                const parts = m.rsa_iv.split('|');
+                const rk = parts[0] ? parts[0].replace(/\s+/g, '') : '';
+                const ivStr = (parts[1] || '').replace(/\s+/g, '');
+                const metaEnc = (m.meta_enc || '').replace(/\s+/g, '');
+                const contentEnc = (m.content_enc || '').replace(/\s+/g, '');
+                rawAES = jse.decrypt(rk);
+                if (!rawAES) throw new Error('RSA解密失败');
+                const key32 = deriveKey(rawAES);
+                const ivW = CryptoJS.enc.Base64.parse(ivStr);
+                const opts = { iv: ivW, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 };
+                const metaPlain = CryptoJS.AES.decrypt(metaEnc, key32, opts).toString(CryptoJS.enc.Utf8);
+                if (metaPlain) {
+                    meta = '📦 ' + metaPlain;
+                    const mp = metaPlain.split(' | ');
+                    nick = mp[2] || '匿名';
+                }
+                content = CryptoJS.AES.decrypt(contentEnc, key32, opts).toString(CryptoJS.enc.Utf8) || '解密失败';
             }
-        } catch(e) {
-            console.warn(`[留言${m.seq}]`, e.message);
-            content = '❌ 解密失败: ' + e.message;
-            meta = '';
-        }
 
         // --- 构建 UI（与原有相同）---
         const metaDiv = document.createElement('div');
