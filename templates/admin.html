@@ -103,7 +103,6 @@
   <button onclick="rotateRSAKey()" style="background:#d32f2f;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">🔄 重置 RSA 密钥</button>
   <button onclick="rotatePQCKey()" style="background:#9C27B0;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">🔄 重置 PQC 密钥</button>
   <span style="font-size:12px;color:#888;margin-left:10px">⚠️ 操作前请先导出明文数据，否则旧数据将无法解密</span>
-</button>
   <input type="file" id="import-plain-input" accept=".json" style="display:none" onchange="importPlainData(this)">
 </div>
 <div id="plain-status" style="margin:8px 0;padding:8px;background:#f0f0f0;border-radius:4px;font-size:13px;display:none;"></div>
@@ -591,7 +590,8 @@ async function render() {
                 if (p !== -1) { nick = plain.substring(0, p); content = plain.substring(p + 3); }
                 else { content = plain; }
                 if (serverEnc) {
-                    const sm = jse.decrypt(serverEnc);
+                    const raw = serverEnc.startsWith('RSA:') ? serverEnc.slice(4) : serverEnc;
+                    const sm = jse.decrypt(raw);
                     meta = sm ? '🌐🕒 ' + sm : '';
                 }
             } else {
@@ -1074,9 +1074,10 @@ async function exportPlainData() {
 
                     // 解密 server_enc 获取 IP 和时间
                     let ip = '127.0.0.1', time = serverTime;
-                    if (serverEnc && serverEnc.startsWith('RSA:')) {
+                    if (serverEnc) {
+                        const raw = serverEnc.startsWith('RSA:') ? serverEnc.slice(4) : serverEnc;
                         try {
-                            const dec = jse.decrypt(serverEnc.slice(4));
+                            const dec = jse.decrypt(raw);
                             if (dec) {
                                 const parts2 = dec.split(' | ');
                                 if (parts2.length >= 2) {
@@ -1108,6 +1109,11 @@ async function exportPlainData() {
                             }
                         }
                     } catch(e) {}
+                    // 跳过解密失败的消息，否则导入时 rawAES 为空会导致垃圾数据
+                    if (!rawAES) {
+                        console.warn('v2 留言解密失败，跳过导出:', path);
+                        continue;
+                    }
                     result.messages.push({
                         version: 'v2',
                         nick, content: contentText, ip, time,
@@ -1155,9 +1161,10 @@ async function exportPlainData() {
 
                 // 解密 server_enc
                 let ip = '127.0.0.1', time = '';
-                if (serverEnc && serverEnc.startsWith('RSA:')) {
+                if (serverEnc) {
+                    const raw = serverEnc.startsWith('RSA:') ? serverEnc.slice(4) : serverEnc;
                     try {
-                        const dec = jse.decrypt(serverEnc.slice(4));
+                        const dec = jse.decrypt(raw);
                         if (dec) {
                             const parts2 = dec.split(' | ');
                             if (parts2.length >= 2) {
@@ -1380,8 +1387,14 @@ async function importPlainData(input) {
 
         // 辅助加密函数
         const encryptRSA = (plain) => {
-            const enc = encryptor.encrypt(plain);
-            return enc ? 'RSA:' + enc : '';
+            if (!plain || !encryptor.getPublicKey()) return '';
+            try {
+                const enc = encryptor.encrypt(plain);
+                return enc ? 'RSA:' + enc : '';
+            } catch(e) {
+                console.error('RSA加密异常:', e.message);
+                return '';
+            }
         };
 
         // ---- 创建 ZIP ----
@@ -1516,17 +1529,22 @@ async function importPlainData(input) {
                         .map(b => b.toString(16).padStart(2, '0')).join('');
 
                     // 组装 v3 文件内容
+                    // 组装 v3 文件内容
+                    const encAESKeyB64 = btoa(String.fromCharCode(...encAESKeyResult.ciphertext));
+                    const encContentB64 = btoa(String.fromCharCode(...encContentResult.ciphertext));
+
                     const v3Header = [
                         'v3',
                         btoa(String.fromCharCode(...cipherText)),
                         btoa(String.fromCharCode(...encAESKeyResult.iv)),
                         btoa(String.fromCharCode(...encContentResult.iv)),
-                        btoa(String.fromCharCode(...encAESKeyResult.ciphertext)),
-                        btoa(String.fromCharCode(...encContentResult.ciphertext)),
+                        encAESKeyB64,
+                        encContentB64,
                         identityHash
                     ].join('|');
 
-                    const fileContent = v3Header + '\n' + JSON.stringify(ipData);
+                    // encAESKey 和 encContent 同时在独立行，供 exportPlainData 解析
+                    const fileContent = v3Header + '\n' + encAESKeyB64 + '\n' + encContentB64 + '\n' + JSON.stringify(ipData);
                     addFile(`留言/留言_${seq}.txt`, fileContent);
                     seq++;
                 } else {
@@ -1538,7 +1556,10 @@ async function importPlainData(input) {
                         rawAES = aesKeyBytes.toString(CryptoJS.enc.Base64);
                     }
                     const rsaKey = encryptor.encrypt(rawAES);
-                    if (!rsaKey) throw new Error('RSA加密失败');
+                    if (!rsaKey) {
+                        console.warn('RSA加密失败，密钥可能过长，跳过此消息:', msg.nick);
+                        continue;
+                    }
                     const iv = CryptoJS.lib.WordArray.random(16);
                     const ivBase64 = iv.toString(CryptoJS.enc.Base64);
                     const plainText = `${msg.nick} | ${msg.content}`;
@@ -1549,9 +1570,14 @@ async function importPlainData(input) {
                     const ip = msg.ip || '127.0.0.1';
                     const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
                     const serverMeta = `${ip} | ${time}`;
-                    const serverEnc = encryptRSA(serverMeta);
-                    const fileContent = `v2|${rsaKey}|${ivBase64}|${time}\n${encrypted}\n${serverEnc}`;
-                    addFile(`留言/留言_${seq}.txt`, fileContent);
+                    let serverEnc = encryptor.encrypt(serverMeta);
+                    if (!serverEnc) {
+                        serverEnc = encryptor.encrypt(serverMeta);  // 重试一次
+                    }
+                    if (!serverEnc) {
+                        serverEnc = encryptor.encrypt(`127.0.0.1 | ${time}`) || '';
+                    }
+                    const fileContent = `v2|${rsaKey}|${ivBase64}|${time}\n${encrypted}\n${serverEnc}`;                    addFile(`留言/留言_${seq}.txt`, fileContent);
                     seq++;
                 }
             }
