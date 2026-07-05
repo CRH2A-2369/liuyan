@@ -308,11 +308,11 @@ def _build_allowed_hosts():
     if FORCE_HOST:
         allowed.add(FORCE_HOST)
         allowed.add(FORCE_HOST.split(':')[0])
-    # 2. 当前请求的 Host（同源请求）
-    host = request.host
-    if host:
-        allowed.add(host)
-        allowed.add(host.split(':')[0])
+    # 2. 环境变量 SERVER_NAME（如 "example.com"）
+    server_name = os.environ.get('SERVER_NAME', '').strip()
+    if server_name:
+        allowed.add(server_name)
+        allowed.add(server_name.split(':')[0])
     # 3. 本地回环（开发/内网）
     port = request.environ.get('SERVER_PORT', '5033')
     for lh in ('127.0.0.1', 'localhost', '::1'):
@@ -409,7 +409,7 @@ for f, default in [
         atomic_write(f, _captcha_json.dumps(default, ensure_ascii=False))
 
 _captcha_lock = _captcha_threading.RLock()
-
+_captcha_text_cache = {}
 def _captcha_load_json(path):
     with _captcha_lock:
         try:
@@ -462,6 +462,7 @@ def _cleanup_challenges():
     expired = [k for k, v in challenges.items() if v.get('expires_at', 0) < now]
     for k in expired:
         del challenges[k]
+        _captcha_text_cache.pop(k, None)        # ★ 同步清理内存
     if expired:
         save_challenges(challenges)
 
@@ -623,9 +624,10 @@ def api_captcha_challenge():
     challenges[challenge_id] = {
         'answer_hash': answer_hash,
         'expires_at': time.time() + 300,
-        'ip': ip,
-        'text': text   # 存储明文用于生成 GIF
+        'ip': ip
+        # ★ 'text' 已移除，不再落盘
     }
+    _captcha_text_cache[challenge_id] = text   # ★ 仅存内存
     save_challenges(challenges)
     return jsonify({
         'captcha_needed': True,
@@ -642,8 +644,11 @@ def api_captcha_gif():
     challenge = challenges.get(challenge_id)
     if not challenge or challenge.get('expires_at', 0) < time.time():
         return "Invalid or expired", 404
+    text = _captcha_text_cache.get(challenge_id)   # ★ 从内存读
+    if not text:
+        return "Invalid or expired", 404
     config = get_captcha_config()
-    gif_data = generate_captcha_gif(challenge['text'], config)
+    gif_data = generate_captcha_gif(text, config)   # ★ 用内存中的 text
     return Response(gif_data, mimetype='image/gif')
 
 @app.route('/api/captcha/verify', methods=['POST'])
@@ -675,6 +680,7 @@ def api_captcha_verify():
     with _captcha_lock:
         challenges = _captcha_load_json(CAPTCHA_CHALLENGES_FILE)
         challenges.pop(challenge_id, None)
+        _captcha_text_cache.pop(challenge_id, None)
         _captcha_save_json(CAPTCHA_CHALLENGES_FILE, challenges)
 
     expiry = mark_captcha_verified(ip)
@@ -998,6 +1004,29 @@ def encrypt_ip(ip):
         return 'RSA:' + encrypted
     return 'PLAIN:' + ip
 
+def pqc_encrypt_admin_ip(ip, server_time):
+    """用 PQC 公钥加密管理员 IP|时间，返回 JSON 字符串"""
+    try:
+        pub_bytes = load_pqc_public_key_bytes()
+        if pub_bytes is None:
+            return None
+        shared_secret, ciphertext = ML_KEM_1024.encaps(pub_bytes)
+        key = hashlib.sha256(shared_secret).digest()
+        iv = secrets.token_bytes(16)
+        plain = f"{ip} | {server_time}"
+        pad_len = 16 - (len(plain.encode()) % 16)
+        padded = plain.encode() + bytes([pad_len] * pad_len)
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        enc = cipher.encrypt(padded)
+        return base64.b64encode(json.dumps({
+            'ct': base64.b64encode(ciphertext).decode(),
+            'iv': base64.b64encode(iv).decode(),
+            'enc': base64.b64encode(enc).decode()
+        }).encode()).decode()
+    except Exception as e:
+        app.logger.error(f"PQC IP加密失败: {e}")
+        return None
+
 def check_regex_disable(content):
     rule = load_rule()
     if not rule:
@@ -1135,9 +1164,13 @@ def security_checks():
     if sha512(get_client_ip()) in load_blacklist_hashes():
         return "IP已被封禁，拒绝访问", 403
     if session.get('admin'):
-        stored = session.get('fp')
-        if stored and stored != get_fp():
+        stored_fp = session.get('fp')
+        stored_ip = session.get('admin_ip')
+        current_ip = get_client_ip()
+        if (stored_fp and stored_fp != get_fp()) or \
+           (stored_ip and stored_ip != current_ip):
             session.clear()
+            return "会话安全校验失败，请重新登录", 401
 
 @app.after_request
 def secure_headers(response):
@@ -1250,6 +1283,7 @@ def admin_verify():
     session['admin_has_key'] = True
     session['fp'] = get_fp()
     session.pop('pqc_challenge', None)
+    session['admin_ip'] = get_client_ip()
     generate_csrf()
     return jsonify({'status': 'ok'})
 
@@ -2976,9 +3010,14 @@ def chat_send():
         if not safe_chat_hash(receiver_hash):
             return rate_limit_json({"error": "接收方哈希格式无效"}, 400, in_wl, block_until)
 
-        # 校验 sender_pub 基本格式（PEM RSA公钥）
-        if not (sender_pub.startswith('-----BEGIN') and 'PUBLIC KEY' in sender_pub):
-            return rate_limit_json({"error": "发送方公钥格式无效"}, 400, in_wl, block_until)
+        version = data.get('version', 'v2')
+
+        # ★ v2 才校验 PEM RSA 公钥格式；v3 的 sender_pub 是 PQC 指纹标识
+        if version != 'v3':
+            if not (sender_pub.startswith('-----BEGIN') and 'PUBLIC KEY' in sender_pub):
+                return rate_limit_json({"error": "发送方公钥格式无效"}, 400, in_wl, block_until)
+            if not (sender_pub.startswith('-----BEGIN') and 'PUBLIC KEY' in sender_pub):
+                return rate_limit_json({"error": "发送方公钥格式无效"}, 400, in_wl, block_until)
 
         # 限制长度
         if len(sender_pub) > 2048:
@@ -2990,14 +3029,38 @@ def chat_send():
 
         # 服务器添加 IP 和时间
         server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
-        admin_ip_enc = rsa_encrypt_report(ip)
+        if version == 'v3':
+            pqc_ip = pqc_encrypt_admin_ip(ip, server_time)
+            admin_ip_enc = ('PQC_IP:' + pqc_ip) if pqc_ip else ('RSA:' + rsa_encrypt_report(ip))
+        else:
+            admin_ip_enc = rsa_encrypt_report(ip)
 
-        content = (
-            f"v2|{sender_pub}|{iv}|{expire_at}\n"
-            f"{wrapped_key}\n"
-            f"{aes_content}\n"
-            f"{admin_ip_enc} | {server_time}"
-        )
+        if version == 'v3':
+            pqc_ciphertext = (data.get('pqc_ciphertext') or '').replace('\n','').replace('\r','').strip()
+            iv_shared      = (data.get('iv_shared')      or '').replace('\n','').replace('\r','').strip()
+            iv_content     = (data.get('iv_content')     or '').replace('\n','').replace('\r','').strip()
+            encAESKey_val  = (data.get('encAESKey')      or '').replace('\n','').replace('\r','').strip()
+            encContent_val = (data.get('encContent')     or '').replace('\n','').replace('\r','').strip()
+            sender_pqc_pub = (data.get('sender_pqc_pub') or '').replace('\n','').replace('\r','').strip()
+            content = (
+                f"v3|{sender_pub}|{iv}|{expire_at}\n"
+                f"{wrapped_key}\n"
+                f"{aes_content}\n"
+                f"{admin_ip_enc} | {server_time}\n"
+                f"{pqc_ciphertext}\n"
+                f"{iv_shared}\n"
+                f"{iv_content}\n"
+                f"{encAESKey_val}\n"
+                f"{encContent_val}\n"
+                f"{sender_pqc_pub}"
+            )
+        else:
+            content = (
+                f"v2|{sender_pub}|{iv}|{expire_at}\n"
+                f"{wrapped_key}\n"
+                f"{aes_content}\n"
+                f"{admin_ip_enc} | {server_time}"
+            )
 
         with _file_lock:
             seq = get_chat_seq_unlocked(receiver_hash)
@@ -3011,7 +3074,7 @@ def chat_send():
 
 
 @app.route('/api/chat/poll', methods=['POST'])
-@require_captcha
+@require_csrf
 def chat_poll():
     """轮询新消息：前端上传公钥哈希列表 + sender_hashes + since时间戳"""
     rl = check_rate_limit('read')
@@ -3061,16 +3124,22 @@ def chat_poll():
             except Exception:
                 continue
 
-            if len(lines) < 4 or not lines[0].startswith('v2|'):
+            if len(lines) < 4:
                 continue
-
+            is_v3 = lines[0].startswith('v3|')
+            if not is_v3 and not lines[0].startswith('v2|'):
+                continue
             parts = lines[0].split('|')
             if len(parts) < 3:
                 continue
 
             # ★ 双路径匹配：接收方哈希 || 发送方公钥哈希
             sender_pub = parts[1] if len(parts) >= 2 else ''
-            sender_hash = hashlib.sha256(sender_pub.encode()).hexdigest()[:16] if sender_pub else ''
+            # ★ v3 消息用 sender_pqc_pub 计算哈希，与前端保持一致
+            if is_v3 and len(lines) >= 10 and lines[9].strip():
+                sender_hash = hashlib.sha256(lines[9].strip().encode()).hexdigest()[:16]
+            else:
+                sender_hash = hashlib.sha256(sender_pub.encode()).hexdigest()[:16] if sender_pub else ''
 
             if fhash not in valid_hashes and sender_hash not in valid_sender_hashes:
                 continue
@@ -3083,7 +3152,7 @@ def chat_poll():
             if since and server_time <= since:
                 continue
 
-            messages.append({
+            msg = {
                 'filename': fname,
                 'receiver_hash': fhash,
                 'sender_pub': sender_pub,
@@ -3092,8 +3161,17 @@ def chat_poll():
                 'aes_content': lines[2],
                 'admin_ip': admin_parts[0].strip(),
                 'server_time': server_time,
-                'time': server_time
-            })
+                'time': server_time,
+                'version': 'v3' if is_v3 else 'v2'
+            }
+            if is_v3 and len(lines) >= 10:
+                msg['pqc_ciphertext'] = lines[4]
+                msg['iv_shared']      = lines[5]
+                msg['iv_content']     = lines[6]
+                msg['encAESKey']      = lines[7]
+                msg['encContent']     = lines[8]
+                msg['sender_pqc_pub'] = lines[9]
+            messages.append(msg)
     except Exception:
         pass
     # 限制返回数量（最新50条）
@@ -3136,7 +3214,7 @@ def chat_report():
             return rate_limit_json({"error": "文件名格式无效"}, 400, in_wl, block_until)
 
         # 校验 reporter_pub 基本格式
-        if not (reporter_pub.startswith('-----BEGIN') and 'PUBLIC KEY' in reporter_pub):
+        if not reporter_pub.startswith('PQC:') and not (reporter_pub.startswith('-----BEGIN') and 'PUBLIC KEY' in reporter_pub):
             return rate_limit_json({"error": "举报者公钥格式无效"}, 400, in_wl, block_until)
 
         # 检查消息文件是否存在
@@ -3241,8 +3319,10 @@ def chat_revoke_challenge():
         if not re.match(r'^[a-f0-9]{16}_\d{4}\.txt$', filename):
             return rate_limit_json({"error": "文件名格式无效"}, 400, in_wl, block_until)
 
-        if not (sender_pub.startswith('-----BEGIN') and 'PUBLIC KEY' in sender_pub):
-            return rate_limit_json({"error": "发送方公钥格式无效"}, 400, in_wl, block_until)
+        version = data.get('version', 'v2')
+        if version != 'v3':
+            if not (sender_pub.startswith('-----BEGIN') and 'PUBLIC KEY' in sender_pub):
+                return rate_limit_json({"error": "发送方公钥格式无效"}, 400, in_wl, block_until)
 
         if is_message_reported(filename):
             return rate_limit_json({"error": "该消息已被举报，无法撤回"}, 403, in_wl, block_until)
@@ -3258,7 +3338,8 @@ def chat_revoke_challenge():
         except Exception:
             return rate_limit_json({"error": "读取消息失败"}, 500, in_wl, block_until)
 
-        if not first_line.startswith('v2|'):
+        is_v3 = first_line.startswith('v3|')
+        if not is_v3 and not first_line.startswith('v2|'):
             return rate_limit_json({"error": "消息格式异常"}, 500, in_wl, block_until)
 
         parts = first_line.split('|')
@@ -3272,7 +3353,38 @@ def chat_revoke_challenge():
                 403, in_wl, block_until
             )
 
-        # 生成挑战 nonce，用发送方公钥加密
+        # ★ v3: PQC 挑战方式
+        if is_v3:
+            nonce = secrets.token_urlsafe(32)
+            try:
+                # 从文件第10行读取发送方 PQC 公钥
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    all_lines = [l.strip() for l in f.readlines() if l.strip()]
+                if len(all_lines) < 10:
+                    return rate_limit_json({"error": "v3消息格式不完整"}, 500, in_wl, block_until)
+                sender_pqc_pub_b64 = all_lines[9]
+                sender_pqc_pub_bytes = base64.b64decode(sender_pqc_pub_b64)
+                shared, ct = ML_KEM_1024.encaps(sender_pqc_pub_bytes)
+                key = hashlib.sha256(shared).digest()
+                iv = secrets.token_bytes(16)
+                pad_len = 16 - (len(nonce.encode()) % 16)
+                padded = nonce.encode() + bytes([pad_len] * pad_len)
+                cipher = AES.new(key, AES.MODE_CBC, iv)
+                enc_nonce = cipher.encrypt(padded)
+                challenge = base64.b64encode(json.dumps({
+                    'ct': base64.b64encode(ct).decode(),
+                    'iv': base64.b64encode(iv).decode(),
+                    'enc': base64.b64encode(enc_nonce).decode()
+                }).encode()).decode()
+            except Exception:
+                return rate_limit_json({"error": "PQC挑战生成失败"}, 500, in_wl, block_until)
+            revoke_token = _sign_revoke_token(filename, nonce)
+            return rate_limit_json(
+                {"challenge": challenge, "filename": filename, "token": revoke_token, "version": "v3"},
+                200, in_wl, block_until
+            )
+
+        # ★ v2: RSA 挑战方式（原逻辑）
         nonce = secrets.token_urlsafe(32)
         try:
             pub_for_encrypt = sender_pub
@@ -3292,6 +3404,7 @@ def chat_revoke_challenge():
         except Exception:
             return rate_limit_json({"error": "无法加密挑战（公钥无效）"}, 500, in_wl, block_until)
 
+        revoke_token = _sign_revoke_token(filename, nonce)
         # ★ 生成 HMAC 签名的 token（替代 session）
         revoke_token = _sign_revoke_token(filename, nonce)
 
@@ -3411,12 +3524,15 @@ def admin_chat_messages():
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 lines = [l.strip() for l in f.readlines() if l.strip()]
-            if len(lines) < 4 or not lines[0].startswith('v2|'):
+            if len(lines) < 4:
+                return jsonify({'messages': []})
+            is_v3_detail = lines[0].startswith('v3|')
+            if not is_v3_detail and not lines[0].startswith('v2|'):
                 return jsonify({'messages': []})
             parts = lines[0].split('|')
             admin_parts = lines[3].split('|', 1)
             m = re.match(r'^([a-f0-9]{16})_(\d+)\.txt$', filter_filename)
-            return jsonify({'messages': [{
+            result = {
                 'filename': filter_filename,
                 'receiver_hash': m.group(1) if m else '',
                 'sender_pub': parts[1] if len(parts) >= 2 else '',
@@ -3424,8 +3540,17 @@ def admin_chat_messages():
                 'wrapped_key': lines[1],
                 'aes_content': lines[2],
                 'admin_ip': admin_parts[0].strip() if len(admin_parts) >= 1 else '',
-                'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else ''
-            }]})
+                'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else '',
+                'version': 'v3' if is_v3_detail else 'v2'
+            }
+            if is_v3_detail and len(lines) >= 10:
+                result['pqc_ciphertext'] = lines[4]
+                result['iv_shared']      = lines[5]
+                result['iv_content']     = lines[6]
+                result['encAESKey']      = lines[7]
+                result['encContent']     = lines[8]
+                result['sender_pqc_pub'] = lines[9]
+            return jsonify({'messages': [result]})
         except Exception:
             return jsonify({'messages': []})
 
@@ -3454,7 +3579,8 @@ def admin_chat_messages():
             except Exception:
                 continue
 
-            if not first_line.startswith('v2|'):
+            is_v3 = first_line.startswith('v3|')
+            if not is_v3 and not first_line.startswith('v2|'):
                 continue
             parts = first_line.split('|')
             admin_parts = last_line.split('|', 1)
@@ -3464,7 +3590,9 @@ def admin_chat_messages():
                 'receiver_hash': fhash,
                 'sender_pub': parts[1] if len(parts) >= 2 else '',
                 'admin_ip': admin_parts[0].strip() if len(admin_parts) >= 1 else '',
-                'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else ''
+                'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else '',
+                'wrapped_key': lines[1].strip() if len(lines) >= 2 else '',
+                'version': 'v3' if is_v3 else 'v2'
             })
 
             if len(messages) >= 200:
@@ -3606,20 +3734,31 @@ def admin_get_message_raw(filename):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             lines = [l.strip() for l in f.readlines() if l.strip()]
-        if len(lines) < 4 or not lines[0].startswith('v2|'):
+        is_v3 = lines[0].startswith('v3|')
+        if len(lines) < 4 or (not is_v3 and not lines[0].startswith('v2|')):
             return jsonify({'error': '消息格式异常'}), 500
 
         parts = lines[0].split('|')
         admin_parts = lines[3].split('|', 1)
-        return jsonify({
+        is_v3 = lines[0].startswith('v3|')
+        result = {
             'filename': filename,
             'sender_pub': parts[1] if len(parts) >= 2 else '',
             'iv': parts[2] if len(parts) >= 3 else '',
             'wrapped_key': lines[1],
             'aes_content': lines[2],
             'admin_ip': admin_parts[0].strip(),
-            'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else ''
-        })
+            'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else '',
+            'version': 'v3' if is_v3 else 'v2'
+        }
+        if is_v3 and len(lines) >= 10:
+            result['pqc_ciphertext'] = lines[4]
+            result['iv_shared']      = lines[5]
+            result['iv_content']     = lines[6]
+            result['encAESKey']      = lines[7]
+            result['encContent']     = lines[8]
+            result['sender_pqc_pub'] = lines[9]
+        return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 @app.route('/api/admin/chat/retention', methods=['GET', 'POST'])
@@ -3849,8 +3988,15 @@ def delete_file():
     if not rel_path:
         return jsonify({'error': '缺少文件路径'}), 400
 
-    if '..' in rel_path or rel_path.startswith('/'):
-        return jsonify({'error': '非法路径'}), 400
+    full_path = safe_resolve(FILES_DIR, os.path.basename(rel_path)) if '/' not in rel_path.replace('\\','/') else None
+    if not full_path:
+        # 如果包含子目录，逐段校验
+        parts = rel_path.replace('\\', '/').split('/')
+        full_path = FILES_DIR
+        for part in parts:
+            full_path = safe_resolve(full_path, part)
+            if not full_path:
+                return jsonify({'error': '非法路径'}), 400
 
     full_path = os.path.join(FILES_DIR, rel_path)
     if not os.path.exists(full_path):
@@ -4002,6 +4148,8 @@ def admin_request_download():
 
     if '..' in rel_path or rel_path.startswith('/'):
         return jsonify({'error': '非法路径'}), 400
+
+    file_path = os.path.join(FILES_DIR, rel_path)
 
     file_path = os.path.join(FILES_DIR, rel_path)
     if not os.path.isfile(file_path):
