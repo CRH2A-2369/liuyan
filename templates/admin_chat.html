@@ -5,6 +5,13 @@
   <title>聊天审计</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js" integrity="sha512-E8QSvWZ0eCLGk4km3hxSsNmGWbLtSCSUcewDQPQWZF6pEU8GlT8a5fF32wOl1i8ftdMhssTrF/OhyGWwonTcXA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
+  <script type="importmap">
+  {
+      "imports": {
+          "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+      }
+  }
+  </script>
   <style>
     body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px;color:#333}
     h2{margin:0 0 16px}
@@ -83,6 +90,20 @@
 // ========== 工具函数 ==========
 function esc(s){ return String(s||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
 
+function bytesToBase64(bytes) {
+  var binary = '';
+  for (var i = 0; i < bytes.length; i++) { binary += String.fromCharCode(bytes[i]); }
+  return btoa(binary);
+}
+function base64ToBytes(b64) {
+  var binary = atob(b64);
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+  return bytes;
+}
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+}
 // ========== 鉴权初始化 ==========
 var adminJse = null;
 try {
@@ -90,6 +111,16 @@ try {
   if (savedKey) {
     adminJse = new JSEncrypt();
     adminJse.setPrivateKey(savedKey);
+  }
+} catch(e) {}
+
+var adminPqcPrivBytes = null;
+try {
+  var savedPqcKey = sessionStorage.getItem('admin_pqc_priv_key');
+  if (savedPqcKey) {
+    var binary = atob(savedPqcKey);
+    adminPqcPrivBytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) adminPqcPrivBytes[i] = binary.charCodeAt(i);
   }
 } catch(e) {}
 
@@ -116,14 +147,12 @@ async function init() {
       fetch('/api/footer').then(function(r){return r.text();}).then(function(t){
         document.getElementById('footer').textContent = t;
       });
+    } else if (status.logged_in && !status.has_key) {
+      document.getElementById('login-wall').innerHTML = '<h2>⚠️ 密钥未加载</h2><p>请<a href="/admin">重新登录管理员面板</a>上传RSA私钥和PQC私钥</p>';
+      document.getElementById('main-content').classList.add('hidden');
     } else {
       document.getElementById('login-wall').style.display = 'block';
       document.getElementById('main-content').classList.add('hidden');
-      if (status.logged_in && !status.has_key) {
-        fetch('/api/admin/logout', {credentials:'same-origin'}).then(function(){
-          window.location.href = '/admin';
-        });
-      }
     }
   } catch(e) {
     console.error('Init:', e);
@@ -132,6 +161,74 @@ async function init() {
 }
 init();
 
+// ========== IP 解密显示 ==========
+function formatAdminIp(encryptedIp) {
+  if (!encryptedIp) return '(无)';
+  if (encryptedIp.startsWith('PQC_IP:')) {
+    return '<span class="mono" style="color:#9C27B0;cursor:pointer" title="PQC加密，点击详情查看解密">🔮 PQC加密</span>';
+  }
+  // ★ 新增：处理 RSA: 前缀格式（兼容旧数据或用 encrypt_ip 写入的 IP）
+  if (encryptedIp.startsWith('RSA:')) {
+    if (adminJse) {
+      try {
+        var dec = adminJse.decrypt(encryptedIp.substring(4));
+        if (dec) return esc(dec);
+      } catch(e) {}
+    }
+    return esc(encryptedIp) + ' <span style="color:#f44336;font-size:10px">(解密失败)</span>';
+  }
+  if (encryptedIp.startsWith('PLAIN:')) {
+    return esc(encryptedIp.substring(6));
+  }
+  // 纯 base64（chat_send 直接 rsa_encrypt_report 的输出，无前缀）
+  if (adminJse) {
+    try {
+      var dec = adminJse.decrypt(encryptedIp);
+      if (dec) return esc(dec);
+    } catch(e) {}
+  }
+  return esc(encryptedIp) + ' <span style="color:#f44336;font-size:10px">(解密失败)</span>';
+}
+
+async function decryptAdminIpDetail(encryptedIp) {
+  if (!encryptedIp) return '(无)';
+  if (encryptedIp.startsWith('PQC_IP:')) {
+    if (adminPqcPrivBytes) {
+      try {
+        var { ml_kem1024 } = await import('@noble/post-quantum/ml-kem');
+        var raw = JSON.parse(atob(encryptedIp.substring(7)));
+        var shared = ml_kem1024.decapsulate(base64ToBytes(raw.ct), adminPqcPrivBytes);
+        // ★ 修复：直接对 Uint8Array 做 SHA256，与 Python hashlib.sha256(raw_bytes) 一致
+        var sharedWa = CryptoJS.lib.WordArray.create(shared);
+        var key = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(sharedWa).toString().substring(0, 64));
+        var plain = CryptoJS.AES.decrypt(raw.enc, key, {
+          iv: CryptoJS.enc.Base64.parse(raw.iv),
+          mode: CryptoJS.mode.CBC,
+          padding: CryptoJS.pad.Pkcs7
+        }).toString(CryptoJS.enc.Utf8);
+        if (plain) return esc(plain);
+      } catch(e) {}
+    }
+    return esc(encryptedIp) + ' <span style="color:#f44336;font-size:10px">(PQC解密失败)</span>';
+  }
+  if (encryptedIp.startsWith('RSA:')) {
+    if (adminJse) {
+      try {
+        var dec = adminJse.decrypt(encryptedIp.substring(4));
+        if (dec) return esc(dec);
+      } catch(e) {}
+    }
+    return esc(encryptedIp) + ' <span style="color:#f44336;font-size:10px">(解密失败)</span>';
+  }
+  if (encryptedIp.startsWith('PLAIN:')) return esc(encryptedIp.substring(6));
+  if (adminJse) {
+    try {
+      var dec = adminJse.decrypt(encryptedIp);
+      if (dec) return esc(dec);
+    } catch(e) {}
+  }
+  return esc(encryptedIp) + ' <span style="color:#f44336;font-size:10px">(解密失败)</span>';
+}
 // ========== 消息列表 ==========
 function loadMessages(){
   var hash = document.getElementById('filter-hash').value.trim();
@@ -144,14 +241,18 @@ function loadMessages(){
       container.innerHTML = '<p style="color:#888;text-align:center;padding:30px">暂无消息</p>';
       return;
     }
-    var html = '<table><thead><tr><th>文件名</th><th>接收方哈希</th><th>发送方公钥</th><th>管理员加密IP</th><th>服务器时间</th><th>操作</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>文件名</th><th>接收方哈希</th><th>发送方公钥</th><th>管理员加密IP</th><th>服务器时间</th><th>加密</th><th>操作</th></tr></thead><tbody>';
     data.messages.forEach(function(m){
       html += '<tr>';
       html += '<td class="mono">'+esc(m.filename)+'</td>';
       html += '<td class="mono">'+esc(m.receiver_hash)+'</td>';
-      html += '<td class="mono" style="max-width:150px;overflow:hidden;text-overflow:ellipsis">'+esc((m.sender_pub||'').substring(0,80)+'...')+'</td>';
-      html += '<td class="mono">'+esc(m.admin_ip)+'</td>';
+      var isPqc = !!(m.version==='v3' || m.pqc_ciphertext || m.encAESKey || m.wrapped_key === 'PQC_V3');
+      var senderDisplay = isPqc ? '🔮 PQC:'+esc((m.sender_pub||'').substring(0,70)) : esc((m.sender_pub||'').substring(0,80)+'...');
+      html += '<td class="mono" style="max-width:150px;overflow:hidden;text-overflow:ellipsis">'+senderDisplay+'</td>';
+      // ★ 给 td 加唯一 ID，方便异步回填
+      html += '<td class="mono" id="ip-'+esc(m.filename)+'">'+formatAdminIp(m.admin_ip)+'</td>';
       html += '<td>'+esc(m.server_time)+'</td>';
+      html += '<td>' + (isPqc ? '🔮PQC' : '🔐RSA') + '</td>';
       html += '<td>';
       html += '<button class="btn-blue" onclick="viewDetail(\''+esc(m.filename)+'\')">详情</button> ';
       html += '<button class="btn-red" onclick="deleteMsg(\''+esc(m.filename)+'\')">删除</button>';
@@ -160,6 +261,15 @@ function loadMessages(){
     });
     html += '</tbody></table>';
     container.innerHTML = html;
+
+    // ★ 异步解密 PQC IP 并回填到表格单元格
+    data.messages.forEach(async function(m) {
+      if (m.admin_ip && m.admin_ip.startsWith('PQC_IP:')) {
+        var dec = await decryptAdminIpDetail(m.admin_ip);
+        var td = document.getElementById('ip-' + m.filename);
+        if (td) td.innerHTML = dec;
+      }
+    });
   }).catch(function(e){
     document.getElementById('table-container').innerHTML = '<p style="color:red">加载失败: '+esc(e.message)+'</p>';
   });
@@ -168,18 +278,35 @@ function loadMessages(){
 function viewDetail(filename){
   authFetch('/api/admin/chat/messages?filename=' + encodeURIComponent(filename))
     .then(function(r){ return r.json(); })
-    .then(function(data){
+    .then(async function(data){
       var msgs = data.messages || [];
       if(msgs.length === 0){ alert('未找到'); return; }
       var m = msgs[0];
       var html = '';
+
+      // ★ PQC (v3) 检测和展示
+      var isV3 = !!(m.version==='v3' || m.pqc_ciphertext || m.encAESKey || m.wrapped_key === 'PQC_V3');
+      if (isV3) {
+        html += '<p><b>加密方式:</b> <span style="color:#9C27B0;font-weight:bold">🔮 PQC (v3)</span></p>';
+        html += '<p><b>PQC密文包裹的第一层AES密钥:</b></p><pre class="mono" style="max-height:80px;overflow-y:auto">'+esc(m.pqc_ciphertext||'')+'</pre>';
+        html += '<p><b>🔮 发送方PQC公钥:</b></p><pre class="mono" style="max-height:80px;overflow-y:auto;background:#f3e5f5">'+esc(m.sender_pqc_pub||'')+'</pre>';
+        html += '<p><b>IV Shared:</b> <span class="mono">'+esc(m.iv_shared||'')+'</span></p>';
+        html += '<p><b>第一层AES密钥加密的第二层AES密钥:</b></p><pre class="mono" style="max-height:80px;overflow-y:auto">'+esc(m.encAESKey||'')+'</pre>';
+        html += '<p><b>IV Content:</b> <span class="mono">'+esc(m.iv_content||m.iv||'')+'</span></p>';
+        html += '<p><b>第二层AES密钥加密的内容:</b></p><pre class="mono" style="max-height:100px;overflow-y:auto">'+esc(m.encContent||m.aes_content||'')+'</pre>';
+        html += '<hr>';
+      }
+      // 原有 v2 字段展示
       html += '<p><b>文件名:</b> <span class="mono">'+esc(m.filename)+'</span></p>';
       html += '<p><b>接收方公钥哈希:</b> <span class="mono">'+esc(m.receiver_hash)+'</span></p>';
-      html += '<p><b>发送方公钥 (v2头部):</b></p><pre class="mono" style="max-height:100px;overflow-y:auto">'+esc(m.sender_pub)+'</pre>';
+      if (!isV3) {
+        html += '<p><b>发送方公钥 (RSA):</b></p><pre class="mono" style="max-height:100px;overflow-y:auto">'+esc(m.sender_pub)+'</pre>';
+      }
       html += '<p><b>AES IV:</b> <span class="mono">'+esc(m.iv)+'</span></p>';
       html += '<p><b>RSA包裹的AES密钥:</b></p><pre class="mono" style="max-height:80px;overflow-y:auto">'+esc(m.wrapped_key)+'</pre>';
       html += '<p><b>AES密文:</b></p><pre class="mono" style="max-height:100px;overflow-y:auto">'+esc(m.aes_content)+'</pre>';
-      html += '<p><b>管理员加密IP:</b> <span class="mono">'+esc(m.admin_ip)+'</span></p>';
+      var adminIpDisplay = await decryptAdminIpDetail(m.admin_ip);  // ← 异步解密
+      html += '<p><b>用户IP:</b> <span class="mono">'+adminIpDisplay+'</span></p>';
       html += '<p><b>服务器时间:</b> '+esc(m.server_time)+'</p>';
       document.getElementById('detail-content').innerHTML = html;
       document.getElementById('detail-modal').style.display = 'flex';
@@ -239,9 +366,8 @@ function loadReports(){
       html += '<td>'+esc(r.server_time)+'</td>';
       html += '<td>'+statusLabel+'</td>';
       html += '<td>';
-      if(r.status === 'pending' || r.status === 'reviewed'){
+      // ★ 管理员任何时候都应该能解密查看举报
       html += '<button class="btn-blue" onclick="decryptReport(\''+esc(r.report_id)+'\')">🔓 解密查看</button> ';
-      }
       html += '<button class="btn-red" onclick="resolveReport(\''+esc(r.report_id)+'\',true)">✔ 标记解决</button> ';
       html += '<button class="btn-red" style="background:#d32f2f" onclick="deleteReportPermanent(\''+esc(r.report_id)+'\')">🗑 删除</button>';
       html += '</td>';
@@ -274,10 +400,23 @@ function decryptReport(reportId){
 
     authFetch('/api/admin/chat/message/' + encodeURIComponent(report.filename))
       .then(function(r){return r.json();})
-      .then(function(msg){
+      .then(async function(msg){
         if(msg.error){ alert(msg.error); return; }
+      var isV3 = msg.pqc_ciphertext && msg.encAESKey;
+      var decryptedContent = '';
 
-        var decryptedContent = '';
+      if (isV3) {
+        // PQC举报：aesKeyRaw 就是 reporter 用管理员 RSA 公钥加密的 msgKeyB64
+        // 直接用它对 encContent 做 AES 解密，无需再做 PQC 解封装
+        try {
+          var msgKeyHex2 = CryptoJS.enc.Hex.parse(bytesToHex(base64ToBytes(aesKeyRaw)));
+          decryptedContent = CryptoJS.AES.decrypt(
+            msg.encContent || msg.aes_content,
+            msgKeyHex2,
+            {iv: CryptoJS.enc.Base64.parse(msg.iv_content || msg.iv), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7}
+          ).toString(CryptoJS.enc.Utf8);
+        } catch(ex) { decryptedContent = '<PQC解密异常: '+esc(ex.message)+'>'; }
+      } else {
         try {
           var keyBytes = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(aesKeyRaw).toString());
           var ivBytes = CryptoJS.enc.Base64.parse(msg.iv);
@@ -286,24 +425,32 @@ function decryptReport(reportId){
         } catch(ex){
           decryptedContent = '<解密失败: '+esc(ex.message)+'>';
         }
+      }
 
-        var html = '<div style="position:relative">';
-        html += '<h4>📋 举报详情</h4>';
-        html += '<p><b>举报ID:</b> '+esc(report.report_id)+'</p>';
-        html += '<p><b>消息文件:</b> <span class="mono">'+esc(report.filename)+'</span></p>';
-        html += '<p><b>举报时间:</b> '+esc(report.server_time)+'</p>';
-        html += '<p><b>举报理由:</b> <span style="color:#f44336">'+esc(reason||'(解密失败)')+'</span></p>';
-        html += '<p><b>当前状态:</b> '+esc(report.status)+'</p>';
-        html += '<hr>';
-        html += '<p><b>📨 被举报消息内容:</b></p>';
-        html += '<pre class="mono" style="background:#fff3e0;padding:12px;border-radius:4px;max-height:200px;overflow-y:auto;white-space:pre-wrap">'+esc(decryptedContent)+'</pre>';
-        html += '<p><b>AES密钥:</b> <span class="mono">'+esc(aesKeyRaw)+'</span></p>';
-        html += '<p><b>IV:</b> <span class="mono">'+esc(msg.iv)+'</span></p>';
-        html += '<hr>';
-        html += '<p><b>📝 管理员回复:</b></p>';
-        html += '<textarea id="admin-reply-text" style="width:100%;height:80px" placeholder="输入回复内容...">'+esc(report.admin_reply||'')+'</textarea>';
-        html += '<br><button class="btn-blue" id="btn-submit-reply">发送回复</button>';
-        html += '</div>';
+      // ★ HTML 构建（对 v2 和 v3 通用）
+      var html = '<div style="position:relative">';
+      html += '<h4>📋 举报详情</h4>';
+      html += '<p><b>举报ID:</b> '+esc(report.report_id)+'</p>';
+      html += '<p><b>消息文件:</b> <span class="mono">'+esc(report.filename)+'</span></p>';
+      html += '<p><b>举报时间:</b> '+esc(report.server_time)+'</p>';
+      html += '<p><b>举报理由:</b> <span style="color:#f44336">'+esc(reason||'(解密失败)')+'</span></p>';
+      html += '<p><b>当前状态:</b> '+esc(report.status)+'</p>';
+      html += '<p><b>加密方式:</b> '+(isV3?'🔮 PQC':'🔐 RSA')+'</p>';
+      html += '<hr>';
+      html += '<p><b>📨 被举报消息内容:</b></p>';
+      html += '<pre class="mono" style="background:#fff3e0;padding:12px;border-radius:4px;max-height:200px;overflow-y:auto;white-space:pre-wrap">'+esc(decryptedContent)+'</pre>';
+      html += '<p><b>AES密钥:</b> <span class="mono">'+esc(aesKeyRaw||'(PQC封装)')+'</span></p>';
+      html += '<p><b>IV:</b> <span class="mono">'+esc(msg.iv||msg.iv_content||'')+'</span></p>';
+      if (isV3) {
+          html += '<p><b>🔮 PQC密文:</b> <span class="mono" style="font-size:10px">'+esc((msg.pqc_ciphertext||'').substring(0,80))+'...</span></p>';
+          html += '<p><b>🔮 加密的AES密钥:</b> <span class="mono" style="font-size:10px">'+esc((msg.encAESKey||'').substring(0,60))+'...</span></p>';
+          html += '<p><b>🔮 IV(Shared):</b> <span class="mono">'+esc(msg.iv_shared||'')+'</span></p>';
+}
+      html += '<hr>';
+      html += '<p><b>📝 管理员回复:</b></p>';
+      html += '<textarea id="admin-reply-text" style="width:100%;height:80px" placeholder="输入回复内容...">'+esc(report.admin_reply||'')+'</textarea>';
+      html += '<br><button class="btn-blue" id="btn-submit-reply">发送回复</button>';
+      html += '</div>';
 
         var detailEl = document.getElementById('detail-content');
         detailEl.innerHTML = html;

@@ -7,9 +7,16 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+  <script type="importmap">
+  {
+      "imports": {
+          "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+      }
+  }
+  </script>
   <style>
     *{box-sizing:border-box}
-    body{font-family:sans-serif;max-width:750px;margin:40px auto;padding:20px;color:#333}
+    body{font-family:sans-serif;max-width:1000px;margin:40px auto;padding:20px;color:#333}
     h2{margin:0 0 12px}
     a.back-link{font-size:14px;color:#666;text-decoration:none;border:1px solid #ccc;padding:3px 10px;border-radius:4px;margin-left:8px}
     .section{background:#fafafa;border:1px solid #e0e0e0;border-radius:8px;padding:14px;margin-bottom:14px}
@@ -72,14 +79,14 @@
 
 <!-- 身份槽位 -->
 <div class="section">
-  <h3>🔑 我的身份（各自独立的 RSA + AES，第5个起灰黑色）
+  <h3>🔑 我的身份（各自独立的 RSA + AES + PQC密钥，第5个起灰黑色）
     <button class="small-btn btn-green" onclick="downloadAllSlots()" style="margin-left:6px">⬇ 全部身份</button>
     <button class="small-btn btn-orange" onclick="uploadSlots()">⬆ 导入身份</button>
     <input type="file" id="upload-slots-file" accept=".json" style="display:none">
   </h3>
   <div id="slots"></div>
   <button class="small-btn btn-blue" onclick="addSlot()" style="margin-top:6px">+ 添加身份</button>
-  <p class="hint">⚠️ 重新生成 RSA 密钥将无法解密旧消息。请先下载备份旧密钥。</p>
+  <p class="hint">⚠️ 重新生成 RSA、PQC 密钥将无法解密旧消息。请先下载备份旧密钥。</p>
 </div>
 
 <!-- 联系人 -->
@@ -110,6 +117,11 @@
   <input type="text" id="recv-pub-input" placeholder="或粘贴接收方公钥（优先）" title="直接粘贴公钥则忽略上方联系人选择">
   <textarea id="chat-msg" placeholder="消息（≤2048字，支持 Markdown）" maxlength="2048"></textarea>
   <button type="button" class="link-btn" onclick="insertFileLink()">🔗 外链</button>
+  <select id="encrypt-mode" title="加密方式" style="flex:0 0 90px">
+    <option value="auto">🔐 自动</option>
+    <option value="rsa">🔐 RSA</option>
+    <option value="pqc">🔮 PQC</option>
+  </select>
   <button class="btn-primary rate-limited-btn" onclick="sendChatMsg()">发送</button>
 </div>
 
@@ -153,6 +165,35 @@ function pubKeyHash(pub){ return sha256hex((pub||'').replace(/[\r\n]+/g,'')).sub
  * 规范化 PEM 格式：将单行 Base64 自动换成每 64 字符一行的标准格式
  * 如果已经是多行或是非 PEM 字符串，则原样返回（去首尾空白）
  */
+// ═══════════════════════════════════════════
+// PQC 工具函数
+// ═══════════════════════════════════════════
+function bytesToBase64(bytes) {
+  var binary = '';
+  for (var i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+function base64ToBytes(b64) {
+  var binary = atob(b64);
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
+}
+function hexToBytes(hex) {
+  var bytes = new Uint8Array(hex.length / 2);
+  for (var i = 0; i < hex.length; i += 2) {
+    bytes[i/2] = parseInt(hex.substring(i, i+2), 16);
+  }
+  return bytes;
+}
+
 function normalizePem(pemStr){
   if(!pemStr || typeof pemStr !== 'string') return pemStr || '';
   pemStr = pemStr.trim();
@@ -169,8 +210,8 @@ var SLOT_NAMES = ['蓝色','绿色','橙色','紫色'];
 // ═══════════════════════════════════════════
 // 持久化存储 (localStorage)
 // ═══════════════════════════════════════════
-var STORAGE_KEY   = 'chat_identities_v1';
-var CONTACTS_KEY  = 'chat_contacts_v1';
+var STORAGE_KEY   = 'chat_identities_v2';
+var CONTACTS_KEY  = 'chat_contacts_v2';
 var SENT_KEY      = 'chat_sent_v1';
 var RECEIVED_KEY  = 'chat_received_v1';
 var REPORT_MAP_KEY = 'chat_report_map_v1';
@@ -178,13 +219,56 @@ var REPLIES_KEY = 'chat_replies_v1';
 var REPORTED_FILES_KEY = 'chat_reported_files_v1';
 var LAST_POLL_KEY = 'chat_last_poll_v1';
 
-function loadIdentities(){
-  try{ return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }catch(e){ return []; }
+// ★ PQC 发送方 msgKey 独立持久化（不被 clearMessageCache 清除）
+var PQC_SENT_KEYS_KEY = 'chat_pqc_sent_keys_v1';
+function loadPqcSentKeys() {
+  try { return JSON.parse(localStorage.getItem(PQC_SENT_KEYS_KEY) || '{}'); } catch(e) { return {}; }
 }
+function savePqcSentKeys(data) {
+  var keys = Object.keys(data);
+  if (keys.length > 200) {
+    keys.sort();
+    for (var i = 0; i < keys.length - 200; i++) delete data[keys[i]];
+  }
+  localStorage.setItem(PQC_SENT_KEYS_KEY, JSON.stringify(data));
+}
+var pqcSentKeys = loadPqcSentKeys();
+
+function loadIdentities(){
+  try{ var data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }catch(e){ return []; }
+  // ★ 追加：v1→v2 迁移
+  var migrated = false;
+  data.forEach(function(id){
+    if (!id.hasOwnProperty('pqcPub')) { id.pqcPub = ''; migrated = true; }
+    if (!id.hasOwnProperty('pqcPriv')) { id.pqcPriv = ''; migrated = true; }
+  });
+  if (migrated) {
+    var old = localStorage.getItem('chat_identities_v1');
+    if (old) { try { var oldData = JSON.parse(old); oldData.forEach(function(oi,i){if(data[i]){data[i].pqcPub=oi.pqcPub||data[i].pqcPub||'';data[i].pqcPriv=oi.pqcPriv||data[i].pqcPriv||'';}}); }catch(e){} }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  }
+  return data;
+}
+
 function saveIdentities(data){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
 
 function loadContacts(){
-  try{ return JSON.parse(localStorage.getItem(CONTACTS_KEY) || '[]'); }catch(e){ return []; }
+  try{ var data = JSON.parse(localStorage.getItem(CONTACTS_KEY) || '[]'); }catch(e){ return []; }
+  var migrated = false;
+  data.forEach(function(c){ if (!c.hasOwnProperty('pqcPub')) { c.pqcPub = ''; migrated = true; } });
+  if (migrated) {
+    var old = localStorage.getItem('chat_contacts_v1');
+    if (old) {
+      try {
+        var oldData = JSON.parse(old);
+        oldData.forEach(function(oc, i){
+          if (data[i]) { data[i].pqcPub = oc.pqcPub || data[i].pqcPub || ''; }
+        });
+      } catch(e) {}
+    }
+    localStorage.setItem(CONTACTS_KEY, JSON.stringify(data));
+  }
+  return data;
 }
 function saveContacts(data){ localStorage.setItem(CONTACTS_KEY, JSON.stringify(data)); }
 
@@ -250,6 +334,12 @@ function renderSlots(){
     html += '<textarea placeholder="RSA公钥" rows="2" style="flex:2;font-family:monospace;font-size:10px;resize:vertical" onchange="updateSlot('+i+',\'pub\',this.value)">'+esc(id.pub||'')+'</textarea>';
     html += '<textarea placeholder="RSA私钥（仅存本地）" rows="2" style="flex:2;font-family:monospace;font-size:10px;resize:vertical" onchange="updateSlot('+i+',\'priv\',this.value)">'+esc(id.priv||'')+'</textarea>';
     html += '<button class="small-btn btn-blue" onclick="genRSAKeypair('+i+')">生成RSA</button>';
+    // ── PQC 密钥区 ──
+    var pqcIcon = (id.pqcPub && id.pqcPriv) ? '✅' : '⚠️';
+    html += '<div style="flex-basis:100%;margin:4px 0;font-size:11px;color:#9C27B0">🔮 PQC '+pqcIcon+'</div>';
+    html += '<textarea placeholder="PQC公钥(Base64)" rows="2" style="flex:2;font-family:monospace;font-size:10px;resize:vertical" onchange="updateSlot('+i+',\'pqcPub\',this.value)">'+esc(id.pqcPub||'')+'</textarea>';
+    html += '<textarea placeholder="PQC私钥(Base64)" rows="2" style="flex:2;font-family:monospace;font-size:10px;resize:vertical" onchange="updateSlot('+i+',\'pqcPriv\',this.value)">'+esc(id.pqcPriv||'')+'</textarea>';
+    html += '<button class="small-btn btn-orange" onclick="generatePQCKeypair('+i+')">生成PQC</button>';
     html += '<button class="small-btn btn-blue" onclick="downloadSlot('+i+')">⬇下载</button>';
     html += '<button class="small-btn btn-red" onclick="deleteSlot('+i+')">✕</button>';
     html += '</div>';
@@ -269,7 +359,7 @@ function updateSlot(i, field, value){
 }
 
 function addSlot(){
-  identities.push({nick:'', aes:'', pub:'', priv:''});
+  identities.push({nick:'', aes:'', pub:'', priv:'', pqcPub:'', pqcPriv:''});
   saveIdentities(identities);
   renderSlots();
 }
@@ -293,13 +383,28 @@ function genRSAKeypair(i){
   });
 }
 
+async function generatePQCKeypair(i){
+  showConfirm('生成新PQC密钥对。建议先下载备份旧密钥。确定继续？', async function(){
+    try {
+      var { ml_kem1024 } = await import('@noble/post-quantum/ml-kem');
+      var keys = ml_kem1024.keygen();
+      identities[i].pqcPub = bytesToBase64(keys.publicKey);
+      identities[i].pqcPriv = bytesToBase64(keys.secretKey);
+      saveIdentities(identities);
+      renderSlots();
+    } catch(e) { alert('PQC密钥生成失败: ' + e.message); }
+  });
+}
+
 function downloadSlot(i){
   var id = identities[i];
   var exportData = {
     nick: id.nick || '',
     aes: id.aes || '',
     pub: id.pub || '',
-    priv: id.priv || ''
+    priv: id.priv || '',
+    pqcPub: id.pqcPub || '',    // ← 新增
+    pqcPriv: id.pqcPriv || ''   // ← 新增
   };
   var blob = new Blob([JSON.stringify(exportData, null, 2)], {type:'application/json'});
   var a = document.createElement('a');
@@ -325,7 +430,14 @@ function renderContacts(){
   var html = '';
   contacts.forEach(function(c, i){
     html += '<div class="contact-row">';
-    html += '<span title="'+esc(c.pub)+'" style="color:'+(i<4?'':'#666')+'">'+esc(c.name)+' ('+esc(pubKeyHash(c.pub))+')</span>';
+    var rsaFp = c.pub ? pubKeyHash(c.pub) : '(无)';
+    var pqcFp = c.pqcPub ? sha256hex(c.pqcPub).substring(0, 12) : '(无)';
+    html += '<span style="flex:1;text-align:left;word-break:break-all;font-family:sans-serif" title="RSA: '+esc(c.pub||'')+'\nPQC: '+esc((c.pqcPub||'').substring(0,60))+'">';
+    html += '<b>'+esc(c.name)+'</b><br>';
+    html += '<span style="font-size:10px;color:#2196F3">🔐 RSA: '+esc(rsaFp)+'</span> ';
+    html += '<span style="font-size:10px;color:#9C27B0">🔮 PQC: '+esc(pqcFp)+'</span>';
+    html += '</span>';
+    html += '<button class="small-btn btn-blue" onclick="editContact('+i+')">✏️</button>';
     html += '<button class="small-btn btn-green" onclick="downloadContact('+i+')">⬇</button>';
     html += '<button class="small-btn btn-red" onclick="deleteContact('+i+')">✕</button>';
     html += '</div>';
@@ -336,10 +448,12 @@ function renderContacts(){
 
 function addContact(){
   var name = prompt('联系人名称:') || '联系人'+(contacts.length+1);
-  var pub = prompt('粘贴联系人RSA公钥:');
-  if(!pub) return;
-  pub = normalizePem(pub);   // ★ 规范化后再存储
-  contacts.push({name: name.substring(0,20), pub: pub});
+  var pub = prompt('粘贴联系人 🔐 RSA公钥（可留空）:') || '';
+  if (pub) pub = normalizePem(pub);
+  var pqcPub = prompt('粘贴联系人 🔮 PQC公钥Base64（可留空）:') || '';
+  if (pqcPub) pqcPub = pqcPub.replace(/[\r\n\s]+/g, '');
+  if (!pub && !pqcPub) { alert('RSA公钥和PQC公钥至少填一个'); return; }
+  contacts.push({name: name.substring(0,20), pub: pub, pqcPub: pqcPub});
   saveContacts(contacts);
   renderContacts();
 }
@@ -359,6 +473,21 @@ function deleteContact(i){
   renderContacts();
 }
 
+function editContact(i){
+  var c = contacts[i];
+  var name = prompt('联系人名称:', c.name || '');
+  if(name === null) return;
+  var pub = prompt('粘贴联系人 🔐 RSA公钥（可留空）:', c.pub || '');
+  if(pub === null) return;
+  if(pub) pub = normalizePem(pub);
+  var pqcPub = prompt('粘贴联系人 🔮 PQC公钥Base64（可留空）:', c.pqcPub || '');
+  if(pqcPub === null) return;
+  if(pqcPub) pqcPub = pqcPub.replace(/[\r\n\s]+/g, '');
+  if(!pub && !pqcPub){ alert('RSA公钥和PQC公钥至少填一个'); return; }
+  contacts[i] = {name: name.substring(0,20), pub: pub, pqcPub: pqcPub};
+  saveContacts(contacts);
+  renderContacts();
+}
 // ═══════════════════════════════════════════
 // 发送选择框
 // ═══════════════════════════════════════════
@@ -406,22 +535,92 @@ document.getElementById('confirm-yes').addEventListener('click', function(){
 function sendChatMsg(){
   var slotIdx = parseInt(document.getElementById('send-slot').value) || 0;
   var id = identities[slotIdx];
-  if(!id || !id.nick || !id.aes || !id.pub || !id.priv){
-    alert('请先完善发送身份的昵称、AES密钥和RSA密钥'); return;
-  }
-
+  if(!id || !id.nick || !id.aes){ alert('请先完善发送身份（昵称+AES密钥必填）'); return; }
   var msg = document.getElementById('chat-msg').value.trim();
   if(!msg){ alert('请输入消息'); return; }
 
   var recvPub = normalizePem(document.getElementById('recv-pub-input').value.trim());
   var contactSel = document.getElementById('send-contact').value;
+  var recvPqcPub = '';
 
-  if(!recvPub && contactSel && contactSel.startsWith('contact_')){
-    var ci = parseInt(contactSel.replace('contact_',''));
-    if(contacts[ci]) recvPub = contacts[ci].pub;
+  // ★ 如果粘贴的内容不含 PEM 头尾，可能是 PQC Base64 公钥
+  var directInput = document.getElementById('recv-pub-input').value.trim();
+  if (directInput && !directInput.startsWith('-----BEGIN')) {
+      recvPqcPub = directInput.replace(/[\r\n\s]+/g, '');
+      recvPub = '';  // 不是 PEM，不能当 RSA 用
   }
 
-  if(!recvPub){ alert('请选择联系人或粘贴接收方公钥'); return; }
+  if (contactSel && contactSel.startsWith('contact_')) {
+    var ci = parseInt(contactSel.replace('contact_',''));
+    if (contacts[ci]) {
+      recvPub = recvPub || contacts[ci].pub;
+      recvPqcPub = contacts[ci].pqcPub || '';
+    }
+  }
+  if (!recvPub && !recvPqcPub) { alert('请选择有密钥的联系人或粘贴接收方公钥'); return; }
+
+  // ★ PQC 优先
+  var encMode = document.getElementById('encrypt-mode').value;
+  if (encMode === 'pqc' || (encMode === 'auto' && recvPqcPub)) {
+    if (!recvPqcPub) { alert('接收方未设置PQC公钥，无法使用PQC加密'); return; }
+    sendChatMsgPqc(slotIdx, recvPqcPub, recvPub, msg);
+    return;
+  }
+  // ★ 回退 RSA
+  if (!id.pub || !id.priv) { alert('发送方RSA密钥未设置'); return; }
+  if (!recvPub) { alert('接收方未设置RSA公钥'); return; }
+  sendChatMsgRsa(slotIdx, recvPub, msg);
+}
+
+async function sendChatMsgPqc(slotIdx, recvPqcPubB64, recvPub, msg) {
+  var id = identities[slotIdx];
+  var recvHash = recvPub ? pubKeyHash(recvPub) : sha256hex(recvPqcPubB64).substring(0,16);
+  try {
+    var { ml_kem1024 } = await import('@noble/post-quantum/ml-kem');
+    var msgKey = crypto.getRandomValues(new Uint8Array(32));
+    var ivContent = CryptoJS.lib.WordArray.random(16);
+    var now = new Date();
+    var timeStr = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')+' '+String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0')+':'+String(now.getSeconds()).padStart(2,'0');
+    var nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
+    var payload = id.nick + '|' + timeStr + '|' + msg + '|' + nonce;
+    var keyHex = CryptoJS.enc.Hex.parse(bytesToHex(msgKey));
+    var encContent = CryptoJS.AES.encrypt(payload, keyHex, {iv:ivContent,mode:CryptoJS.mode.CBC,padding:CryptoJS.pad.Pkcs7}).toString().replace(/[\r\n\s]+/g,'');
+    var encapsResult = ml_kem1024.encapsulate(base64ToBytes(recvPqcPubB64));
+    var ivShared = CryptoJS.lib.WordArray.random(16);
+    var sharedKeyHex = CryptoJS.enc.Hex.parse(bytesToHex(encapsResult.sharedSecret));
+    var encAESKey = CryptoJS.AES.encrypt(bytesToBase64(msgKey), sharedKeyHex, {iv:ivShared,mode:CryptoJS.mode.CBC,padding:CryptoJS.pad.Pkcs7}).toString().replace(/[\r\n\s]+/g,'');
+    var body = {
+        version:'v3',
+        sender_pub: 'PQC:' + sha256hex(id.pqcPub||'').substring(0,32),
+        sender_pqc_pub:(id.pqcPub||'').replace(/[\r\n\s]+/g,''),
+        receiver_hash:recvHash,
+        pqc_ciphertext:bytesToBase64(encapsResult.cipherText),
+        iv_shared: CryptoJS.enc.Base64.stringify(ivShared).replace(/[\r\n\s]+/g,''),
+        iv_content: CryptoJS.enc.Base64.stringify(ivContent).replace(/[\r\n\s]+/g,''),
+        encAESKey:encAESKey,
+        encContent:encContent,
+        aes_content: encContent,
+        iv: CryptoJS.enc.Base64.stringify(ivContent).replace(/[\r\n\s]+/g,''),
+        wrapped_key: 'PQC_V3',
+        nonce:nonce
+    };
+    var res = await fetch('/api/chat/send', {method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify(body)});
+    if (res.status===418) { sessionStorage.setItem('pending_chat_msg',msg);sessionStorage.setItem('pending_chat_slot',slotIdx);sessionStorage.setItem('pending_chat_recv',recvPub);sessionStorage.setItem('pending_chat_pqc',recvPqcPubB64);window.location.href='/captcha?redirect='+encodeURIComponent(window.location.href);return; }
+    window.handleRateLimitResponse(res);
+    if(!res.ok){var t=await res.text();throw new Error(t);}
+    var data=await res.json();
+        sentMessages.push({nick:id.nick,time:timeStr,content:msg,recvHash:recvHash,slotIdx:slotIdx,seq:data.seq,filename:data.filename,version:'v3',pqcCiphertext:bytesToBase64(encapsResult.cipherText),ivShared:CryptoJS.enc.Base64.stringify(ivShared).replace(/[\r\n\s]+/g,''),encAESKey:encAESKey,iv:CryptoJS.enc.Base64.stringify(ivContent).replace(/[\r\n\s]+/g,''),msgKeyB64:bytesToBase64(msgKey)});
+    saveSent(sentMessages);
+    // ★ 独立持久化 PQC msgKey，清除缓存后仍可解密自己发送的消息
+    pqcSentKeys[data.filename] = bytesToBase64(msgKey);
+    savePqcSentKeys(pqcSentKeys);
+    document.getElementById('chat-msg').value='';
+    renderChat();
+  } catch(e) { alert('PQC发送失败: '+e.message); }
+}
+
+function sendChatMsgRsa(slotIdx, recvPub, msg) {
+  var id = identities[slotIdx];
 
   var iv = CryptoJS.lib.WordArray.random(16);
   var ivB64 = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g,'');
@@ -459,21 +658,18 @@ function sendChatMsg(){
       nonce: nonce
     })
   }).then(function(r){
-    // ★ 验证码拦截：418 → 保存状态并跳转
     if (r.status === 418) {
       sessionStorage.setItem('pending_chat_msg', msg);
       sessionStorage.setItem('pending_chat_slot', slotIdx);
       sessionStorage.setItem('pending_chat_recv', recvPub);
-      sessionStorage.setItem('pending_chat_contact', contactSel);
       window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
       return;
     }
-
     window.handleRateLimitResponse(r);
     if(r.ok) return r.json();
     else return r.text().then(function(t){ throw new Error(t); });
   }).then(function(data){
-    if (!data) return; // 已跳转到验证码页面
+    if (!data) return;
     sentMessages.push({
       nick: id.nick,
       time: timeStr,
@@ -492,6 +688,7 @@ function sendChatMsg(){
     alert('发送失败: ' + err.message);
   });
 }
+
 // ═══════════════════════════════════════════
 // 轮询接收消息
 // ═══════════════════════════════════════════
@@ -503,12 +700,18 @@ function startPolling(){
   pollTimer = setInterval(doPoll, 3000);
 }
 
-function doPoll(){
+async function doPoll(){
   var hashes = [];
   identities.forEach(function(id){
     if(id.pub){
       var h = pubKeyHash(id.pub);
       if(hashes.indexOf(h) === -1) hashes.push(h);
+    }
+    // ★ PQC-only 身份也加入轮询
+    if(id.pqcPub){
+        var pqcClean = id.pqcPub.replace(/[\r\n\s]+/g,'');
+        var ph = sha256hex(pqcClean).substring(0,16);
+        if(hashes.indexOf(ph) === -1) hashes.push(ph);
     }
   });
 
@@ -519,30 +722,25 @@ function doPoll(){
 
   var since = getLastPoll();
 
-  fetch('/api/chat/poll', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      hashes: hashes,
-      sender_hashes: hashes,  // ← 新增：也查自己发的消息
-      since: since
-    })
-  }).then(function(r){ return r.json(); }).then(function(data){
+  try {
+    var r = await fetch('/api/chat/poll', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+      body: JSON.stringify({ hashes: hashes, sender_hashes: hashes, since: since })
+    });
+    var data = await r.json();
     var newTime = data.server_time || '';
     if(newTime) setLastPoll(newTime);
-
-    var statusEl = document.getElementById('poll-status');
-    statusEl.textContent = '🔄 上次轮询: ' + (newTime || '--') + ' | 收到: ' + (data.messages||[]).length + ' 条';
-
+    document.getElementById('poll-status').textContent = '🔄 上次轮询: ' + (newTime || '--') + ' | 收到: ' + (data.messages||[]).length + ' 条';
     if(data.messages && data.messages.length > 0){
-      decryptAndDisplay(data.messages);
+      await decryptAndDisplay(data.messages);
     }
-  }).catch(function(e){
+  } catch(e) {
     document.getElementById('poll-status').textContent = '⚠️ 轮询失败: ' + e.message;
-  });
+  }
 }
 
-function decryptAndDisplay(messages){
+async function decryptAndDisplay(messages){
   var keys = Object.keys(displayedMsgKeys);
   if(keys.length > 2000){
     keys.slice(0, 1000).forEach(function(k){ delete displayedMsgKeys[k]; });
@@ -551,19 +749,21 @@ function decryptAndDisplay(messages){
   var newSent = [];    // 待加入 sentMessages 的消息
   var newRecv = [];    // 待加入 receivedMessages 的消息
 
-  messages.forEach(function(m){
+  for (var mi = 0; mi < messages.length; mi++) {
+    var m = messages[mi];
     var key = m.filename;
-    if(displayedMsgKeys[key]) return;
+    if(displayedMsgKeys[key]) continue;
     displayedMsgKeys[key] = true;
 
     // 去重：避免同一消息重复存入
     var alreadyHave = sentMessages.some(function(sm){ return sm.filename === m.filename; }) ||
                       receivedMessages.some(function(rm){ return rm.filename === m.filename; });
-    if(alreadyHave) return;
+    if(alreadyHave) continue;
 
     var decrypted = null;
     var slotIdx = -1;
     var isSentFlag = false;
+    var msgVersion = m.version || '';
 
     // ★ 第一步：使用本地 RSA 私钥解密 wrapped_key 得到 AES 密钥
     for(var i = 0; i < identities.length; i++){
@@ -590,8 +790,6 @@ function decryptAndDisplay(messages){
                 nonce: parts[parts.length - 1]
               };
               slotIdx = i;
-              // ★ 关键：判断这条消息是否是我自己发出的
-              // 若发送方公钥与我当前的公钥匹配，则为 sent 消息
               var senderPubNormalized = normalizePem(m.sender_pub || '');
               var myPubNormalized = normalizePem(id.pub);
               if(senderPubNormalized === myPubNormalized){
@@ -626,7 +824,6 @@ function decryptAndDisplay(messages){
                 nonce: parts2[parts2.length - 1]
               };
               slotIdx = j;
-              // 同样判断 sender_pub 是否匹配（若有）
               var senderPubNorm = normalizePem(m.sender_pub || '');
               var myPubNorm = normalizePem(id2.pub);
               if(senderPubNorm === myPubNorm){
@@ -639,6 +836,87 @@ function decryptAndDisplay(messages){
       }
     }
 
+    // ★ 第三步：PQC 解密（v3 消息）
+    var v3MsgKey = null;  // ★ 捕获 PQC 解密出的 msgKey
+
+    // ★ 回退：发送方用 pqcSentKeys 中的 msgKey 解密自己发的 PQC 消息
+    if (!decrypted && m.wrapped_key === 'PQC_V3' && pqcSentKeys[m.filename]) {
+      var v3MsgKey2 = pqcSentKeys[m.filename];
+      try {
+        var msgKeyHex3 = CryptoJS.enc.Hex.parse(bytesToHex(base64ToBytes(v3MsgKey2)));
+        var plain3b = CryptoJS.AES.decrypt(m.encContent || m.aes_content, msgKeyHex3, {
+          iv: CryptoJS.enc.Base64.parse(m.iv_content || m.iv),
+          mode: CryptoJS.mode.CBC,
+          padding: CryptoJS.pad.Pkcs7
+        }).toString(CryptoJS.enc.Utf8);
+        if (plain3b) {
+          var parts3b = plain3b.split('|');
+          if (parts3b.length >= 3) {
+            decrypted = {
+              nick: parts3b[0],
+              time: parts3b[1],
+              content: parts3b.slice(2, parts3b.length - 1).join('|'),
+              nonce: parts3b[parts3b.length - 1]
+            };
+            slotIdx = 0;
+            for (var si = 0; si < identities.length; si++) {
+              var sp = (m.sender_pqc_pub||'').replace(/[\r\n\s]+/g,'');
+              var mp = (identities[si].pqcPub||'').replace(/[\r\n\s]+/g,'');
+              if (mp && sp === mp) { slotIdx = si; break; }
+            }
+            msgVersion = 'v3';
+            isSentFlag = true;
+            v3MsgKey = v3MsgKey2;
+          }
+        }
+      } catch(ex) {}
+    }
+
+    if (!decrypted && (m.pqc_ciphertext || m.wrapped_key === 'PQC_V3') && m.encAESKey) {
+      for (var k = 0; k < identities.length; k++) {
+        var id3 = identities[k];
+        if (!id3.pqcPriv) continue;
+        try {
+          var { ml_kem1024 } = await import('@noble/post-quantum/ml-kem');
+          if (!m.pqc_ciphertext) continue;
+          var shared = ml_kem1024.decapsulate(base64ToBytes(m.pqc_ciphertext), base64ToBytes(id3.pqcPriv));
+          var sharedHex = CryptoJS.enc.Hex.parse(bytesToHex(shared));
+          var msgKeyB64 = CryptoJS.AES.decrypt(m.encAESKey, sharedHex, {
+            iv: CryptoJS.enc.Base64.parse(m.iv_shared),
+            mode: CryptoJS.mode.CBC,
+            padding: CryptoJS.pad.Pkcs7
+          }).toString(CryptoJS.enc.Utf8);
+          if (msgKeyB64) {
+            var msgKeyHex = CryptoJS.enc.Hex.parse(bytesToHex(base64ToBytes(msgKeyB64)));
+            var plain3 = CryptoJS.AES.decrypt(m.encContent || m.aes_content, msgKeyHex, {
+              iv: CryptoJS.enc.Base64.parse(m.iv_content || m.iv),
+              mode: CryptoJS.mode.CBC,
+              padding: CryptoJS.pad.Pkcs7
+            }).toString(CryptoJS.enc.Utf8);
+            if (plain3) {
+              var parts3 = plain3.split('|');
+              if (parts3.length >= 3) {
+                decrypted = {
+                  nick: parts3[0],
+                  time: parts3[1],
+                  content: parts3.slice(2, parts3.length - 1).join('|'),
+                  nonce: parts3[parts3.length - 1]
+                };
+                slotIdx = k;
+                msgVersion = 'v3';
+                // 比对发送方PQC公钥判断是否是自己发的
+                var myPqcPubNorm = (id3.pqcPub||'').replace(/[\r\n\s]+/g,'');
+                var senderPqcPubNorm = (m.sender_pqc_pub||'').replace(/[\r\n\s]+/g,'');
+                isSentFlag = (myPqcPubNorm && senderPqcPubNorm && myPqcPubNorm === senderPqcPubNorm);
+                v3MsgKey = msgKeyB64;
+                break;
+              }
+            }
+          }
+        } catch(ex) {}
+      }
+    }
+
     if(decrypted){
       var msgObj = {
         nick: decrypted.nick,
@@ -647,19 +925,22 @@ function decryptAndDisplay(messages){
         slotIdx: slotIdx,
         timeSort: m.time,
         senderPub: m.sender_pub || '',
+        senderPqcPub: m.sender_pqc_pub || '',
         filename: m.filename || '',
         wrappedKey: m.wrapped_key || '',
-        iv: m.iv || ''
+        iv: m.iv || '',
+        version: msgVersion,
+        msgKeyB64: v3MsgKey || ''
       };
       if(isSentFlag){
-        msgObj.isReceived = false;   // 标记为发出
+        msgObj.isReceived = false;
         newSent.push(msgObj);
       } else {
-        msgObj.isReceived = true;    // 标记为接收
+        msgObj.isReceived = true;
         newRecv.push(msgObj);
       }
     }
-  });
+  }
 
   // 合并到全局数组并去重存储
   if(newSent.length > 0){
@@ -723,6 +1004,8 @@ function renderChatWithData(allMsgs){
       header = '<span class="c-nick" style="color:' + color + '">● ' + esc(m.nick) + '</span>'
              + '<span class="c-time">' + esc(m.time) + '</span>';
     }
+    var encLabel = (m.version==='v3') ? ' 🔮' : ' 🔐';
+    header += '<span style="font-size:9px;color:#aaa;margin-left:4px" title="'+(m.version==='v3'?'PQC后量子加密':'RSA加密')+'">'+encLabel+'</span>';
     html += '<div>' + header
          + '<button class="copy-msg-btn" data-copy="' + esc(m.content) + '">📋复制</button>';
 
@@ -738,8 +1021,7 @@ function renderChatWithData(allMsgs){
            + 'onclick="revokeMessage(\'' + esc(m.filename) + '\',\'' + esc(m.slotIdx) + '\')">↩撤回</button>';
     }
 
-    html += '</div>';
-
+    html += '</div>';  // ← 关闭 header div
     html += '<div class="c-body">';
     try {
       html += DOMPurify.sanitize(marked.parse(m.content));
@@ -765,6 +1047,15 @@ function renderChatWithData(allMsgs){
       html += ' <span style="cursor:pointer;text-decoration:underline" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==\'none\'?\'block\':\'none\'">展开</span>';
       html += '<span style="display:none;font-family:monospace;font-size:9px">' + esc(m.senderPub) + '</span>';
       html += '</div>';
+    }
+    // ★ 显示发送方PQC指纹
+    if (!isSent && m.senderPqcPub) {
+        var pqcFp = sha256hex(m.senderPqcPub).substring(0, 16);
+        html += '<div style="font-size:10px;color:#9C27B0;margin-top:2px;word-break:break-all">';
+        html += '🔮 发送方PQC指纹: <span style="font-family:monospace">' + esc(pqcFp) + '</span>';
+        html += ' <span style="cursor:pointer;text-decoration:underline" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==\'none\'?\'block\':\'none\'">展开</span>';
+        html += '<span style="display:none;font-family:monospace;font-size:9px">' + esc(m.senderPqcPub) + '</span>';
+        html += '</div>';
     }
 
     html += '</div>';
@@ -812,6 +1103,7 @@ function clearMessageCache(){
     setLastPoll('');                 // 强制全量拉取
     // 清除去重标志，确保所有历史消息都会被重新处理
     displayedMsgKeys = {};
+    // ★ 注意：不清除 pqcSentKeys，保证发送方仍能解密自己发的 PQC 消息
     doPoll();                        // 立即全量同步
     renderChat();
   });
@@ -860,7 +1152,11 @@ function uploadSlots(){
             renderChat();
           });
         } else if(data.nick !== undefined || data.aes !== undefined || data.pub !== undefined){
-          identities.push({nick:data.nick||'', aes:data.aes||'', pub:data.pub||'', priv:data.priv||''});
+          identities.push({
+            nick: data.nick || '', aes: data.aes || '',
+            pub: data.pub || '', priv: data.priv || '',
+            pqcPub: data.pqcPub || '', pqcPriv: data.pqcPriv || ''  // ← 新增
+          });
           saveIdentities(identities);
           renderSlots();
         } else {
@@ -900,11 +1196,15 @@ function uploadContacts(){
         if(Array.isArray(data)){
           showConfirm('检测到数组（' + data.length + '个联系人），将替换全部。确定？', function(){
             contacts = data;
+            // ★ 补 PQC 字段
+            contacts.forEach(function(c){
+              if (!c.hasOwnProperty('pqcPub')) c.pqcPub = '';
+            });
             saveContacts(contacts);
             renderContacts();
           });
         } else if(data.name && data.pub){
-          contacts.push({name: data.name.substring(0,20), pub: data.pub});
+          contacts.push({name: data.name.substring(0,20), pub: data.pub||'', pqcPub: data.pqcPub||''});
           saveContacts(contacts);
           renderContacts();
         } else {
@@ -1008,6 +1308,13 @@ fetch('/gongyao.txt').then(function(r){ return r.text(); }).then(function(pub){
 function reportMessage(filename, wrappedKeyB64, ivB64, slotIdxStr){
   var slotIdx = parseInt(slotIdxStr) || 0;
   var id = identities[slotIdx];
+
+  // ★ PQC (v3) 消息：使用本地存储的 msgKey 上报
+  if (wrappedKeyB64 === 'PQC_V3') {
+    reportPqcMessage(filename, slotIdx);
+    return;
+  }
+
   if(!id || !id.priv){
     alert('该身份的RSA私钥未设置，无法解密AES密钥进行举报');
     return;
@@ -1076,24 +1383,110 @@ function reportMessage(filename, wrappedKeyB64, ivB64, slotIdxStr){
   });
 }
 
+function reportPqcMessage(filename, slotIdx) {
+  if(!ADMIN_PUB_KEY){
+    alert('管理员公钥尚未加载，请刷新页面后重试');
+    return;
+  }
+
+  // 从本地缓存找到该消息的 msgKey
+  var msgKeyB64 = null;
+  var allMsgs = sentMessages.concat(receivedMessages);
+  for (var i = 0; i < allMsgs.length; i++) {
+    if (allMsgs[i].filename === filename && allMsgs[i].msgKeyB64) {
+      msgKeyB64 = allMsgs[i].msgKeyB64;
+      break;
+    }
+  }
+
+  if (!msgKeyB64) {
+    alert('无法找到该PQC消息的AES密钥（本地缓存可能已清除，请先让接收方刷新聊天）');
+    return;
+  }
+
+  var reason = prompt('请输入举报理由（会被加密传输）：');
+  if(!reason || !reason.trim()) return;
+  reason = reason.trim().substring(0, 500);
+
+  var jsePub = new JSEncrypt();
+  jsePub.setPublicKey(ADMIN_PUB_KEY);
+  var aesKeyEnc = jsePub.encrypt(msgKeyB64);
+  var reasonEnc = jsePub.encrypt(reason);
+
+  if(!aesKeyEnc || !reasonEnc){
+    alert('加密失败，请检查管理员公钥');
+    return;
+  }
+
+  var id = identities[slotIdx];
+  fetch('/api/chat/report', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json','X-CSRF-Token': csrfToken},
+    body: JSON.stringify({
+      filename: filename,
+      reporter_pub: 'PQC:' + sha256hex((id.pqcPub||'').replace(/[\r\n\s]+/g,'')).substring(0,32),
+      aes_key_enc: aesKeyEnc.replace(/[\r\n\s]+/g,''),
+      reason_enc: reasonEnc.replace(/[\r\n\s]+/g,'')
+    })
+  }).then(function(r){
+    if (r.status === 418) {
+      window.location.href = '/captcha?redirect=' + encodeURIComponent(window.location.href);
+      return;
+    }
+    return r.json();
+  }).then(function(d){
+    if (!d) return;
+    if(d.status === 'ok'){
+      alert('✅ 举报已提交。\n编号: ' + d.report_id);
+      reportMap[d.report_id] = {filename: filename, slotIdx: slotIdx};
+      reportedFiles.add(filename);
+      saveReportMap(reportMap);
+      saveReportedFiles(Array.from(reportedFiles));
+      renderChat();
+    } else {
+      alert('❌ ' + (d.error||'举报失败'));
+    }
+  }).catch(function(e){
+    alert('请求失败: ' + e.message);
+  });
+}
+
 async function revokeMessage(filename, slotIdxStr){
   var slotIdx = parseInt(slotIdxStr) || 0;
   var id = identities[slotIdx];
-  if(!id || !id.pub || !id.priv){
-    alert('该身份的RSA密钥未设置，无法撤回');
-    return;
+
+  // ★ 判断消息版本：从本地缓存查找
+  var allMsgs = sentMessages.concat(receivedMessages);
+  var msgObj = null;
+  for (var i = 0; i < allMsgs.length; i++) {
+    if (allMsgs[i].filename === filename) { msgObj = allMsgs[i]; break; }
+  }
+  var isV3 = msgObj && msgObj.version === 'v3';
+
+  if (!isV3) {
+    if(!id || !id.pub || !id.priv){
+      alert('该身份的RSA密钥未设置，无法撤回');
+      return;
+    }
+  } else {
+    if(!id || !id.pqcPub || !id.pqcPriv){
+      alert('该身份的PQC密钥未设置，无法撤回');
+      return;
+    }
   }
 
   showConfirm('确定撤回此消息？服务器上的文件将被真正删除。', async function(){
     try {
       // ★ 第一步：请求挑战（POST /api/chat/revoke/challenge）
+      var challBody = {
+        filename: filename,
+        sender_pub: isV3 ? ('PQC:' + sha256hex((id.pqcPub||'').replace(/[\r\n\s]+/g,'')).substring(0,32)) : normalizePem(id.pub),
+        version: isV3 ? 'v3' : 'v2'
+      };
       var challRes = await fetch('/api/chat/revoke/challenge', {
         method: 'POST',
         headers: {'Content-Type': 'application/json','X-CSRF-Token': csrfToken},
-        body: JSON.stringify({
-          filename: filename,
-          sender_pub: normalizePem(id.pub)
-        })
+        body: JSON.stringify(challBody)
       });
 
       // ★ 验证码拦截（第一步）
@@ -1111,11 +1504,29 @@ async function revokeMessage(filename, slotIdxStr){
       }
 
       // ★ 第二步：用私钥解密挑战
-      var jse = new JSEncrypt();
-      jse.setPrivateKey(id.priv);
-      var answer = jse.decrypt(challData.challenge);
+      var answer;
+      if (isV3) {
+        // PQC 解封装挑战
+        var challData2 = JSON.parse(atob(challData.challenge));
+        var { ml_kem1024 } = await import('@noble/post-quantum/ml-kem');
+        var shared2 = ml_kem1024.decapsulate(
+          base64ToBytes(challData2.ct),
+          base64ToBytes(id.pqcPriv)
+        );
+        var key2 = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(bytesToHex(shared2)).toString().substring(0, 64));
+        var decrypted2 = CryptoJS.AES.decrypt(
+          challData2.enc,
+          key2,
+          {iv: CryptoJS.enc.Base64.parse(challData2.iv), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7}
+        );
+        answer = decrypted2.toString(CryptoJS.enc.Utf8);
+      } else {
+        var jse = new JSEncrypt();
+        jse.setPrivateKey(id.priv);
+        answer = jse.decrypt(challData.challenge);
+      }
       if(!answer){
-        alert('❌ 私钥解密挑战失败（请检查私钥是否正确）');
+        alert('❌ 解密挑战失败');
         return;
       }
 
@@ -1189,6 +1600,7 @@ setInterval(function(){
 // ★ 从验证码页面跳回后，自动恢复待发送的聊天消息
 (function() {
   var pendingMsg = sessionStorage.getItem('pending_chat_msg');
+   var pendingPqc = sessionStorage.getItem('pending_chat_pqc');
   if (pendingMsg) {
     document.getElementById('chat-msg').value = pendingMsg;
     // 可选：恢复选中的身份和接收方
@@ -1204,6 +1616,7 @@ setInterval(function(){
     sessionStorage.removeItem('pending_chat_slot');
     sessionStorage.removeItem('pending_chat_recv');
     sessionStorage.removeItem('pending_chat_contact');
+    sessionStorage.removeItem('pending_chat_pqc');
     alert('✅ 验证码已通过，请点击"发送"重新发送消息');
   }
 })();
