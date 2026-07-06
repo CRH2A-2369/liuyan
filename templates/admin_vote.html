@@ -5,11 +5,18 @@
   <title>投票管理</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js" integrity="sha512-E8QSvWZ0eCLGk4km3hxSsNmGWbLtSCSUcewDQPQWZF6pEU8GlT8a5fF32wOl1i8ftdMhssTrF/OhyGWwonTcXA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" integrity="sha512-rCQgmUulW6f6QegOvTntKKb5IAoxTpGVCdWqYjkXEpzAns6XUFs8NKVqWe+KQpctp/EoRSFSuykVputqknLYMg==" crossorigin="anonymous"></script>
   <!-- ★ 新增 DOMPurify，替代不完整的自定义 _sanitizeHtml -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"
     integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ=="
     crossorigin="anonymous"></script>
+  <script type="importmap">
+  {
+      "imports": {
+          "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+      }
+  }
+  </script>
   <style>
     body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px;color:#333}
     #create-panel{background:#fff3e0;padding:16px;border-radius:8px;margin-bottom:20px;border-left:4px solid #FF9800}
@@ -104,12 +111,32 @@
     </div>
     <button class="btn-success btn" onclick="createPoll()" style="margin-top:10px">创建投票</button>
   </div>
-
   <h3>📋 已有投票</h3>
   <div id="poll-list"><p style="color:#888;text-align:center">加载中...</p></div>
   <footer id="footer"></footer>
 </div>
 
+<div id="edit-panel" style="display:none; background:#fff3e0; padding:16px; border-radius:8px; margin-bottom:20px; border-left:4px solid #FF9800;">
+  <h3>✏️ 编辑投票</h3>
+  <input type="hidden" id="edit-poll-id">
+  <div style="display:flex;gap:4px;align-items:center">
+    <input type="text" id="edit-poll-title" placeholder="投票标题" maxlength="128" style="flex:1">
+    <button type="button" class="link-btn" onclick="insertFileLink('edit-poll-title')">🔗 外链</button>
+  </div>
+  <div id="edit-options-container">
+    <!-- 动态生成选项行 -->
+  </div>
+  <button class="btn-warn btn" onclick="addEditOption()">+ 添加选项</button><br>
+  <label><input type="checkbox" id="edit-poll-custom" onchange="toggleEditCustom()"> 允许用户自定义选项</label>
+  <input type="text" id="edit-poll-custom-hint" placeholder="自定义选项提示文字..." style="display:none">
+  <label><input type="checkbox" id="edit-poll-allow-edit"> 允许用户修改自己的投票</label>
+  <div style="display:flex;gap:16px;align-items:center;margin:8px 0">
+    <label>最少可选数 <input type="number" id="edit-poll-min-select" value="1" min="1" style="width:60px"></label>
+    <label>最多可选数 <input type="number" id="edit-poll-max-select" value="1" min="1" style="width:60px"></label>
+  </div>
+  <button class="btn-success btn" onclick="submitEditPoll()" style="margin-top:10px">保存修改</button>
+  <button class="btn btn-gray" onclick="document.getElementById('edit-panel').style.display='none'" style="margin-left:10px;background:#ccc;color:#333">取消</button>
+</div>
 <script>
 // ========== 初始化 ==========
 var adminJse = null;
@@ -120,6 +147,28 @@ try {
     adminJse.setPrivateKey(savedKey);
   }
 } catch(e) {}
+
+var adminPqcPrivBytes = null;
+try {
+  var savedPqcKey = sessionStorage.getItem('admin_pqc_priv_key');
+  if (savedPqcKey) {
+    var binary = atob(savedPqcKey);
+    adminPqcPrivBytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) adminPqcPrivBytes[i] = binary.charCodeAt(i);
+  }
+} catch(e) {}
+
+function bytesToBase64(bytes) {
+  var binary = '';
+  for (var i = 0; i < bytes.length; i++) { binary += String.fromCharCode(bytes[i]); }
+  return btoa(binary);
+}
+function base64ToBytes(b64) {
+  var binary = atob(b64);
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+  return bytes;
+}
 
 function deriveKey(str) {
   return CryptoJS.enc.Hex.parse(CryptoJS.SHA256(str).toString());
@@ -189,12 +238,14 @@ var DOMPURIFY_CONFIG = {
 };
 
 // 自动给所有 <a> 加 target="_blank" rel="noopener noreferrer"
-DOMPurify.addHook('afterSanitizeAttributes', function(node) {
-  if (node.tagName === 'A') {
-    node.setAttribute('target', '_blank');
-    node.setAttribute('rel', 'noopener noreferrer');
-  }
-});
+if (typeof DOMPurify !== 'undefined' && DOMPurify.addHook) {
+  DOMPurify.addHook('afterSanitizeAttributes', function(node) {
+    if (node.tagName === 'A') {
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
+  });
+}
 
 // ========== Markdown 渲染（经 DOMPurify 净化） ==========
 
@@ -224,7 +275,10 @@ function renderMd(text) {
     var raw = _markedParse(linked, { breaks: true });
     if (!raw) return esc(linked);
     // ★ 用 DOMPurify 替代不完整的 _sanitizeHtml
-    return '<span class="md-content">' + DOMPurify.sanitize(raw, DOMPURIFY_CONFIG) + '</span>';
+    var safe = (typeof DOMPurify !== 'undefined')
+      ? DOMPurify.sanitize(raw, DOMPURIFY_CONFIG)
+      : raw.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<[^>]*on\w+\s*=[^>]*>/gi, '');
+    return '<span class="md-content">' + safe + '</span>';
   } catch(e) {
     return esc(linked);
   }
@@ -238,7 +292,9 @@ function renderMdInline(text) {
     var raw = _markedParse(linked, { breaks: true });
     if (!raw) return esc(linked);
     // ★ 用 DOMPurify 替代不完整的 _sanitizeHtml
-    return DOMPurify.sanitize(raw, DOMPURIFY_CONFIG);
+    return (typeof DOMPurify !== 'undefined')
+      ? DOMPurify.sanitize(raw, DOMPURIFY_CONFIG)
+      : raw.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/<[^>]*on\w+\s*=[^>]*>/gi, '');
   } catch(e) {
     return esc(linked);
   }
@@ -311,6 +367,86 @@ function createPoll() {
   });
 }
 
+function editPoll(pollId) {
+  // 获取投票当前配置
+  authFetch('/api/admin/votes/' + encodeURIComponent(pollId) + '/data')
+    .then(r => r.json())
+    .then(data => {
+      const cfg = data.config || {};
+      document.getElementById('edit-poll-id').value = pollId;
+      document.getElementById('edit-poll-title').value = cfg.title || '';
+      document.getElementById('edit-poll-allow-edit').checked = !!cfg.allowEdit;
+      document.getElementById('edit-poll-custom').checked = !!cfg.custom;
+      document.getElementById('edit-poll-custom-hint').value = cfg.customHint || '';
+      document.getElementById('edit-poll-min-select').value = cfg.minSelect || 1;
+      document.getElementById('edit-poll-max-select').value = cfg.maxSelect || 1;
+      toggleEditCustom();
+
+      // 填充选项
+      const container = document.getElementById('edit-options-container');
+      container.innerHTML = '';
+      (cfg.options || []).forEach((opt, idx) => {
+        addEditOption(opt);
+      });
+      if ((cfg.options || []).length === 0) { addEditOption(); addEditOption(); }
+
+      document.getElementById('edit-panel').style.display = 'block';
+      document.getElementById('edit-panel').scrollIntoView({ behavior: 'smooth' });
+    });
+}
+
+function addEditOption(value) {
+  const container = document.getElementById('edit-options-container');
+  const row = document.createElement('div');
+  row.className = 'opt-row';
+  row.innerHTML = `<input type="text" class="edit-opt" placeholder="选项（支持 Markdown）" value="${esc(value || '')}">
+    <button type="button" class="link-btn" onclick="insertFileLinkEl(this.parentElement.querySelector('.edit-opt'))">🔗 外链</button>
+    <button style="background:#f44336;padding:4px 10px;font-size:12px;height:30px;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="removeEditOption(this)">✕</button>`;
+  container.appendChild(row);
+}
+
+function removeEditOption(btn) { btn.parentElement.remove(); }
+
+function toggleEditCustom() {
+  const checked = document.getElementById('edit-poll-custom').checked;
+  document.getElementById('edit-poll-custom-hint').style.display = checked ? 'block' : 'none';
+}
+
+function submitEditPoll() {
+  const pollId = document.getElementById('edit-poll-id').value;
+  const title = document.getElementById('edit-poll-title').value.trim();
+  if (!title) { alert('请输入标题'); return; }
+  const opts = [];
+  document.querySelectorAll('.edit-opt').forEach(inp => {
+    const v = inp.value.trim();
+    if (v) opts.push(v);
+  });
+  if (opts.length < 2) { alert('至少需要2个选项'); return; }
+  const custom = document.getElementById('edit-poll-custom').checked;
+  const customHint = document.getElementById('edit-poll-custom-hint').value.trim();
+  const allowEdit = document.getElementById('edit-poll-allow-edit').checked;
+  const minSelect = parseInt(document.getElementById('edit-poll-min-select').value) || 1;
+  const maxSelect = parseInt(document.getElementById('edit-poll-max-select').value) || 1;
+  if (minSelect < 1 || minSelect >= opts.length) { alert('最少可选数必须小于选项总数'); return; }
+  if (maxSelect < minSelect || maxSelect > opts.length) { alert('最多可选数无效'); return; }
+
+  authFetch('/api/admin/votes/' + encodeURIComponent(pollId) + '/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title, options: opts, custom, customHint, allowEdit, minSelect, maxSelect
+    })
+  }).then(r => {
+    if (r.ok) {
+      alert('✅ 投票已更新');
+      document.getElementById('edit-panel').style.display = 'none';
+      loadPolls(); // 刷新列表
+    } else {
+      r.text().then(alert);
+    }
+  });
+}
+
 function loadPolls() {
   fetch('/api/votes').then(function(r){return r.json();}).then(function(polls){
     var list = document.getElementById('poll-list');
@@ -326,10 +462,11 @@ function loadPolls() {
       if (p.custom) features.push('自定义');
       if (p.allowEdit) features.push('可修改');
       var featureStr = features.length ? ' ['+features.join('+')+']' : '';
-      // ★ onclick 属性值用 escAttr
+      // ★ 修复：添加缺少的 '+' 连接符
       card.innerHTML = '<h4>'+renderMdInline(p.title)+' <span style="font-weight:normal;font-size:12px;color:#888">('+(p.total_votes||0)+'票)</span></h4>'+
         '<div style="font-size:12px;color:#888;margin:4px 0">选项: '+(p.options||[]).map(function(o){return renderMdInline(o);}).join(', ')+featureStr+'</div>'+
         '<button class="btn-primary btn" onclick="viewPoll(\''+escAttr(p.id)+'\')">查看详情</button> '+
+        '<button class="btn-warn btn" onclick="editPoll(\''+escAttr(p.id)+'\')">✏️ 编辑</button> '+
         '<button class="btn-danger btn" onclick="deletePoll(\''+escAttr(p.id)+'\')">删除</button>';
       list.appendChild(card);
     });
@@ -371,6 +508,13 @@ function viewPoll(pollId) {
     html += '<span style="font-size:11px;color:#888">（同一IP的多票会被均摊权重，不同昵称也合并）</span>';
     html += '</div>';
 
+    // ★ 新增：选项占比复选框（独立于IP权重）
+    html += '&nbsp;&nbsp;&nbsp;<input type="checkbox" id="option-ratio-' + escAttr(pollId) + '" onchange="decryptPoll(\'' + escAttr(pollId) + '\')" checked>';
+    html += '<label for="option-ratio-' + escAttr(pollId) + '" style="cursor:pointer;margin:0">📊 显示选项占比</label>';
+
+    html += '<span style="font-size:11px;color:#888;margin-left:10px">（与IP权重独立）</span>';
+    html += '</div>';
+
     html += '<button class="btn-success btn" onclick="decryptPoll(\''+escAttr(pollId)+'\')">🔓 一键解密统计</button>';
     html += '<div id="dec-results-'+escAttr(pollId)+'"></div>';
     html += '</div>';
@@ -382,14 +526,44 @@ function viewPoll(pollId) {
 
 function deleteVote(pollId, seq) {
   if(!confirm('确定删除投票 #'+seq+' 吗？')) return;
-  authFetch('/api/admin/votes/'+encodeURIComponent(pollId)+'/'+seq, {method:'DELETE'}).then(function(){viewPoll(pollId);});
+  authFetch('/api/admin/votes/'+encodeURIComponent(pollId)+'/'+seq, {method:'DELETE'})
+    .then(function(res) {
+      if (res.ok) { viewPoll(pollId); }
+      else {
+        res.text().then(function(t){
+          try {
+            var errJson = JSON.parse(t);
+            alert('删除失败：' + (errJson.error || t));
+          } catch(e) {
+            alert('删除失败：' + t);
+          }
+        });
+      }
+    })
+    .catch(function(err) {
+      alert('请求失败：' + err.message);
+    });
 }
 
 function deletePoll(pollId) {
   if(!confirm('确定删除整个投票吗？此操作不可撤销！')) return;
-  authFetch('/api/admin/votes/'+encodeURIComponent(pollId), {method:'DELETE'}).then(function(r){
-    if(r.ok){alert('已删除');loadPolls();}else{r.text().then(function(t){alert('删除失败：'+t);});}
-  });
+  authFetch('/api/admin/votes/'+encodeURIComponent(pollId), {method:'DELETE'})
+    .then(function(r){
+      if(r.ok){ alert('已删除'); loadPolls(); }
+      else {
+        r.text().then(function(t){
+          try {
+            var errJson = JSON.parse(t);
+            alert('删除失败：' + (errJson.error || t));
+          } catch(e) {
+            alert('删除失败：' + t);
+          }
+        });
+      }
+    })
+    .catch(function(err) {
+      alert('请求失败：' + err.message);
+    });
 }
 
 // ========== 解密与统计 ==========
@@ -404,7 +578,7 @@ function parseMeta(metaStr) {
   };
 }
 
-function decryptPoll(pollId) {
+async function decryptPoll(pollId) {
   var resultsDiv = document.getElementById('dec-results-' + pollId);
 
   var jse = adminJse;
@@ -419,73 +593,122 @@ function decryptPoll(pollId) {
   var ipWeightCheckbox = document.getElementById('ip-weight-' + pollId);
   var useIpWeight = ipWeightCheckbox ? ipWeightCheckbox.checked : false;
 
+  var optionRatioCheckbox = document.getElementById('option-ratio-' + pollId);
+  var showOptionRatio = optionRatioCheckbox ? optionRatioCheckbox.checked : false;
+
   resultsDiv.innerHTML = '<p style="color:#888">🔐 正在解密：RSA私钥→AES密钥→投票内容' +
     (useIpWeight ? '（IP权重模式）' : '') + '...</p>';
 
   authFetch('/api/admin/votes/' + encodeURIComponent(pollId) + '/data')
     .then(function(r) { return r.json(); })
-    .then(function(data) {
+    .then(async function(data) {
       var tally = {};
       var total = 0;
       var failedRsa = 0;
       var failedAes = 0;
       var details = [];
 
-      (data.votes||[]).forEach(function(v, idx) {
+      for (var idx = 0; idx < (data.votes||[]).length; idx++) {
+        var v = data.votes[idx];
+        // ★ 声明变量，避免未定义错误
+        var choice = '', remarkText = '', ip = null, date = '', meta = '', nick = '';
         try {
-          var aesKeyStr = jse.decrypt(v.rsa_key);
-          if (!aesKeyStr || aesKeyStr.length === 0) {
-            failedRsa++;
-            details.push({ idx: idx + 1, meta: '❌ RSA解密失败', choice: '—', ip: null, nick: null, date: '', remark: '' });
-            return;
-          }
-          var key32 = deriveKey(aesKeyStr);
-          var aesOpts = {
-            iv: CryptoJS.enc.Base64.parse(v.iv),
-            mode: CryptoJS.mode.CBC,
-            padding: CryptoJS.pad.Pkcs7
-          };
-          var choice = '';
-          var meta = '';
-          var ip = null, nick = null, date = '';
-          var isV2 = !!v.aes_msg;
+          var aesKeyStr = null;
+          var isPqcV3 = v.pqc_ciphertext && v.encAESKey;
 
-          if (isV2) {
-            choice = CryptoJS.AES.decrypt(v.aes_msg, key32, aesOpts).toString(CryptoJS.enc.Utf8);
-            if (v.server_enc) {
-              var serverPlain = jse.decrypt(v.server_enc);
-              if (serverPlain) {
-                var smp = serverPlain.split(' | ');
-                ip = (smp[0] || '').trim() || null;
-                date = (smp[1] || '').trim();
-                meta = serverPlain;
-                nick = '—';
-              }
-            }
-          } else {
-            if (v.meta_enc) {
-              meta = CryptoJS.AES.decrypt(v.meta_enc, key32, aesOpts).toString(CryptoJS.enc.Utf8);
-              var parsed = parseMeta(meta);
-              ip = parsed.ip;
-              nick = parsed.nick;
-              date = parsed.date;
-            }
-            choice = CryptoJS.AES.decrypt(v.content_enc, key32, aesOpts).toString(CryptoJS.enc.Utf8);
-          }
-
-          // ★ 解密备注
-          var remarkText = '';
-          if (v.remark_iv && v.remark_aes_msg) {
+          if (isPqcV3 && adminPqcPrivBytes) {
+            // ★ PQC 解密路径
             try {
-              var remarkIvParsed = CryptoJS.enc.Base64.parse(v.remark_iv);
-              var remarkDec = CryptoJS.AES.decrypt(v.remark_aes_msg, key32, {
-                iv: remarkIvParsed,
-                mode: CryptoJS.mode.CBC,
-                padding: CryptoJS.pad.Pkcs7
-              }).toString(CryptoJS.enc.Utf8);
-              if (remarkDec) remarkText = remarkDec;
-            } catch(e) {
-              remarkText = '（解密失败）';
+              var { ml_kem1024 } = await import('@noble/post-quantum/ml-kem');
+              var rawCt = base64ToBytes(v.pqc_ciphertext);
+              var shared = ml_kem1024.decapsulate(rawCt, adminPqcPrivBytes);
+              var sharedWa = CryptoJS.lib.WordArray.create(shared);
+              var layer1Key = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(sharedWa).toString().substring(0, 64));
+              var layer2KeyB64 = CryptoJS.AES.decrypt(
+                v.encAESKey, layer1Key,
+                { iv: CryptoJS.enc.Base64.parse(v.iv_shared), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+              ).toString(CryptoJS.enc.Utf8);
+              var layer2Key = CryptoJS.enc.Base64.parse(layer2KeyB64);
+              var payload = CryptoJS.AES.decrypt(
+                v.encContent, layer2Key,
+                { iv: CryptoJS.enc.Base64.parse(v.iv_content), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+              ).toString(CryptoJS.enc.Utf8);
+              if (payload) {
+                var pl = JSON.parse(payload);
+                aesKeyStr = pl.key;
+                choice = pl.vote || '';
+                remarkText = pl.remark || '';
+                // 构造 meta
+                if (v.server_enc) {
+                  var serverPlain = jse ? jse.decrypt(v.server_enc) : '';
+                  if (serverPlain) {
+                    var smp = serverPlain.split(' | ');
+                    ip = (smp[0] || '').trim() || null;
+                    date = (smp[1] || '').trim();
+                    meta = serverPlain;
+                    nick = '—';
+                  }
+                }
+                if (!meta) meta = '🔮 PQC解密';
+              }
+            } catch(pqcErr) {
+              console.warn('PQC解密失败，尝试RSA:', pqcErr.message);
+              isPqcV3 = false; // 回退 RSA
+            }
+          }
+
+          if (!isPqcV3 || !aesKeyStr) {
+            // ★ RSA 解密路径（原有逻辑）
+            aesKeyStr = jse.decrypt(v.rsa_key);
+            if (!aesKeyStr || aesKeyStr.length === 0) {
+              failedRsa++;
+              details.push({ idx: idx + 1, meta: '❌ RSA解密失败', choice: '—', ip: null, nick: null, date: '', remark: '' });
+              continue; // 注意：原代码用 return，但应使用 continue 跳过本次循环
+            }
+            var key32 = deriveKey(aesKeyStr);
+            var aesOpts = {
+              iv: CryptoJS.enc.Base64.parse(v.iv),
+              mode: CryptoJS.mode.CBC,
+              padding: CryptoJS.pad.Pkcs7
+            };
+            var isV2 = !!v.aes_msg;
+
+            if (isV2) {
+              choice = CryptoJS.AES.decrypt(v.aes_msg, key32, aesOpts).toString(CryptoJS.enc.Utf8);
+              if (v.server_enc) {
+                var serverPlain = jse.decrypt(v.server_enc);
+                if (serverPlain) {
+                  var smp = serverPlain.split(' | ');
+                  ip = (smp[0] || '').trim() || null;
+                  date = (smp[1] || '').trim();
+                  meta = serverPlain;
+                  nick = '—';
+                }
+              }
+            } else {
+              if (v.meta_enc) {
+                meta = CryptoJS.AES.decrypt(v.meta_enc, key32, aesOpts).toString(CryptoJS.enc.Utf8);
+                var parsed = parseMeta(meta);
+                ip = parsed.ip;
+                nick = parsed.nick;
+                date = parsed.date;
+              }
+              choice = CryptoJS.AES.decrypt(v.content_enc, key32, aesOpts).toString(CryptoJS.enc.Utf8);
+            }
+
+            // ★ 解密备注
+            if (v.remark_iv && v.remark_aes_msg) {
+              try {
+                var remarkIvParsed = CryptoJS.enc.Base64.parse(v.remark_iv);
+                var remarkDec = CryptoJS.AES.decrypt(v.remark_aes_msg, key32, {
+                  iv: remarkIvParsed,
+                  mode: CryptoJS.mode.CBC,
+                  padding: CryptoJS.pad.Pkcs7
+                }).toString(CryptoJS.enc.Utf8);
+                if (remarkDec) remarkText = remarkDec;
+              } catch(e) {
+                remarkText = '（解密失败）';
+              }
             }
           }
 
@@ -501,8 +724,7 @@ function decryptPoll(pollId) {
           failedAes++;
           details.push({ idx: idx + 1, meta: '❌ 异常', choice: e.message, ip: null, nick: null, date: '', remark: '' });
         }
-      });
-
+      }
       var weightedTally = {};
       var weightedTotal = 0;
       var ipStats = null;
@@ -548,9 +770,74 @@ function decryptPoll(pollId) {
           '<div class="bar-wrap"><div class="bar" style="width:'+pct+'%"></div></div>';
       });
 
+      // ── ★ 新增：普通选项占比（无IP权重） ──
+      if (showOptionRatio) {
+        var optionCounts = {};
+        details.forEach(function(d) {
+          // 根据实际投票选择的分隔符调整，示例用逗号
+          var choices = d.choice ? d.choice.split(',').map(function(s) { return s.trim(); }) : [];
+          choices.forEach(function(opt) {
+            if (opt) optionCounts[opt] = (optionCounts[opt] || 0) + 1;
+          });
+        });
+
+        resultsDiv.innerHTML += '<h4 style="margin:16px 0 8px">📈 选项占比（无IP权重）</h4>';
+        var optEntries = Object.entries(optionCounts).sort(function(a,b) { return b[1] - a[1]; });
+        optEntries.forEach(function(e) {
+          var pct = total > 0 ? Math.round(e[1] / total * 100) : 0;
+          resultsDiv.innerHTML +=
+            '<div class="bar-label"><span>'+renderMdInline(e[0])+'</span><span>'+e[1]+'票 ('+pct+'%)</span></div>' +
+            '<div class="bar-wrap"><div class="bar" style="width:'+pct+'%;background:#009688"></div></div>';
+        });
+      }
+
       // ── IP 权重统计 ──
       if (useIpWeight && ipStats && ipStats.uniqueIps > 0) {
         resultsDiv.innerHTML += '<h4 style="margin:16px 0 8px">🌐 IP权重统计 <span class="weighted-badge">去重</span></h4>';
+
+        // ★ 显示加权组合统计（原代码中的 weightedEntries 显示）
+        var weightedEntries = Object.entries(weightedTally).sort(function(a,b) { return b[1] - a[1]; });
+        weightedEntries.forEach(function(e) {
+          var wpct = Math.round(e[1] * 100);
+          resultsDiv.innerHTML +=
+            '<div class="bar-label"><span>'+renderMdInline(e[0])+'</span><span>≈'+e[1].toFixed(2)+'票 ('+wpct+'%)</span></div>' +
+            '<div class="bar-wrap"><div class="bar-ip" style="width:'+wpct+'%"></div></div>';
+        });
+        resultsDiv.innerHTML += '<p style="font-size:11px;color:#888;margin:2px 0">';
+        resultsDiv.innerHTML += '💡 加权总分 = ' + weightedTotal.toFixed(2) + '（≈1.0）';
+        resultsDiv.innerHTML += '</p>';
+
+        // ── ★ 新增：IP权重选项占比（独立控制） ──
+        if (showOptionRatio) {
+          var weightedOptionCounts = {};
+          details.forEach(function(d) {
+            if (d.choice && !d.choice.startsWith('❌')) {
+              var weight = 0;
+              if (d.ip && ipStats) {
+                var group = ipStats.ipGroups[d.ip];
+                if (group) {
+                  weight = 1 / ipStats.uniqueIps / group.length;
+                }
+              }
+              if (weight === 0) return;
+              var choices = d.choice.split(',').map(function(s) { return s.trim(); });
+              choices.forEach(function(opt) {
+                if (opt) weightedOptionCounts[opt] = (weightedOptionCounts[opt] || 0) + weight;
+              });
+            }
+          });
+
+          resultsDiv.innerHTML += '<h4 style="margin:16px 0 8px">📈 选项占比（IP权重）</h4>';
+          var wOptEntries = Object.entries(weightedOptionCounts).sort(function(a,b) { return b[1] - a[1]; });
+          wOptEntries.forEach(function(e) {
+            var wpct = Math.round(e[1] / weightedTotal * 100);
+            resultsDiv.innerHTML +=
+              '<div class="bar-label"><span>'+renderMdInline(e[0])+'</span><span>≈'+e[1].toFixed(2)+'票 ('+wpct+'%)</span></div>' +
+              '<div class="bar-wrap"><div class="bar-ip" style="width:'+wpct+'%"></div></div>';
+          });
+        }
+
+        // 原有的IP详情（唯一IP数、分组详情）保持不变，放在下面
         resultsDiv.innerHTML += '<p style="font-size:12px;color:#888;margin:4px 0">';
         resultsDiv.innerHTML += '唯一IP数：<b>' + ipStats.uniqueIps + '</b> 个 | ';
         resultsDiv.innerHTML += '每IP基础权重：<b>' + (100 / ipStats.uniqueIps).toFixed(1) + '%</b>';

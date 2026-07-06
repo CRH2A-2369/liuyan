@@ -1123,7 +1123,8 @@ async function exportPlainData() {
                 }
        }
 
-        // ---- 投票 ----
+        // ---- 投票（支持 v2 和 v3） ----
+        // 1. 收集所有投票目录中的文件
         const voteDirs = {};
         for (const [path, file] of Object.entries(zip.files)) {
             if (file.dir) continue;
@@ -1134,81 +1135,196 @@ async function exportPlainData() {
             if (!voteDirs[pollId]) voteDirs[pollId] = {};
             voteDirs[pollId][filename] = file;
         }
+
+        // 2. 遍历每个投票
         for (const [pollId, files] of Object.entries(voteDirs)) {
             let config = {};
+            // 读取投票配置（标题、选项、多选限制等）
             if (files['config.json']) {
                 try {
                     const raw = await files['config.json'].async('string');
                     config = JSON.parse(raw);
-                } catch (e) {}
+                } catch (e) {
+                    console.warn(`投票 ${pollId} 配置解析失败`, e);
+                }
             }
+
             const votes = [];
+            // 遍历该投票下的所有投票记录文件（投票_序号.txt）
             for (const [fname, file] of Object.entries(files)) {
                 if (!fname.match(/^投票_\d+\.txt$/)) continue;
                 const seq = parseInt(fname.match(/\d+/)[0], 10);
                 const content = await file.async('string');
                 const lines = content.split('\n').filter(l => l.trim());
-                if (lines.length < 6) continue;
+                if (lines.length < 6) continue;  // 最少需要 6 行
                 const first = lines[0];
-                if (!first.startsWith('v2|')) continue;
-                const parts = first.split('|');
-                const rsaKey = parts[1];
-                const iv = parts[2];
-                const aesMsg = lines[1];
-                const serverEnc = lines[2];
-                const editToken = lines[3];
-                const keyHash = lines[4];
 
-                // 解密 server_enc
-                let ip = '127.0.0.1', time = '';
-                if (serverEnc) {
-                    const raw = serverEnc.startsWith('RSA:') ? serverEnc.slice(4) : serverEnc;
-                    try {
-                        const dec = jse.decrypt(raw);
-                        if (dec) {
-                            const parts2 = dec.split(' | ');
-                            if (parts2.length >= 2) {
-                                ip = parts2[0];
-                                time = parts2[1];
-                            }
-                        }
-                    } catch (e) {}
-                }
+                // ---------- v2 格式（RSA 加密） ----------
+                if (first.startsWith('v2|')) {
+                    const parts = first.split('|');
+                    // 格式: v2|rsa_key|iv
+                    const rsaKey = parts[1] || '';
+                    const iv = parts[2] || '';
+                    const aesMsg = lines[1] || '';           // AES 加密的投票内容
+                    const serverEnc = lines[2] || '';        // RSA 加密的 IP|时间
+                    const editToken = lines[3] || '';
+                    const keyHash = lines[4] || '';
 
-                // 解密内容
-                let contentText = '（解密失败）', rawAES = '';
-                try {
-                    rawAES = jse.decrypt(rsaKey);
-                    if (rawAES) {
-                        const key32 = deriveKey(rawAES);
-                        const ivW = CryptoJS.enc.Base64.parse(iv);
-                        const plain = CryptoJS.AES.decrypt(aesMsg, key32, {
-                            iv: ivW,
-                            mode: CryptoJS.mode.CBC,
-                            padding: CryptoJS.pad.Pkcs7
-                        }).toString(CryptoJS.enc.Utf8);
-                        if (plain) {
-                            const sep = plain.indexOf(' | ');
-                            if (sep !== -1) {
-                                contentText = plain.substring(sep + 3).trim();
-                            } else {
-                                contentText = plain;
+                    // 解密 server_enc 获取 IP 和时间（使用管理员 RSA 私钥）
+                    let ip = '127.0.0.1', time = '';
+                    if (serverEnc) {
+                        const raw = serverEnc.startsWith('RSA:') ? serverEnc.slice(4) : serverEnc;
+                        try {
+                            const dec = jse.decrypt(raw);
+                            if (dec) {
+                                const parts2 = dec.split(' | ');
+                                if (parts2.length >= 2) {
+                                    ip = parts2[0];
+                                    time = parts2[1];
+                                }
                             }
-                        }
+                        } catch (e) {}
                     }
-                } catch (e) {}
-                votes.push({
-                    seq,
-                    content: contentText,
-                    rawAES: rawAES,
-                    key_hash: keyHash,
-                    iv: iv,
-                    ip: ip,
-                    time: time
-                });
-            }
+
+                    // 解密投票内容（用 RSA 解密得到的 AES 密钥）
+                    let contentText = '（解密失败）', rawAES = '';
+                    try {
+                        rawAES = jse.decrypt(rsaKey);
+                        if (rawAES) {
+                            const key32 = deriveKey(rawAES);
+                            const ivW = CryptoJS.enc.Base64.parse(iv);
+                            const plain = CryptoJS.AES.decrypt(aesMsg, key32, {
+                                iv: ivW,
+                                mode: CryptoJS.mode.CBC,
+                                padding: CryptoJS.pad.Pkcs7
+                            }).toString(CryptoJS.enc.Utf8);
+                            if (plain) {
+                                // 格式: "投票者 | 选项内容"
+                                const sep = plain.indexOf(' | ');
+                                if (sep !== -1) {
+                                    contentText = plain.substring(sep + 3).trim();
+                                } else {
+                                    contentText = plain;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn(`投票 ${pollId} 序号 ${seq} v2 解密失败`, e);
+                    }
+                    // 跳过解密失败的数据（rawAES 为空则无法重新加密）
+                    if (!rawAES) continue;
+
+                    votes.push({
+                        seq,
+                        content: contentText,
+                        rawAES: rawAES,
+                        key_hash: keyHash,
+                        iv: iv,
+                        ip: ip,
+                        time: time,
+                        version: 'v2'
+                    });
+                }
+                // ---------- v3 格式（PQC 加密） ----------
+                else if (first.startsWith('v3|')) {
+                    const v3parts = first.split('|');
+                    // v3|pqc_ciphertext|iv_shared|iv_content|encAESKey|encContent|identity_hash
+                    if (v3parts.length < 6) continue;
+                    const pqcCiphertextB64 = v3parts[1];
+                    const ivSharedB64 = v3parts[2];
+                    const ivContentB64 = v3parts[3];
+                    // encAESKey 和 encContent 在独立行（第2、3行）
+                    const encAESKeyB64 = (lines[1] || '').trim();
+                    const encContentB64 = (lines[2] || '').trim();
+                    if (!encAESKeyB64 || !encContentB64) continue;
+
+                    try {
+                        // 1) 解封 PQC 主密文，得到共享密钥
+                        const ct = Uint8Array.from(atob(pqcCiphertextB64), c => c.charCodeAt(0));
+                        const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+                        const sharedKey = await crypto.subtle.digest('SHA-256', shared);
+                        const aesKeyShared = new Uint8Array(sharedKey);
+
+                        // 2) 用共享密钥解密用户 AES 密钥（rawAES）
+                        const ivShared = Uint8Array.from(atob(ivSharedB64), c => c.charCodeAt(0));
+                        const encAESKeyBytes = Uint8Array.from(atob(encAESKeyB64), c => c.charCodeAt(0));
+                        const decKey = await crypto.subtle.decrypt(
+                            { name: 'AES-CBC', iv: ivShared },
+                            await crypto.subtle.importKey('raw', aesKeyShared, { name: 'AES-CBC' }, false, ['decrypt']),
+                            encAESKeyBytes
+                        );
+                        const rawAES = new TextDecoder().decode(new Uint8Array(decKey));
+
+                        // 3) 用 rawAES 解密投票内容（先 SHA-256 哈希 rawAES）
+                        const userAESKeyDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rawAES));
+                        const ivContent = Uint8Array.from(atob(ivContentB64), c => c.charCodeAt(0));
+                        const encContentBytes = Uint8Array.from(atob(encContentB64), c => c.charCodeAt(0));
+                        const decContent = await crypto.subtle.decrypt(
+                            { name: 'AES-CBC', iv: ivContent },
+                            await crypto.subtle.importKey('raw', new Uint8Array(userAESKeyDigest), { name: 'AES-CBC' }, false, ['decrypt']),
+                            encContentBytes
+                        );
+                        const plain = new TextDecoder().decode(decContent);
+                        // 解析 JSON payload: { key, vote, remark }
+                        let payload = {};
+                        try { payload = JSON.parse(plain); } catch(e) {}
+                        const voteContent = payload.vote || plain;  // 若解析失败则回退
+                        const remark = payload.remark || '';
+
+                        // 分离投票者与内容（如果有 ' | ' 分隔）
+                        let contentText = voteContent;
+                        const sepIdx = voteContent.indexOf(' | ');
+                        if (sepIdx !== -1) {
+                            contentText = voteContent.substring(sepIdx + 3).trim();
+                        }
+
+                        // 4) 解密 IP 和时间（第4行 JSON 数据）
+                        let ip = '127.0.0.1', time = '';
+                        if (lines.length >= 4) {
+                            try {
+                                const ipData = JSON.parse(lines[3]);
+                                const ctIp = Uint8Array.from(atob(ipData.ciphertext_ip), c => c.charCodeAt(0));
+                                const sharedIp = ml_kem1024.decapsulate(ctIp, pqcPrivateKeyBytes);
+                                const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
+                                const aesKeyIp = new Uint8Array(keyIp);
+                                const ivIp = Uint8Array.from(atob(ipData.iv_ip), c => c.charCodeAt(0));
+                                const encIpBytes = Uint8Array.from(atob(ipData.enc_ip), c => c.charCodeAt(0));
+                                const decIp = await crypto.subtle.decrypt(
+                                    { name: 'AES-CBC', iv: ivIp },
+                                    await crypto.subtle.importKey('raw', aesKeyIp, { name: 'AES-CBC' }, false, ['decrypt']),
+                                    encIpBytes
+                                );
+                                const ipPlain = new TextDecoder().decode(decIp);
+                                const parts = ipPlain.split(' | ');
+                                if (parts.length >= 2) {
+                                    ip = parts[0];
+                                    time = parts[1];
+                                }
+                            } catch (e) {
+                                console.warn(`v3 投票 IP 解密失败`, e);
+                            }
+                        }
+
+                        votes.push({
+                            seq,
+                            content: contentText,
+                            rawAES: rawAES,
+                            key_hash: lines[4] || '',
+                            iv: ivContentB64,
+                            ip: ip,
+                            time: time,
+                            version: 'v3',
+                            remark: remark   // ★ 新增备注
+                        });
+                    } catch (e) {
+                        console.warn(`v3 投票序号 ${seq} 解密失败`, e);
+                    }
+                }
+            } // end for files
+
+            // 将解密后的投票数据存入结果对象
             result.votes[pollId] = { config, votes };
-        }
+        } // end for voteDirs
 
         // ---- 公告 ----
         const noticeRaw = await getFileContent('notice_data.json');
@@ -1253,7 +1369,7 @@ async function exportPlainData() {
             } catch (e) {}
         }
 
-        // ---- 私聊 ----
+        // ---- 私聊（支持 v2 和 v3） ----
         for (const [path, file] of Object.entries(zip.files)) {
             if (file.dir) continue;
             const match = path.match(/^chat\/([a-f0-9]{16}_\d{4}\.txt)$/);
@@ -1263,31 +1379,142 @@ async function exportPlainData() {
             const lines = content.split('\n').filter(l => l.trim());
             if (lines.length < 4) continue;
             const first = lines[0];
-            if (!first.startsWith('v2|')) continue;
-            const parts = first.split('|');
-            const senderPub = parts[1] || '';
-            const iv = parts[2] || '';
-            const expireAt = parts[3] || '';
-            const wrappedKey = lines[1] || '';
-            const aesContent = lines[2] || '';
-            const adminLine = lines[3] || '';
-            const adminParts = adminLine.split('|', 2);
-            const adminIpEnc = adminParts[0] || '';
-            const serverTime = adminParts[1] || '';
-            let ip = adminIpEnc;
-            if (adminIpEnc.startsWith('RSA:')) {
-                try { const dec = jse.decrypt(adminIpEnc.slice(4)); if (dec) ip = dec; } catch (e) {}
+
+            // ---------- v2 RSA 加密 ----------
+            if (first.startsWith('v2|')) {
+                const parts = first.split('|');
+                const senderPub = parts[1] || '';
+                const iv = parts[2] || '';
+                const expireAt = parts[3] || '';
+                const wrappedKey = lines[1] || '';
+                const aesContent = lines[2] || '';
+                const adminLine = lines[3] || '';
+                const adminParts = adminLine.split('|', 2);
+                const adminIpEnc = adminParts[0] || '';
+                const serverTime = adminParts[1] || '';
+                let ip = adminIpEnc;
+                if (adminIpEnc.startsWith('RSA:')) {
+                    try { const dec = jse.decrypt(adminIpEnc.slice(4)); if (dec) ip = dec; } catch (e) {}
+                }
+                result.chat_private.push({
+                    filename,
+                    sender_pub: senderPub,
+                    iv,
+                    expire_at: expireAt,
+                    wrapped_key: wrappedKey,
+                    aes_content: aesContent,
+                    ip: ip,
+                    time: serverTime,
+                    version: 'v2'
+                });
             }
-            result.chat_private.push({
-                filename,
-                sender_pub: senderPub,
-                iv,
-                expire_at: expireAt,
-                wrapped_key: wrappedKey,
-                aes_content: aesContent,
-                ip: ip,
-                time: serverTime
-            });
+            // ---------- v3 PQC 加密 ----------
+            else if (first.startsWith('v3|')) {
+                const parts = first.split('|');
+                // v3|sender_pub|iv|expire_at|pqc_ciphertext|iv_shared|iv_content|encAESKey|encContent|sender_pqc_pub
+                if (parts.length < 10) continue;
+                const senderPub = parts[1] || '';
+                const iv = parts[2] || '';
+                const expireAt = parts[3] || '';
+                const pqcCiphertextB64 = parts[4] || '';
+                const ivSharedB64 = parts[5] || '';
+                const ivContentB64 = parts[6] || '';
+                const encAESKeyB64 = (lines[1] || '').trim();
+                const encContentB64 = (lines[2] || '').trim();
+                const senderPqcPub = (lines[9] || '').trim();
+                if (!pqcCiphertextB64 || !encAESKeyB64 || !encContentB64) continue;
+
+                try {
+                    // 1) 解封 PQC 主密文
+                    const ct = Uint8Array.from(atob(pqcCiphertextB64), c => c.charCodeAt(0));
+                    const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+                    const sharedKey = await crypto.subtle.digest('SHA-256', shared);
+                    const aesKeyShared = new Uint8Array(sharedKey);
+
+                    // 2) 用共享密钥解密用户 AES 密钥
+                    const ivShared = Uint8Array.from(atob(ivSharedB64), c => c.charCodeAt(0));
+                    const encAESKeyBytes = Uint8Array.from(atob(encAESKeyB64), c => c.charCodeAt(0));
+                    const decKey = await crypto.subtle.decrypt(
+                        { name: 'AES-CBC', iv: ivShared },
+                        await crypto.subtle.importKey('raw', aesKeyShared, { name: 'AES-CBC' }, false, ['decrypt']),
+                        encAESKeyBytes
+                    );
+                    const rawAES = new TextDecoder().decode(new Uint8Array(decKey));
+
+                    // 3) 用 rawAES 解密消息内容（昵称|时间|内容|nonce）
+                    const userAESKeyDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rawAES));
+                    const ivContent = Uint8Array.from(atob(ivContentB64), c => c.charCodeAt(0));
+                    const encContentBytes = Uint8Array.from(atob(encContentB64), c => c.charCodeAt(0));
+                    const decContent = await crypto.subtle.decrypt(
+                        { name: 'AES-CBC', iv: ivContent },
+                        await crypto.subtle.importKey('raw', new Uint8Array(userAESKeyDigest), { name: 'AES-CBC' }, false, ['decrypt']),
+                        encContentBytes
+                    );
+                    const plain = new TextDecoder().decode(decContent);
+                    // 格式: 昵称|时间|内容|nonce
+                    const parts2 = plain.split('|');
+                    let nick = '匿名', time = '', msgContent = '', nonce = '';
+                    if (parts2.length >= 3) {
+                        nick = parts2[0].trim();
+                        time = parts2[1].trim();
+                        msgContent = parts2.slice(2, parts2.length - 1).join('|').trim();
+                        nonce = parts2[parts2.length - 1];
+                    }
+
+                    // 4) 解密 IP 和时间（第4行：admin_ip | server_time）
+                    let ip = '127.0.0.1', serverTime = '';
+                    const adminLine = lines[3] || '';
+                    const adminParts = adminLine.split('|', 2);
+                    const adminIpEnc = adminParts[0] || '';
+                    serverTime = adminParts[1] || '';
+                    // 如果 adminIpEnc 是 PQC_IP: 格式，则需要用 PQC 解密
+                    if (adminIpEnc.startsWith('PQC_IP:')) {
+                        try {
+                            const ipData = JSON.parse(atob(adminIpEnc.slice(7)));
+                            const ctIp = Uint8Array.from(atob(ipData.ct), c => c.charCodeAt(0));
+                            const sharedIp = ml_kem1024.decapsulate(ctIp, pqcPrivateKeyBytes);
+                            const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
+                            const aesKeyIp = new Uint8Array(keyIp);
+                            const ivIp = Uint8Array.from(atob(ipData.iv), c => c.charCodeAt(0));
+                            const encIpBytes = Uint8Array.from(atob(ipData.enc), c => c.charCodeAt(0));
+                            const decIp = await crypto.subtle.decrypt(
+                                { name: 'AES-CBC', iv: ivIp },
+                                await crypto.subtle.importKey('raw', aesKeyIp, { name: 'AES-CBC' }, false, ['decrypt']),
+                                encIpBytes
+                            );
+                            const ipPlain = new TextDecoder().decode(decIp);
+                            const parts3 = ipPlain.split(' | ');
+                            if (parts3.length >= 2) { ip = parts3[0]; serverTime = parts3[1]; }
+                        } catch(e) { /* 忽略 */ }
+                    } else if (adminIpEnc.startsWith('RSA:')) {
+                        try {
+                            const dec = jse.decrypt(adminIpEnc.slice(4));
+                            if (dec) {
+                                const parts3 = dec.split(' | ');
+                                if (parts3.length >= 2) { ip = parts3[0]; serverTime = parts3[1]; }
+                            }
+                        } catch(e) { /* 忽略 */ }
+                    }
+
+                    result.chat_private.push({
+                        filename,
+                        sender_pub: senderPub,
+                        iv: iv,
+                        expire_at: expireAt,
+                        wrapped_key: 'PQC_V3',        // 标记
+                        aes_content: encContentB64,    // 保留密文
+                        ip: ip,
+                        time: serverTime,
+                        version: 'v3',
+                        nick: nick,
+                        content: msgContent,
+                        rawAES: rawAES,
+                        sender_pqc_pub: senderPqcPub
+                    });
+                } catch(e) {
+                    console.warn(`v3 私聊解密失败: ${filename}`, e);
+                }
+            }
         }
 
         // ---- IP 记录 ----
@@ -1583,46 +1810,98 @@ async function importPlainData(input) {
             }
         }
 
-        // ---- 投票 ----
+        // ---- 投票（支持 v2 和 v3 重新加密） ----
         if (data.votes && typeof data.votes === 'object') {
+            // 遍历每个投票
             for (const [pollId, pollData] of Object.entries(data.votes)) {
                 const config = pollData.config || {};
                 const votes = pollData.votes || [];
                 if (!config.options || config.options.length < 2) continue;
+
+                // 创建投票目录
                 const dir = `vote_data/${pollId}`;
+                // 写入配置文件（config.json）
                 addFile(`${dir}/config.json`, JSON.stringify(config, null, 2));
+
                 let voteSeq = 1;
                 for (const vote of votes) {
                     if (!vote.content) continue;
-                    let rawAES = vote.rawAES;
-                    if (!rawAES) {
-                        const aesKeyBytes = CryptoJS.lib.WordArray.random(32);
-                        rawAES = aesKeyBytes.toString(CryptoJS.enc.Base64);
+
+                    // 判断是否使用 v3（要求数据中有 version 字段且为 'v3'，且 PQC 公钥可用）
+                    const isV3 = (vote.version === 'v3' && pqcPubBytes && ml_kem1024_import);
+
+                    // ---------- v3 格式（PQC 加密） ----------
+                    if (isV3) {
+                        // 获取或生成 rawAES（用户 AES 密钥）
+                        let rawAES = vote.rawAES;
+                        if (!rawAES) {
+                            // 若无则生成新密钥（32字节随机）
+                            const aesKeyBytes = crypto.getRandomValues(new Uint8Array(32));
+                            rawAES = new TextDecoder().decode(aesKeyBytes);
+                        }
+
+                        // 计算 rawAES 的 SHA-256 哈希，用于内容加密
+                        const userAESKeyRaw = new TextEncoder().encode(rawAES);
+                        const userAESKeyDigest = await crypto.subtle.digest('SHA-256', userAESKeyRaw);
+
+                        // 生成新的 ML-KEM 封装（使用当前服务器 PQC 公钥）
+                        const { cipherText, sharedSecret } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                        const sharedKey = await crypto.subtle.digest('SHA-256', sharedSecret);
+                        const aesKeyShared = new Uint8Array(sharedKey);
+
+                        // 用共享密钥加密 rawAES
+                        const encAESKeyResult = await encryptAES(rawAES, aesKeyShared);
+
+                        // ★ 构建 JSON payload: { key: rawAES, vote: 内容, remark: 备注 }
+                        const voteRemark = vote.remark || '';
+                        const payload = JSON.stringify({
+                            key: rawAES,
+                            vote: `投票者 | ${vote.content}`,
+                            remark: voteRemark
+                        });
+                        const encContentResult = await encryptAES(payload, new Uint8Array(userAESKeyDigest));
+
+                        // 加密 IP 和时间（用新的 ML-KEM 封装）
+                        const ip = vote.ip || '127.0.0.1';
+                        const time = vote.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                        const ipPlain = `${ip} | ${time}`;
+                        const { cipherText: ctIp, sharedSecret: sharedIp } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                        const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
+                        const aesKeyIp = new Uint8Array(keyIp);
+                        const encIpResult = await encryptAES(ipPlain, aesKeyIp);
+                        const ipData = {
+                            ciphertext_ip: btoa(String.fromCharCode(...ctIp)),
+                            iv_ip: btoa(String.fromCharCode(...encIpResult.iv)),
+                            enc_ip: btoa(String.fromCharCode(...encIpResult.ciphertext))
+                        };
+
+                        // 计算身份哈希（用于前端查询）
+                        const identityData = new TextEncoder().encode(`投票者|${rawAES}`);
+                        const hashBuf = await crypto.subtle.digest('SHA-256', identityData);
+                        const identityHash = Array.from(new Uint8Array(hashBuf))
+                            .map(b => b.toString(16).padStart(2, '0')).join('');
+
+                        // 组装 v3 文件头
+                        const encAESKeyB64 = btoa(String.fromCharCode(...encAESKeyResult.ciphertext));
+                        const encContentB64 = btoa(String.fromCharCode(...encContentResult.ciphertext));
+                        const v3Header = [
+                            'v3',
+                            btoa(String.fromCharCode(...cipherText)),
+                            btoa(String.fromCharCode(...encAESKeyResult.iv)),
+                            btoa(String.fromCharCode(...encContentResult.iv)),
+                            encAESKeyB64,
+                            encContentB64,
+                            identityHash
+                        ].join('|');
+
+                        // v3 文件内容：头 + encAESKey 行 + encContent 行 + IP数据 JSON
+                        const fileContent = v3Header + '\n' + encAESKeyB64 + '\n' + encContentB64 + '\n' + JSON.stringify(ipData);
+                        addFile(`${dir}/投票_${voteSeq}.txt`, fileContent);
                     }
-                    const rsaKey = encryptor.encrypt(rawAES);
-                    if (!rsaKey) continue;
-                    const iv = CryptoJS.lib.WordArray.random(16);
-                    const ivBase64 = iv.toString(CryptoJS.enc.Base64);
-                    const plainText = `投票者 | ${vote.content}`;
-                    const key32 = deriveKey(rawAES);
-                    const encrypted = CryptoJS.AES.encrypt(plainText, key32, {
-                        iv: iv,
-                        mode: CryptoJS.mode.CBC,
-                        padding: CryptoJS.pad.Pkcs7
-                    }).toString();
-                    const ip = vote.ip || '127.0.0.1';
-                    const time = vote.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
-                    const serverMeta = `${ip} | ${time}`;
-                    const serverEnc = encryptRSA(serverMeta);
-                    const editToken = CryptoJS.lib.WordArray.random(24).toString(CryptoJS.enc.Base64).slice(0, 24);
-                    const keyHash = CryptoJS.SHA512(rawAES).toString();
-                    const remarkLine = '';
-                    const fileContent = `v2|${rsaKey}|${ivBase64}\n${encrypted}\n${serverEnc}\n${editToken}\n${keyHash}\n${remarkLine}`;
-                    addFile(`${dir}/投票_${voteSeq}.txt`, fileContent);
                     voteSeq++;
-                }
-            }
-        }
+                } // end for votes
+            } // end for pollData
+        } // end if data.votes
 
         // ---- 公告 ----
         if (Array.isArray(data.notices)) {
@@ -1653,15 +1932,78 @@ async function importPlainData(input) {
             addFile('chat_data.json', JSON.stringify(chat, null, 2));
         }
 
-        // ---- 私聊 ----
+        // ---- 私聊（支持 v2 和 v3） ----
         if (Array.isArray(data.chat_private)) {
             for (const msg of data.chat_private) {
                 const filename = msg.filename || `unknown_${Date.now()}.txt`;
-                const ip = msg.ip || '127.0.0.1';
-                const encryptedIp = encryptRSA(ip) || 'PLAIN:' + ip;
-                const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
-                const content = `v2|${msg.sender_pub}|${msg.iv}|${msg.expire_at || ''}\n${msg.wrapped_key}\n${msg.aes_content}\n${encryptedIp} | ${time}`;
-                addFile(`chat/${filename}`, content);
+                // 判断是否使用 v3
+                const isV3 = (msg.version === 'v3' && pqcPubBytes && ml_kem1024_import);
+
+                if (isV3) {
+                    // ---------- PQC v3 重新加密 ----------
+                    let rawAES = msg.rawAES;
+                    if (!rawAES) {
+                        const aesKeyBytes = crypto.getRandomValues(new Uint8Array(32));
+                        rawAES = new TextDecoder().decode(aesKeyBytes);
+                    }
+                    const userAESKeyRaw = new TextEncoder().encode(rawAES);
+                    const userAESKeyDigest = await crypto.subtle.digest('SHA-256', userAESKeyRaw);
+
+                    // 生成新的 ML-KEM 封装
+                    const { cipherText, sharedSecret } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                    const sharedKey = await crypto.subtle.digest('SHA-256', sharedSecret);
+                    const aesKeyShared = new Uint8Array(sharedKey);
+
+                    // 加密 rawAES
+                    const encAESKeyResult = await encryptAES(rawAES, aesKeyShared);
+
+                    // 加密消息内容（格式：昵称|时间|内容|nonce）
+                    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(8)))
+                        .map(b => b.toString(16).padStart(2,'0')).join('');
+                    const contentPlain = `${msg.nick || '匿名'}|${msg.time || new Date().toISOString().replace('T', ' ').slice(0,19)}|${msg.content || ''}|${nonce}`;
+                    const encContentResult = await encryptAES(contentPlain, new Uint8Array(userAESKeyDigest));
+
+                    // 加密 IP 和时间（用新的 ML-KEM 封装）
+                    const ip = msg.ip || '127.0.0.1';
+                    const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                    const ipPlain = `${ip} | ${time}`;
+                    const { cipherText: ctIp, sharedSecret: sharedIp } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                    const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
+                    const aesKeyIp = new Uint8Array(keyIp);
+                    const encIpResult = await encryptAES(ipPlain, aesKeyIp);
+                    const ipData = {
+                        ct: btoa(String.fromCharCode(...ctIp)),
+                        iv: btoa(String.fromCharCode(...encIpResult.iv)),
+                        enc: btoa(String.fromCharCode(...encIpResult.ciphertext))
+                    };
+                    const adminIpEnc = 'PQC_IP:' + btoa(JSON.stringify(ipData));
+
+                    // 组装 v3 私聊文件
+                    const senderPub = msg.sender_pub || 'PQC:' + hashlib.sha256((msg.sender_pqc_pub||'')).substring(0,32);
+                    const iv = msg.iv || CryptoJS.enc.Base64.stringify(CryptoJS.lib.WordArray.random(16));
+                    const expireAt = msg.expire_at || '';
+                    const pqcCiphertextB64 = btoa(String.fromCharCode(...cipherText));
+                    const ivSharedB64 = btoa(String.fromCharCode(...encAESKeyResult.iv));
+                    const ivContentB64 = btoa(String.fromCharCode(...encContentResult.iv));
+                    const encAESKeyB64 = btoa(String.fromCharCode(...encAESKeyResult.ciphertext));
+                    const encContentB64 = btoa(String.fromCharCode(...encContentResult.ciphertext));
+                    const senderPqcPub = msg.sender_pqc_pub || '';
+
+                    const fileContent = [
+                        `v3|${senderPub}|${iv}|${expireAt}|${pqcCiphertextB64}|${ivSharedB64}|${ivContentB64}|${encAESKeyB64}|${encContentB64}|${senderPqcPub}`,
+                        encAESKeyB64,
+                        encContentB64,
+                        `${adminIpEnc} | ${time}`
+                    ].join('\n');
+                    addFile(`chat/${filename}`, fileContent);
+                } else {
+                    // ---------- v2 RSA 加密（原有逻辑） ----------
+                    const ip = msg.ip || '127.0.0.1';
+                    const encryptedIp = encryptRSA(ip) || 'PLAIN:' + ip;
+                    const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
+                    const content = `v2|${msg.sender_pub}|${msg.iv}|${msg.expire_at || ''}\n${msg.wrapped_key}\n${msg.aes_content}\n${encryptedIp} | ${time}`;
+                    addFile(`chat/${filename}`, content);
+                }
             }
         }
 

@@ -8,6 +8,13 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <!-- ★ 新增：DOMPurify（渲染 Markdown 需要） -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+        }
+    }
+</script>
   <style>
     *{box-sizing:border-box}
     body{font-family:sans-serif;max-width:620px;margin:40px auto;padding:20px;color:#333}
@@ -61,6 +68,7 @@
     .md-content blockquote{border-left:3px solid #ccc;margin:6px 0;padding:2px 12px;color:#666}
     .md-content img{max-width:100%}
   </style>
+
 </head>
 <body>
 
@@ -77,6 +85,13 @@
     <input type="text" id="global-nick" placeholder="昵称（≤32字）" maxlength="32" style="flex:1;margin:0">
     <input type="password" id="global-key" placeholder="AES密钥" maxlength="64" style="flex:1;margin:0">
     <button type="button" class="rand-btn" onclick="genRandomKey()">🎲 随机32位</button>
+  </div>
+  <div style="margin-top:8px;font-size:13px;color:#666">
+    🔐 加密方式：
+<label style="margin-left:8px;cursor:pointer"><input type="radio" name="enc-mode" value="rsa" onchange="onEncModeChange()"> RSA</label>
+<label style="margin-left:8px;cursor:pointer"><input type="radio" name="enc-mode" value="pqc" onchange="onEncModeChange()"> 🔮 PQC</label>
+<label style="margin-left:8px;cursor:pointer"><input type="radio" name="enc-mode" value="auto" checked onchange="onEncModeChange()"> 🤖 自动</label>
+    <span id="enc-mode-hint" style="margin-left:8px;font-size:11px;color:#888"></span>
   </div>
   <div id="polling-status"></div>
 </div>
@@ -259,6 +274,92 @@ document.getElementById('global-key').addEventListener('input', function() {
   setLS(LS_AES, this.value.trim());
 });
 
+function bytesToBase64(bytes) {
+  var binary = '';
+  for (var i = 0; i < bytes.length; i++) { binary += String.fromCharCode(bytes[i]); }
+  return btoa(binary);
+}
+function base64ToBytes(b64) {
+  var binary = atob(b64);
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+  return bytes;
+}
+// ========== PQC 加密支持 ==========
+var pqcPubKeyBytes = null;
+var pqcPubKeyLoaded = false;
+
+async function loadPqcPubKey() {
+  if (pqcPubKeyLoaded) return pqcPubKeyBytes;
+  try {
+    var r = await fetch('/gongyaoPQC.txt');
+    var b64 = (await r.text()).trim().replace(/\s/g, '');
+    pqcPubKeyBytes = base64ToBytes(b64);
+    pqcPubKeyLoaded = true;
+  } catch(e) {
+    console.error('加载PQC公钥失败:', e);
+  }
+  return pqcPubKeyBytes;
+}
+
+function getEncMode() {
+  var sel = document.querySelector('input[name="enc-mode"]:checked');
+  return sel ? sel.value : 'rsa';
+}
+
+function onEncModeChange() {
+  var mode = getEncMode();
+  var hint = document.getElementById('enc-mode-hint');
+  if (mode === 'pqc') hint.textContent = '使用后量子加密保护AES密钥';
+  else if (mode === 'auto') hint.textContent = '自动检测：优先PQC，不可用时回退RSA';
+  else hint.textContent = '';
+}
+
+// ========== PQC 加密核心 ==========
+async function pqcEncryptVote(aesKeyStr, voteContent, remark) {
+  var pkBytes = await loadPqcPubKey();
+  if (!pkBytes) throw new Error('无法加载服务器PQC公钥');
+
+  var { ml_kem1024 } = await import('@noble/post-quantum/ml-kem');
+
+  // 1. PQC 封装 → shared_secret + ciphertext
+  var shared = new Uint8Array(32);
+  var ct = new Uint8Array(1568);
+  ml_kem1024.encapsulate(ct, shared, pkBytes);
+
+  // 2. shared_secret → SHA256 → 第一层 AES 密钥
+  var sharedWa = CryptoJS.lib.WordArray.create(shared);
+  var layer1Key = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(sharedWa).toString().substring(0, 64));
+
+  // 3. 随机第二层 AES 密钥
+  var layer2Key = CryptoJS.lib.WordArray.random(32);
+
+  // 4. 第一层加密第二层 AES 密钥
+  var ivShared = CryptoJS.lib.WordArray.random(16);
+  var encAESKey = CryptoJS.AES.encrypt(
+    CryptoJS.enc.Base64.stringify(layer2Key),
+    layer1Key,
+    { iv: ivShared, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+  ).toString();
+
+  // 5. 第二层加密投票内容 + AES密钥（让管理员能解密）
+  var ivContent = CryptoJS.lib.WordArray.random(16);
+  var plainPayload = JSON.stringify({ key: aesKeyStr, vote: voteContent, remark: remark || '' });
+  var encContent = CryptoJS.AES.encrypt(
+    plainPayload,
+    layer2Key,
+    { iv: ivContent, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+  ).toString();
+
+  return {
+    pqc_ciphertext: bytesToBase64(ct),
+    iv_shared: CryptoJS.enc.Base64.stringify(ivShared),
+    iv_content: CryptoJS.enc.Base64.stringify(ivContent),
+    encAESKey: encAESKey,
+    encContent: encContent
+  };
+}
+
 refreshCsrf();
 var allPolls = [];
 var currentPollId = null;
@@ -302,6 +403,22 @@ function updateHint(minSel, maxSel, inputName) {
   } else {
     hintEl.textContent = '已选 ' + total + ' 个 ✓';
     hintEl.className = 'ok';
+  }
+}
+
+function updateEditHint(minSel, maxSel) {
+  var total = countSelected('edit-opt');
+  var hintEl = document.getElementById('edit-select-hint');
+  if (!hintEl) return;
+  if (minSel === 1 && maxSel === 1) {
+    hintEl.textContent = total >= 1 ? '已选 1 个 ✓' : '请选择 1 个选项';
+    hintEl.style.color = total >= 1 ? '#4CAF50' : '#888';
+  } else if (total < minSel) {
+    hintEl.textContent = '已选 ' + total + ' 个（至少选 ' + minSel + ' 个）';
+    hintEl.style.color = '#FF9800';
+  } else {
+    hintEl.textContent = '已选 ' + total + ' 个 ✓';
+    hintEl.style.color = '#4CAF50';
   }
 }
 
@@ -352,18 +469,65 @@ function syncFromServer() {
       });
       if (changed) saveAllMyVotes(all);
 
-      var statusEl = document.getElementById('polling-status');
-      if (statusEl) {
-        statusEl.textContent = '🔄 上次同步：' + lastSyncTime.toLocaleTimeString();
+      var identity = currentIdentity();
+      if (!identity.nick || !identity.key) {
+        finishSync();
+        return;
       }
+      var keyHash = CryptoJS.SHA256(identity.key).toString();
 
-      if (isModalOpen()) {
-        renderMyVotes();
+      // ★ 只恢复本地完全没有记录的投票（已有记录的不覆盖）
+      var missingPolls = (polls||[]).filter(function(p) {
+        return !all[p.id];
+      });
+
+      if (missingPolls.length === 0) {
+        finishSync();
         return;
       }
 
-      renderPollList();
-      renderMyVotes();
+      var promises = missingPolls.map(function(p) {
+        return fetch('/api/votes/' + encodeURIComponent(p.id) + '/my-vote?key_hash=' + encodeURIComponent(keyHash))
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data && data.found) {
+              // ★ 再次检查本地是否已有记录，防止竞态
+              var currentAll = getAllMyVotes();
+              if (!currentAll[p.id]) {
+                currentAll[p.id] = {
+                  seq: data.seq,
+                  rsa_key: data.rsa_key,
+                  iv: data.iv,
+                  aes_enc: data.aes_msg,
+                  nick: identity.nick,
+                  remark_iv: data.remark_iv || '',
+                  remark_aes_msg: data.remark_aes_msg || ''
+                };
+                saveAllMyVotes(currentAll);
+              }
+              return true;
+            }
+            return false;
+          })
+          .catch(function() { return false; });
+      });
+
+      return Promise.all(promises).then(function() {
+        finishSync();
+      });
+
+      function finishSync() {
+        var statusEl = document.getElementById('polling-status');
+        if (statusEl) {
+          statusEl.textContent = '🔄 上次同步：' + lastSyncTime.toLocaleTimeString();
+        }
+        if (isModalOpen()) {
+          renderMyVotes();
+          return;
+        }
+        renderPollList();
+        renderMyVotes();
+      }
     })
     .catch(function(e){
       console.error('同步失败:', e);
@@ -440,44 +604,61 @@ function renderMyVotes() {
     if (canDecrypt) {
       try {
         var key32 = deriveAESKey(keyIn);
-        var choice = CryptoJS.AES.decrypt(mv.aes_enc, key32, {
-          iv: CryptoJS.enc.Base64.parse(mv.iv), mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
-        }).toString(CryptoJS.enc.Utf8);
-        if (choice) {
-          if (mv.nick !== currentIdentity().nick) {
-            row.innerHTML += '<div class="my-choice" style="color:#f44336">⚠️ 昵称不匹配</div>';
-          } else {
-            row.innerHTML += '<div class="my-choice">✅ 你投了：<b>'+renderMdInline(choice)+'</b></div>';
-            row.innerHTML += '<div class="my-meta">服务器时间与IP已独立加密存储</div>';
-          }
+        var ivClean = (mv.iv || '').replace(/[\r\n\s]+/g, '');
+        if (!ivClean) {
+          row.innerHTML += '<div class="my-choice" style="color:#f44336">⚠️ IV 丢失</div>';
         } else {
-          row.innerHTML += '<div class="my-choice" style="color:#f44336">⚠️ 密钥不匹配</div>';
+          var ivWa = CryptoJS.enc.Base64.parse(ivClean);
+          var aesClean = (mv.aes_enc || '').replace(/[\r\n\s]+/g, '');
+          var choice = CryptoJS.AES.decrypt(aesClean, key32, {
+            iv: ivWa, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+          }).toString(CryptoJS.enc.Utf8);
+          if (choice) {
+            if (mv.nick !== currentIdentity().nick) {
+              row.innerHTML += '<div class="my-choice" style="color:#f44336">⚠️ 昵称不匹配</div>';
+            } else {
+              row.innerHTML += '<div class="my-choice">✅ 你投了：<b>'+renderMdInline(choice)+'</b></div>';
+              row.innerHTML += '<div class="my-meta">服务器时间与IP已独立加密存储</div>';
+            }
+          } else {
+            row.innerHTML += '<div class="my-choice" style="color:#f44336">⚠️ 密钥不匹配</div>';
+          }
         }
       } catch(e) {
-        row.innerHTML += '<div class="my-choice" style="color:#f44336">⚠️ 解密失败</div>';
+        row.innerHTML += '<div class="my-choice" style="color:#f44336">⚠️ 解密失败: '+esc(e.message)+'</div>';
       }
     } else {
       row.innerHTML += '<div class="my-choice" style="color:#888">🔒 输入密钥后可见</div>';
     }
 
+    var safeId = String(pollId).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
     if (poll) {
-      row.innerHTML += '<button onclick="viewMyVote(\''+esc(pollId)+'\')">查看详情</button>';
+      row.innerHTML += '<button onclick="viewMyVote(\''+ safeId +'\')">查看详情</button>';
       if (poll.allowEdit) {
-        row.innerHTML += '<button style="background:#FF9800;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="editMyVote(\''+esc(pollId)+'\')">修改投票</button>';
+        row.innerHTML += '<button style="background:#FF9800;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="editMyVote(\''+ safeId +'\')">修改投票</button>';
       }
     }
-    row.innerHTML += '<button class="del-local-btn" onclick="deleteLocalVote(\''+esc(pollId)+'\')">🗑️ 删除记录</button>';
+    row.innerHTML += '<button class="del-local-btn" data-poll-id="' + safeId + '" onclick="deleteLocalVote(this.getAttribute(\'data-poll-id\'))">🗑️ 删除记录</button>';
     listDiv.appendChild(row);
   });
 }
 
 function deleteLocalVote(pollId) {
-  if (!confirm('确定删除这条本地投票记录吗？（仅清除浏览器记录）')) return;
-  var all = getAllMyVotes();
-  delete all[pollId];
-  saveAllMyVotes(all);
-  renderPollList();
-  renderMyVotes();
+    if (!confirm('确定删除这条本地投票记录吗？（刷新后将自动从服务器恢复）')) return;
+    try {
+        var all = getAllMyVotes();
+        if (all[pollId]) {
+            delete all[pollId];
+            saveAllMyVotes(all);
+            renderPollList();
+            renderMyVotes();
+            syncFromServer();
+        } else {
+            alert('记录不存在或已删除');
+        }
+    } catch(e) {
+        alert('删除失败：' + e.message);
+    }
 }
 
 function buildOptionRows(poll, inputName, customInputId, prevChoices) {
@@ -625,6 +806,14 @@ function editMyVote(pollId) {
   var poll = allPolls.find(function(p){return p.id === pollId;});
   if (!poll || !poll.allowEdit) { alert('该投票不允许修改'); return; }
   var keyIn = document.getElementById('global-key').value.trim();
+  // ★ 自动填充密钥（如果输入框为空）
+  if (!keyIn) {
+    var storedKey = getLS(LS_AES);
+    if (storedKey) {
+      document.getElementById('global-key').value = storedKey;
+      keyIn = storedKey;
+    }
+  }
   if (!keyIn) { alert('请先在上方输入AES密钥'); return; }
   if (mv.nick !== currentIdentity().nick) { alert('身份校验失败（昵称不匹配）'); return; }
 
@@ -664,6 +853,11 @@ function editMyVote(pollId) {
         if (remarkDec) currentRemark = remarkDec;
       } catch(e) {}
     }
+
+    // ★ 移除旧的备注容器，避免累积
+    var oldRemarkContainer = document.getElementById('view-remark-container');
+    if (oldRemarkContainer) oldRemarkContainer.remove();
+
     // 创建备注编辑容器
     var remarkEditContainer = document.createElement('div');
     remarkEditContainer.id = 'view-remark-container';
@@ -673,6 +867,16 @@ function editMyVote(pollId) {
 
     // 插入到 editOptsDiv 之前
     editOptsDiv.parentNode.insertBefore(remarkEditContainer, editOptsDiv);
+
+    // ★★★ 加密方式选择器（修改投票时也需要）
+    var encModeRow = document.createElement('div');
+    encModeRow.id = 'edit-enc-mode-row';
+    encModeRow.style.cssText = 'margin:8px 0;font-size:13px;color:#666';
+    encModeRow.innerHTML = '🔐 修改加密方式：' +
+      '<label style="margin-left:8px;cursor:pointer"><input type="radio" name="edit-enc-mode" value="rsa"> RSA</label>' +
+      '<label style="margin-left:8px;cursor:pointer"><input type="radio" name="edit-enc-mode" value="pqc"> 🔮 PQC</label>' +
+      '<label style="margin-left:8px;cursor:pointer"><input type="radio" name="edit-enc-mode" value="auto" checked> 🤖 自动</label>';
+    editOptsDiv.parentNode.insertBefore(encModeRow, editOptsDiv);
 
     var prevChoices = choice.split(', ');
     editOptsDiv.innerHTML = '';
@@ -692,9 +896,12 @@ function editMyVote(pollId) {
   document.getElementById('view-modal').style.display = 'flex';
 }
 
-function confirmEdit() {
+async function confirmEdit() {
   var identity = currentIdentity();
-  var originalKey = prompt('请输入您当初投票时使用的 AES 密钥（用于身份验证）:');
+  var originalKey = document.getElementById('global-key').value.trim();
+  if (!originalKey) {
+    originalKey = prompt('请输入您当初投票时使用的 AES 密钥（用于身份验证）:');
+  }
   if (!originalKey) { alert('必须提供原密钥才能修改'); return; }
   var originalKeyHash = CryptoJS.SHA256(originalKey).toString();
   if (!identity.nick || !identity.key) { alert('请填写昵称和AES密钥'); return; }
@@ -721,9 +928,11 @@ function confirmEdit() {
   setLS(LS_AES, identity.key);
   var iv = CryptoJS.lib.WordArray.random(16);
   var key32 = deriveAESKey(identity.key);
-  var msgEnc = CryptoJS.AES.encrypt(voteContent, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString();
+  var msgEnc = CryptoJS.AES.encrypt(voteContent, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString().replace(/[\r\n\s]+/g, '');
 
-  // ★ 备注处理
+  var ivB64 = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, '');
+  var keyHash = CryptoJS.SHA256(identity.key).toString();
+
   var remarkInput = document.getElementById('view-remark-input');
   var remark = remarkInput ? remarkInput.value.trim() : '';
   var remarkIvB64 = '', remarkEnc = '';
@@ -735,19 +944,43 @@ function confirmEdit() {
       .replace(/[\r\n\s]+/g, '');
   }
 
-  fetch('/gongyao.txt').then(function(r){return r.text();}).then(function(pub){
+  try {
+    var pubRes = await fetch('/gongyao.txt');
+    var pub = await pubRes.text();
     var jse = new JSEncrypt();
     jse.setPublicKey(pub);
-    var cleanRsaKey = jse.encrypt(identity.key).replace(/[\r\n\s]+/g, '');
-    if (!cleanRsaKey) { alert('RSA加密失败'); return; }
+    var encrypted = jse.encrypt(identity.key);
+    if (!encrypted) { alert('RSA加密失败，密钥可能过长'); return; }
+    var cleanRsaKey = encrypted.replace(/[\r\n\s]+/g, '');
+
+    var editEncRadio = document.querySelector('input[name="edit-enc-mode"]:checked');
+    var encMode = editEncRadio ? editEncRadio.value : getEncMode();
+    var pqcData = null;
+    if (encMode === 'pqc' || encMode === 'auto') {
+      try {
+        pqcData = await pqcEncryptVote(identity.key, voteContent, remark);
+      } catch(e) {
+        if (encMode === 'pqc') { alert('PQC加密失败：' + e.message); return; }
+        console.warn('PQC加密失败，回退RSA:', e.message);
+      }
+    }
     var body = {
       rsa_key: cleanRsaKey,
-      iv: CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, ''),
-      aes_msg: msgEnc.replace(/[\r\n\s]+/g, ''),
+      iv: ivB64,
+      aes_msg: msgEnc,
       original_key_hash: originalKeyHash,
+      key_hash: keyHash,
       remark_iv: remarkIvB64,
-      remark_aes_msg: remarkEnc
+      remark_aes_msg: remarkEnc,
+      version: pqcData ? 'v3' : 'v2'
     };
+    if (pqcData) {
+      body.pqc_ciphertext = pqcData.pqc_ciphertext;
+      body.iv_shared = pqcData.iv_shared;
+      body.iv_content = pqcData.iv_content;
+      body.encAESKey = pqcData.encAESKey;
+      body.encContent = pqcData.encContent;
+    }
 
     sessionStorage.setItem('pending_edit_poll', currentEditingPollId);
     sessionStorage.setItem('pending_edit_seq', mv.seq);
@@ -756,42 +989,50 @@ function confirmEdit() {
     sessionStorage.setItem('pending_edit_enc', msgEnc.replace(/[\r\n\s]+/g, ''));
     sessionStorage.setItem('pending_edit_key', cleanRsaKey);
 
-    fetch('/api/votes/'+encodeURIComponent(currentEditingPollId)+'/'+mv.seq, {
+    var res = await fetch('/api/votes/'+encodeURIComponent(currentEditingPollId)+'/'+mv.seq, {
       method: 'PUT',
       headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
       body: JSON.stringify(body)
-    }).then(function(res){
-      if (res.status === 418) {
-        var returnUrl = encodeURIComponent(window.location.href);
-        window.location.href = '/captcha?redirect=' + returnUrl;
-        return;
-      }
-      window.handleRateLimitResponse(res);
-      if (res.ok) {
-        mv.iv = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, '');
-        mv.aes_enc = msgEnc.replace(/[\r\n\s]+/g, '');
-        mv.rsa_key = cleanRsaKey;
-        mv.nick = identity.nick;
-        // 更新备注
-        mv.remark_iv = remarkIvB64;
-        mv.remark_aes_msg = remarkEnc;
-        saveMyVote(currentEditingPollId, mv);
-
-        sessionStorage.removeItem('pending_edit_poll');
-        sessionStorage.removeItem('pending_edit_seq');
-        sessionStorage.removeItem('pending_edit_body');
-        sessionStorage.removeItem('pending_edit_iv');
-        sessionStorage.removeItem('pending_edit_enc');
-        sessionStorage.removeItem('pending_edit_key');
-
-        alert('✅ 投票已修改');
-        closeModal('view-modal');
-        syncFromServer();
-      } else {
-        res.text().then(function(t){ alert('修改失败：'+t); });
-      }
     });
-  });
+
+    if (res.status === 418) {
+      var returnUrl = encodeURIComponent(window.location.href);
+      window.location.href = '/captcha?redirect=' + returnUrl;
+      return;
+    }
+    window.handleRateLimitResponse(res);
+    if (res.ok) {
+      mv.iv = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g, '');
+      mv.aes_enc = msgEnc.replace(/[\r\n\s]+/g, '');
+      mv.rsa_key = cleanRsaKey;
+      mv.nick = identity.nick;
+      mv.remark_iv = remarkIvB64;
+      mv.remark_aes_msg = remarkEnc;
+      saveMyVote(currentEditingPollId, mv);
+
+      sessionStorage.removeItem('pending_edit_poll');
+      sessionStorage.removeItem('pending_edit_seq');
+      sessionStorage.removeItem('pending_edit_body');
+      sessionStorage.removeItem('pending_edit_iv');
+      sessionStorage.removeItem('pending_edit_enc');
+      sessionStorage.removeItem('pending_edit_key');
+
+      alert('✅ 投票已修改');
+      closeModal('view-modal');
+      syncFromServer();
+    } else {
+      var t = await res.text();
+      try {
+        var errJson = JSON.parse(t);
+        alert('修改失败：' + (errJson.error || t));
+      } catch(e) {
+        alert('修改失败：' + t);
+      }
+    }
+  } catch(err) {
+    alert('修改请求失败：' + err.message);
+    console.error(err);
+  }
 }
 
 async function submitVote() {
@@ -868,6 +1109,18 @@ async function submitVote() {
       return;
     }
 
+    // ★ PQC 加密（如果选择了 PQC 或自动模式且 PQC 可用）
+    var encMode = getEncMode();
+    var pqcData = null;
+    if (encMode === 'pqc' || encMode === 'auto') {
+      try {
+        pqcData = await pqcEncryptVote(identity.key, voteContent, remark);
+      } catch(e) {
+        if (encMode === 'pqc') throw e; // PQC 模式必须成功
+        console.warn('PQC加密失败，回退RSA:', e.message);
+      }
+    }
+
     var editToken = Array.from(crypto.getRandomValues(new Uint8Array(18)))
       .map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
     var keyHash = CryptoJS.SHA256(identity.key).toString();
@@ -896,7 +1149,13 @@ async function submitVote() {
         aes_msg: msgEnc,
         key_hash: keyHash,
         remark_iv: remarkIvB64,
-        remark_aes_msg: remarkEnc
+        remark_aes_msg: remarkEnc,
+        version: pqcData ? 'v3' : 'v2',
+        pqc_ciphertext: pqcData ? pqcData.pqc_ciphertext : undefined,
+        iv_shared: pqcData ? pqcData.iv_shared : undefined,
+        iv_content: pqcData ? pqcData.iv_content : undefined,
+        encAESKey: pqcData ? pqcData.encAESKey : undefined,
+        encContent: pqcData ? pqcData.encContent : undefined
       })
     });
 
