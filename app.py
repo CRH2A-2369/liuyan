@@ -3988,27 +3988,43 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
 @require_csrf
 @require_private_key
 def export_data():
-    """导出 /data 目录为 ZIP 文件"""
+    """导出 /data 目录为 ZIP 文件（流式传输，防止大文件撑爆内存）"""
     if not is_admin():
         return jsonify({'error': '未授权'}), 403
 
-    # 创建内存中的 ZIP 文件
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        data_dir = DATA_DIR
-        if not os.path.exists(data_dir):
-            return jsonify({'error': '数据目录不存在'}), 404
+    data_dir = DATA_DIR
+    if not os.path.exists(data_dir):
+        return jsonify({'error': '数据目录不存在'}), 404
 
-        for root, dirs, files in os.walk(data_dir):
-            for file in files:
-                file_path = os.path.join(root, file)
-                # 计算相对路径（相对于 DATA_DIR）
-                arcname = os.path.relpath(file_path, data_dir)
-                zf.write(file_path, arcname)
+    def generate_zip():
+        with zipfile.ZipFile(io.BytesIO(), 'w', zipfile.ZIP_DEFLATED) as zf_write:
+            # 先收集所有文件路径
+            file_list = []
+            for root, dirs, files in os.walk(data_dir):
+                for fname in files:
+                    file_list.append(os.path.join(root, fname))
+            # 写入临时文件（避免内存爆炸）
+            import tempfile
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix='.zip')
+            os.close(tmp_fd)
+            try:
+                with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf_tmp:
+                    for file_path in file_list:
+                        arcname = os.path.relpath(file_path, data_dir)
+                        zf_tmp.write(file_path, arcname)
+                # 流式返回临时文件内容
+                with open(tmp_path, 'rb') as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
-    zip_buffer.seek(0)
     return Response(
-        zip_buffer.getvalue(),
+        generate_zip(),
         mimetype='application/zip',
         headers={
             'Content-Disposition': f'attachment; filename=backup_{datetime.now(CST).strftime("%Y%m%d_%H%M%S")}.zip'
@@ -4018,19 +4034,25 @@ def export_data():
 def safe_extract(zip_file, extract_dir):
     """
     安全解压 ZIP 文件，防止路径遍历攻击。
-    - 拒绝包含 '..' 或绝对路径的条目。
-    - 确保所有解压目标都在 extract_dir 之内。
+    逐个成员解压（而非 extractall），并在解压前对每个成员做路径检查。
     """
     extract_dir = os.path.realpath(extract_dir)
     for member in zip_file.infolist():
+        # 跳过纯目录条目（以 / 结尾）, extract 时会自动创建
+        name = member.filename
         # 拒绝绝对路径或包含 '..' 的路径
-        if member.filename.startswith('/') or '..' in member.filename.split('/'):
-            raise Exception(f'非法路径: {member.filename}')
-        target = os.path.realpath(os.path.join(extract_dir, member.filename))
-        if not target.startswith(extract_dir + os.sep):
-            raise Exception(f'路径遍历检测: {member.filename}')
-    # 所有条目通过检查，执行解压
-    zip_file.extractall(extract_dir)
+        if name.startswith('/') or '..' in name.replace('\\', '/').split('/'):
+            raise Exception(f'非法路径: {name}')
+        # 计算目标路径
+        target = os.path.realpath(os.path.join(extract_dir, name))
+        # 必须位于 extract_dir 之下
+        if not target.startswith(extract_dir + os.sep) and target != extract_dir:
+            raise Exception(f'路径遍历检测: {name} → {target}')
+        # 仅解压文件（目录会自动创建）
+        if not name.endswith('/'):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zip_file.open(member) as src, open(target, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
 
 @app.route('/api/admin/import-data', methods=['POST'])
 @require_csrf
@@ -4058,7 +4080,7 @@ def import_data():
             if zf.testzip() is not None:
                 return jsonify({'error': 'ZIP 文件损坏'}), 400
 
-            # 清空当前 DATA_DIR（保留目录本身）
+            # 清空当前 DATA_DIR（保留目录本身，跳过锁定的文件）
             data_dir = DATA_DIR
             if os.path.exists(data_dir):
                 for item in os.listdir(data_dir):
@@ -4069,8 +4091,9 @@ def import_data():
                         elif os.path.isdir(item_path):
                             shutil.rmtree(item_path)
                     except Exception as e:
-                        # 忽略删除失败（例如 rate_limits.db 被占用），继续执行
-                        print(f"[WARN] 无法删除 {item_path}: {e}")
+                        # 锁定文件（如 rate_limits.db）保留不删，后续提取会覆盖
+                        app.logger.warning(f"无法删除 {item_path}: {e}")
+                        pass
 
             # 安全解压（防止路径遍历）
             try:
@@ -4086,7 +4109,15 @@ def import_data():
 
 @app.route('/health')
 def health():
-    return "OK", 200
+    return "恭_喜_你_进_入_了_隐_藏_空_间_，_这_是_一_个_小_彩_蛋_，_程_序_运_转_正_常", 200
+
+@app.route('/follower')
+def follower():
+    return render_template('follower.html'), 200
+
+@app.route('/format')
+def format():
+    return render_template('format.html'), 200
 
 @app.route('/api/files', methods=['GET'])
 def list_files():
