@@ -824,6 +824,13 @@ async function render() {
       alert('获取当前IP失败：' + e.message);
     }
   }
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+  return bytes;
+}
 // ===== 工具：sleep =====
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
@@ -1312,6 +1319,7 @@ async function exportPlainData() {
                         console.warn(`v3 投票序号 ${seq} 解密失败`, e);
                     }
                 }
+            }
 
             // 将解密后的投票数据存入结果对象
             result.votes[pollId] = { config, votes };
