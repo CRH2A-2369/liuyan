@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>JSON转CSV智能转换工具</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: Arial, sans-serif; }
+        body { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
+        .container { background: #f5f5f5; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .upload-area { margin-bottom: 2rem; padding: 3rem; border: 2px dashed #ccc; border-radius: 8px; text-align: center; cursor: pointer; transition: border-color 0.3s; }
+        .upload-area:hover { border-color: #2196F3; }
+        .upload-area.active { border-color: #4CAF50; }
+        .btn { padding: 0.8rem 1.5rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        .btn-primary { background: #2196F3; color: white; margin-right: 1rem; }
+        .btn-success { background: #4CAF50; color: white; }
+        .status { margin: 1rem 0; padding: 1rem; border-radius: 4px; display: none; }
+        .status.success { background: #e8f5e9; color: #2e7d32; display: block; }
+        .status.error { background: #ffebee; color: #c62828; display: block; }
+        .preview { margin: 2rem 0; overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 0.8rem; text-align: left; border: 1px solid #ddd; }
+        th { background: #f8f8f8; font-weight: bold; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>JSON文本转CSV表格工具</h1>
+        <p>支持上传B站用户数据JSON文件（如附件格式），自动提取字段生成CSV</p>
+
+        <!-- 上传区域 -->
+        <div class="upload-area" id="uploadArea">
+            <input type="file" id="fileInput" class="hidden" accept=".txt,.json">
+            <h3>点击或拖拽文件到此处上传</h3>
+            <p>支持 .txt 或 .json 格式文件</p>
+        </div>
+
+        <!-- 操作按钮 -->
+        <div class="btn-group" style="margin: 1rem 0;">
+            <button class="btn btn-primary" id="parseBtn" disabled>解析并生成CSV</button>
+            <button class="btn btn-success" id="downloadBtn" disabled>下载CSV文件</button>
+        </div>
+
+        <!-- 状态提示 -->
+        <div class="status error" id="errorStatus"></div>
+        <div class="status success" id="successStatus"></div>
+
+        <!-- 预览表格 -->
+        <div class="preview" id="previewArea">
+            <h3>数据预览</h3>
+            <table id="dataTable"></table>
+        </div>
+    </div>
+
+    <script>
+        // 全局变量
+        let rawData = null;
+        let csvContent = "";
+
+        // DOM元素
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const parseBtn = document.getElementById('parseBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const errorStatus = document.getElementById('errorStatus');
+        const successStatus = document.getElementById('successStatus');
+        const dataTable = document.getElementById('dataTable');
+        const previewArea = document.getElementById('previewArea');
+
+        // 上传区域点击事件
+        uploadArea.addEventListener('click', () => fileInput.click());
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('active');
+        });
+        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('active'));
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('active');
+            if (e.dataTransfer.files.length) {
+                fileInput.files = e.dataTransfer.files;
+                handleFile(fileInput.files[0]);
+            }
+        });
+
+        // 文件选择事件
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        // 处理上传文件
+        function handleFile(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    // 解析JSON（支持多JSON块拼接）
+                    const jsonText = e.target.result.replace(/}\s*{/g, '},{'); // 处理多个JSON对象
+                    rawData = JSON.parse(`[${jsonText}]`);
+                    parseBtn.disabled = false;
+                    errorStatus.textContent = "";
+                    errorStatus.style.display = "none";
+                    successStatus.textContent = `文件上传成功！共发现 ${rawData.length} 个数据块`;
+                    successStatus.style.display = "block";
+                } catch (err) {
+                    errorStatus.textContent = `文件解析失败：${err.message}，请检查文件格式`;
+                    errorStatus.style.display = "block";
+                    rawData = null;
+                    parseBtn.disabled = true;
+                    downloadBtn.disabled = true;
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // 解析JSON生成CSV
+        parseBtn.addEventListener('click', () => {
+            try {
+                // 提取所有用户数据（合并多个data.list）
+                const allUsers = [];
+                rawData.forEach(block => {
+                    if (block.data?.list && Array.isArray(block.data.list)) {
+                        allUsers.push(...block.data.list);
+                    }
+                });
+
+                if (allUsers.length === 0) {
+                    throw new Error("未找到有效用户数据");
+                }
+
+                // 定义需要提取的字段（适配B站用户数据结构）
+                const fields = [
+                    "mid", "uname", "face", "sign", "attribute", "mtime",
+                    "vip.vipType", "vip.vipStatus", "vip.vipDueDate", "vip.label.text",
+                    "official_verify.type", "official_verify.desc"
+                ];
+
+                // 生成表头
+                const headers = fields.map(field => field.replace(/\./g, '_'));
+                csvContent = headers.join(',') + '\n';
+
+                // 生成表格数据
+                let tableHtml = `<thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>`;
+                
+                allUsers.forEach(user => {
+                    // 提取字段值（处理嵌套字段）
+                    const row = fields.map(field => {
+                        const value = field.split('.').reduce((obj, key) => obj?.[key] ?? '', user);
+                        // 处理CSV特殊字符（逗号、引号、换行）
+                        return `"${String(value).replace(/"/g, '""').replace(/\n/g, ' ').replace(/\r/g, '')}"`;
+                    });
+                    csvContent += row.join(',') + '\n';
+                    tableHtml += `<tr>${row.map(val => `<td>${val.replace(/"/g, '')}</td>`).join('')}</tr>`;
+                });
+
+                tableHtml += '</tbody>';
+                dataTable.innerHTML = tableHtml;
+                previewArea.style.display = "block";
+                downloadBtn.disabled = false;
+                successStatus.textContent = `解析成功！共提取 ${allUsers.length} 条用户数据`;
+            } catch (err) {
+                errorStatus.textContent = `解析失败：${err.message}`;
+                errorStatus.style.display = "block";
+                downloadBtn.disabled = true;
+                previewArea.style.display = "none";
+            }
+        });
+
+        // 下载CSV文件
+        downloadBtn.addEventListener('click', () => {
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `bilibili_users_${new Date().getTime()}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
+    </script>
+</body>
+</html>

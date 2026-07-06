@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>B站用户ID转空间链接工具（支持时间戳）</title>
+    <style>
+        /* ===== 全局重置 & 基础 ===== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 2rem;
+            color: #333;
+        }
+
+        /* ===== 卡片容器 ===== */
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+            overflow: hidden;
+        }
+
+        /* ===== 头部 ===== */
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 1.5rem 2rem;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 1.8rem;
+            margin-bottom: 0.3rem;
+        }
+        .header p {
+            font-size: 0.95rem;
+            opacity: 0.9;
+        }
+        .header .badge {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 20px;
+            padding: 0.2rem 1rem;
+            font-size: 0.8rem;
+            margin-top: 0.3rem;
+            letter-spacing: 0.5px;
+        }
+
+        /* ===== 内容区 ===== */
+        .content {
+            padding: 2rem;
+        }
+
+        /* ===== 输入 / 输出组 ===== */
+        .input-group,
+        .output-group {
+            margin-bottom: 1.5rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.6rem;
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 1.05rem;
+        }
+        label .sub {
+            font-weight: 400;
+            font-size: 0.85rem;
+            color: #7f8c8d;
+            margin-left: 0.5rem;
+        }
+
+        textarea {
+            width: 100%;
+            padding: 1rem;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            resize: vertical;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+            min-height: 170px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            background: #fafbfc;
+        }
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
+            background: #fff;
+        }
+        textarea[readonly] {
+            background: #f5f6f8;
+            color: #2c3e50;
+        }
+
+        /* ===== 统计信息 ===== */
+        .count-info {
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.3rem 1rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.88rem;
+            color: #7f8c8d;
+        }
+        .count-info span {
+            background: #f1f2f6;
+            padding: 0.1rem 0.8rem;
+            border-radius: 12px;
+        }
+
+        /* ===== 按钮组 ===== */
+        .btn-group {
+            display: flex;
+            gap: 0.8rem;
+            margin: 0.8rem 0 1rem 0;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 0.8rem 1.6rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            flex: 1 0 auto;
+            min-width: 120px;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        .btn-primary:hover:not(:disabled) {
+            background: #5a6edb;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.35);
+        }
+        .btn-primary:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        .btn-copy {
+            background: #2ecc71;
+            color: white;
+        }
+        .btn-copy:hover:not(:disabled) {
+            background: #27ae60;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(46, 204, 113, 0.35);
+        }
+        .btn-copy:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        .btn-clear {
+            background: #ecf0f1;
+            color: #34495e;
+            flex: 0 1 auto;
+            min-width: 80px;
+        }
+        .btn-clear:hover {
+            background: #dde1e3;
+            transform: translateY(-2px);
+        }
+
+        /* ===== 状态提示 ===== */
+        .status {
+            padding: 0.8rem 1.2rem;
+            border-radius: 8px;
+            margin: 0.5rem 0 1rem 0;
+            font-size: 0.92rem;
+            display: none;
+            align-items: center;
+            gap: 0.6rem;
+            animation: fadeIn 0.3s ease;
+        }
+        .status.success {
+            background: #e8f5e9;
+            color: #1e7e34;
+            display: flex;
+            border-left: 4px solid #2ecc71;
+        }
+        .status.error {
+            background: #ffebee;
+            color: #b71c1c;
+            display: flex;
+            border-left: 4px solid #e74c3c;
+        }
+        .status.info {
+            background: #e3f2fd;
+            color: #0d47a1;
+            display: flex;
+            border-left: 4px solid #42a5f5;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(-6px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* ===== 示例区域 ===== */
+        .example {
+            background: #f8f9fa;
+            padding: 0.9rem 1.2rem;
+            border-radius: 8px;
+            margin-top: 0.6rem;
+            font-size: 0.88rem;
+            color: #444;
+            border: 1px solid #eef0f2;
+        }
+        .example h4 {
+            margin-bottom: 0.4rem;
+            color: #2c3e50;
+            font-size: 0.95rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .example h4 .tag {
+            font-size: 0.7rem;
+            background: #667eea;
+            color: #fff;
+            padding: 0.05rem 0.6rem;
+            border-radius: 10px;
+            font-weight: 400;
+        }
+        .example code {
+            background: #e9ecef;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 0.85rem;
+            display: inline-block;
+            margin: 0.1rem 0;
+            white-space: nowrap;
+        }
+        .example .block {
+            display: block;
+            margin: 0.2rem 0;
+        }
+
+        /* ===== 输出区域分隔 ===== */
+        .output-group {
+            border-top: 1px solid #f1f1f1;
+            padding-top: 1.5rem;
+            margin-top: 0.5rem;
+        }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 768px) {
+            body {
+                padding: 1rem;
+            }
+            .content {
+                padding: 1.2rem;
+            }
+            .header h1 {
+                font-size: 1.3rem;
+            }
+            .btn-group {
+                flex-direction: column;
+            }
+            .btn {
+                flex: 1 1 100%;
+                min-width: unset;
+            }
+            .btn-clear {
+                flex: 1 1 100%;
+            }
+            .example code {
+                white-space: normal;
+                word-break: break-all;
+            }
+            .count-info {
+                font-size: 0.8rem;
+            }
+            .count-info span {
+                padding: 0.05rem 0.6rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .header {
+                padding: 1rem;
+            }
+            .header h1 {
+                font-size: 1.1rem;
+            }
+            .header p {
+                font-size: 0.8rem;
+            }
+            textarea {
+                font-size: 0.85rem;
+                min-height: 120px;
+                padding: 0.7rem;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+
+        <!-- ===== 头部 ===== -->
+        <div class="header">
+            <h1>📎 B站用户ID → 空间链接 + 时间戳转换</h1>
+            <p>支持 2 列（ID + 昵称）和 3 列（ID + 昵称 + 时间戳·秒）两种格式，自动识别</p>
+            <div class="badge">✨ 时间戳自动转为 YYYY-MM-DD HH:MM:SS</div>
+        </div>
+
+        <div class="content">
+
+            <!-- ===== 输入区域 ===== -->
+            <div class="input-group">
+                <label for="inputText">
+                    输入原始数据
+                    <span class="sub">每行一条，制表符分隔</span>
+                </label>
+                <div class="count-info">
+                    <span>📝 字符：<span id="inputCount">0</span></span>
+                    <span>📄 行数：<span id="lineCount">0</span></span>
+                    <span>📊 有效列：<span id="columnHint">—</span></span>
+                </div>
+                <textarea id="inputText" placeholder="支持两种格式（制表符分隔）：&#10;12345678	张三&#10;87654321	李四	1704067200&#10;98765432	王五	1733212800"></textarea>
+
+                <div class="example">
+                    <h4>
+                        📌 输入格式示例
+                        <span class="tag">2列</span>
+                        <span class="tag" style="background:#27ae60;">3列</span>
+                    </h4>
+                    <code class="block">12345678	张三</code>
+                    <code class="block" style="color:#2c7a3d;">87654321	李四	1704067200</code>
+                    <code class="block" style="color:#2c7a3d;">98765432	王五	1733212800</code>
+                    <div style="margin-top:0.4rem; font-size:0.82rem; color:#888;">
+                        ⚡ 2列 → 输出空间链接 + @昵称 &nbsp;|&nbsp; 3列 → 额外输出转换后的时间
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== 操作按钮 ===== -->
+            <div class="btn-group">
+                <button class="btn btn-primary" id="convertBtn">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+                        <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+                    </svg>
+                    开始转换
+                </button>
+                <button class="btn btn-copy" id="copyBtn" disabled>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    复制结果
+                </button>
+                <button class="btn btn-clear" id="clearBtn">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                    清空
+                </button>
+            </div>
+
+            <!-- ===== 状态提示 ===== -->
+            <div class="status success" id="successStatus">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="9 11 12 14 22 4"></polyline>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+                </svg>
+                <span>转换成功！</span>
+            </div>
+            <div class="status error" id="errorStatus">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="15" y1="9" x2="9" y2="15"></line>
+                    <line x1="9" y1="9" x2="15" y2="15"></line>
+                </svg>
+                <span>请输入有效的文本内容</span>
+            </div>
+            <div class="status info" id="infoStatus">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                </svg>
+                <span>提示信息</span>
+            </div>
+
+            <!-- ===== 输出区域 ===== -->
+            <div class="output-group">
+                <label for="outputText">
+                    转换结果
+                    <span class="sub">制表符分隔，可直接粘贴到表格</span>
+                </label>
+                <div class="count-info">
+                    <span>📝 字符：<span id="outputCount">0</span></span>
+                    <span>✅ 有效行数：<span id="validLineCount">0</span></span>
+                    <span>⏭ 跳过行数：<span id="skippedLineCount">0</span></span>
+                </div>
+                <textarea id="outputText" readonly placeholder="转换后的结果将显示在这里…"></textarea>
+
+                <div class="example">
+                    <h4>
+                        📌 输出格式示例
+                        <span class="tag">2列</span>
+                        <span class="tag" style="background:#27ae60;">3列</span>
+                    </h4>
+                    <code class="block">https://space.bilibili.com/12345678	@张三</code>
+                    <code class="block" style="color:#2c7a3d;">https://space.bilibili.com/87654321	@李四	2024-01-01 00:00:00</code>
+                    <code class="block" style="color:#2c7a3d;">https://space.bilibili.com/98765432	@王五	2024-12-03 08:00:00</code>
+                </div>
+            </div>
+
+        </div><!-- /content -->
+    </div><!-- /container -->
+
+    <script>
+        // ============================================================
+        //  DOM 引用
+        // ============================================================
+        const inputText = document.getElementById('inputText');
+        const outputText = document.getElementById('outputText');
+        const convertBtn = document.getElementById('convertBtn');
+        const copyBtn = document.getElementById('copyBtn');
+        const clearBtn = document.getElementById('clearBtn');
+
+        const successStatus = document.getElementById('successStatus');
+        const errorStatus = document.getElementById('errorStatus');
+        const infoStatus = document.getElementById('infoStatus');
+
+        const inputCount = document.getElementById('inputCount');
+        const lineCount = document.getElementById('lineCount');
+        const columnHint = document.getElementById('columnHint');
+        const outputCount = document.getElementById('outputCount');
+        const validLineCount = document.getElementById('validLineCount');
+        const skippedLineCount = document.getElementById('skippedLineCount');
+
+        // ============================================================
+        //  工具函数
+        // ============================================================
+
+        /** 将秒级时间戳转为 YYYY-MM-DD HH:MM:SS（本地时区） */
+        function formatTimestamp(seconds) {
+            const d = new Date(seconds * 1000);
+            const pad = n => String(n).padStart(2, '0');
+            return d.getFullYear() + '-' +
+                pad(d.getMonth() + 1) + '-' +
+                pad(d.getDate()) + ' ' +
+                pad(d.getHours()) + ':' +
+                pad(d.getMinutes()) + ':' +
+                pad(d.getSeconds());
+        }
+
+        /** 智能解析时间戳：支持 10 位（秒）和 13 位（毫秒） */
+        function parseTimestampSmart(str) {
+            const trimmed = str.trim();
+            if (!/^\d+$/.test(trimmed)) return null;
+            const num = parseInt(trimmed, 10);
+            if (isNaN(num) || num <= 0) return null;
+            // 13 位 → 毫秒；10 位 → 秒；其他按秒处理
+            if (trimmed.length === 13) return num / 1000;
+            if (trimmed.length === 10) return num;
+            // 兼容 9 位或 11 位等，按秒处理
+            return num;
+        }
+
+        /** 重置所有状态提示（隐藏） */
+        function resetStatus() {
+            successStatus.style.display = 'none';
+            errorStatus.style.display = 'none';
+            infoStatus.style.display = 'none';
+        }
+
+        /** 显示成功消息（自动 3.5s 后隐藏） */
+        function showSuccess(msg) {
+            resetStatus();
+            successStatus.querySelector('span').textContent = msg;
+            successStatus.style.display = 'flex';
+            clearTimeout(successStatus._timer);
+            successStatus._timer = setTimeout(() => {
+                successStatus.style.display = 'none';
+            }, 3500);
+        }
+
+        /** 显示错误消息（自动 4s 后隐藏） */
+        function showError(msg) {
+            resetStatus();
+            errorStatus.querySelector('span').textContent = msg;
+            errorStatus.style.display = 'flex';
+            clearTimeout(errorStatus._timer);
+            errorStatus._timer = setTimeout(() => {
+                errorStatus.style.display = 'none';
+            }, 4000);
+        }
+
+        /** 显示信息提示（自动 3s 后隐藏） */
+        function showInfo(msg) {
+            resetStatus();
+            infoStatus.querySelector('span').textContent = msg;
+            infoStatus.style.display = 'flex';
+            clearTimeout(infoStatus._timer);
+            infoStatus._timer = setTimeout(() => {
+                infoStatus.style.display = 'none';
+            }, 3000);
+        }
+
+        // ============================================================
+        //  统计更新
+        // ============================================================
+
+        function updateInputStats() {
+            const text = inputText.value;
+            inputCount.textContent = text.length;
+
+            const lines = text.split('\n').filter(l => l.trim() !== '');
+            lineCount.textContent = lines.length;
+
+            // 检测首行有效列数（用于提示）
+            if (lines.length > 0) {
+                const firstLine = lines[0].trim();
+                const parts = firstLine.split(/\t+/).filter(p => p.trim() !== '');
+                if (parts.length === 2) columnHint.textContent = '2列 (ID+昵称)';
+                else if (parts.length === 3) columnHint.textContent = '3列 (ID+昵称+时间戳)';
+                else if (parts.length > 3) columnHint.textContent = parts.length + '列 (将取前3列)';
+                else columnHint.textContent = '—';
+            } else {
+                columnHint.textContent = '—';
+            }
+
+            convertBtn.disabled = text.trim() === '';
+        }
+
+        function updateOutputStats(valid = 0, skipped = 0) {
+            const text = outputText.value;
+            outputCount.textContent = text.length;
+            validLineCount.textContent = valid;
+            skippedLineCount.textContent = skipped;
+        }
+
+        // ============================================================
+        //  核心转换逻辑
+        // ============================================================
+
+        function convertData() {
+            const input = inputText.value;
+            if (!input.trim()) {
+                showError('⚠️ 请输入要转换的数据');
+                return;
+            }
+
+            const lines = input.split('\n');
+            const results = [];
+            let validCount = 0;
+            let skippedCount = 0;
+            let hasThreeCol = false;
+            let hasTwoCol = false;
+
+            for (let i = 0; i < lines.length; i++) {
+                const raw = lines[i];
+                const trimmed = raw.trim();
+                if (!trimmed) continue;
+
+                // 按制表符分割，过滤空段
+                const parts = trimmed.split(/\t+/).filter(p => p.trim() !== '');
+
+                // ---- 2列：UID + 昵称 ----
+                if (parts.length === 2) {
+                    const uid = parts[0].trim();
+                    const name = parts[1].trim();
+                    if (/^\d+$/.test(uid)) {
+                        results.push(`https://space.bilibili.com/${uid}\t@${name}`);
+                        validCount++;
+                        hasTwoCol = true;
+                    } else {
+                        skippedCount++;
+                    }
+                    continue;
+                }
+
+                // ---- 3列及以上：取前3列 UID + 昵称 + 时间戳 ----
+                if (parts.length >= 3) {
+                    const uid = parts[0].trim();
+                    const name = parts[1].trim();
+                    const tsRaw = parts[2].trim();
+
+                    if (!/^\d+$/.test(uid)) {
+                        skippedCount++;
+                        continue;
+                    }
+
+                    // 智能解析时间戳
+                    const tsSeconds = parseTimestampSmart(tsRaw);
+                    if (tsSeconds === null || tsSeconds <= 0) {
+                        // 时间戳无效：按2列处理（只输出链接+昵称）
+                        results.push(`https://space.bilibili.com/${uid}\t@${name}`);
+                        validCount++;
+                        hasTwoCol = true;
+                        continue;
+                    }
+
+                    // 有效时间戳 → 3列输出
+                    const dateStr = formatTimestamp(tsSeconds);
+                    results.push(`https://space.bilibili.com/${uid}\t@${name}\t${dateStr}`);
+                    validCount++;
+                    hasThreeCol = true;
+                    continue;
+                }
+
+                // ---- 其他情况（1列或空） ----
+                skippedCount++;
+            }
+
+            if (results.length === 0) {
+                showError('⚠️ 未找到有效数据。请确保格式为：ID\t昵称 或 ID\t昵称\t时间戳');
+                outputText.value = '';
+                updateOutputStats(0, skippedCount);
+                copyBtn.disabled = true;
+                return;
+            }
+
+            // 输出结果
+            const resultText = results.join('\n');
+            outputText.value = resultText;
+            updateOutputStats(validCount, skippedCount);
+            copyBtn.disabled = false;
+
+            // 生成友好的成功消息
+            let modeMsg = '';
+            if (hasThreeCol && hasTwoCol) {
+                modeMsg = '（混合 2列 + 3列）';
+            } else if (hasThreeCol) {
+                modeMsg = '（3列模式，已转换时间戳）';
+            } else if (hasTwoCol) {
+                modeMsg = '（2列模式）';
+            }
+            const skipMsg = skippedCount > 0 ? `，跳过 ${skippedCount} 行` : '';
+            showSuccess(`✅ 转换成功！共 ${validCount} 条有效数据 ${modeMsg}${skipMsg}`);
+
+            // 自动选中输出
+            outputText.select();
+        }
+
+        // ============================================================
+        //  复制功能
+        // ============================================================
+
+        function copyResult() {
+            const text = outputText.value;
+            if (!text) {
+                showError('⚠️ 没有可复制的内容');
+                return;
+            }
+
+            navigator.clipboard.writeText(text).then(() => {
+                showSuccess('📋 已复制到剪贴板！');
+                // 按钮临时反馈
+                const origHTML = copyBtn.innerHTML;
+                copyBtn.innerHTML = '✅ 已复制';
+                setTimeout(() => {
+                    copyBtn.innerHTML = origHTML;
+                }, 1800);
+            }).catch(() => {
+                // 降级方案：选中后提示手动复制
+                outputText.select();
+                document.execCommand('copy');
+                showInfo('📋 已选中内容，按 Ctrl+C 复制');
+            });
+        }
+
+        // ============================================================
+        //  清空
+        // ============================================================
+
+        function clearAll() {
+            inputText.value = '';
+            outputText.value = '';
+            updateInputStats();
+            updateOutputStats(0, 0);
+            copyBtn.disabled = true;
+            resetStatus();
+            columnHint.textContent = '—';
+        }
+
+        // ============================================================
+        //  事件绑定
+        // ============================================================
+
+        convertBtn.addEventListener('click', convertData);
+
+        copyBtn.addEventListener('click', copyResult);
+
+        clearBtn.addEventListener('click', clearAll);
+
+        inputText.addEventListener('input', updateInputStats);
+        inputText.addEventListener('paste', () => {
+            setTimeout(updateInputStats, 20);
+        });
+
+        // ============================================================
+        //  拖拽上传 .txt
+        // ============================================================
+
+        inputText.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            inputText.style.borderColor = '#667eea';
+            inputText.style.backgroundColor = 'rgba(102,126,234,0.04)';
+        });
+
+        inputText.addEventListener('dragleave', () => {
+            inputText.style.borderColor = '#e0e0e0';
+            inputText.style.backgroundColor = '#fafbfc';
+        });
+
+        inputText.addEventListener('drop', (e) => {
+            e.preventDefault();
+            inputText.style.borderColor = '#e0e0e0';
+            inputText.style.backgroundColor = '#fafbfc';
+
+            const files = e.dataTransfer.files;
+            if (files.length === 0) return;
+            const file = files[0];
+            if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    inputText.value = ev.target.result;
+                    updateInputStats();
+                    showInfo('📂 已加载文件：' + file.name);
+                };
+                reader.readAsText(file, 'UTF-8');
+            } else {
+                showError('⚠️ 请拖入 .txt 文本文件');
+            }
+        });
+
+        // ============================================================
+        //  初始化
+        // ============================================================
+
+        updateInputStats();
+        updateOutputStats(0, 0);
+        resetStatus();
+
+        // 给输入框加一个示例数据（方便测试）
+        // 如果用户希望默认有示例，取消下面的注释即可
+        /*
+        inputText.value = `12345678\t张三
+        87654321\t李四\t1704067200
+        98765432\t王五\t1733212800`;
+        updateInputStats();
+        */
+
+        console.log('✅ B站链接工具已加载，支持 2列 / 3列 自动识别');
+    </script>
+
+</body>
+</html>
