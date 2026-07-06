@@ -2451,26 +2451,61 @@ def submit_vote(poll_id):
             return rate_limit_json({"error": "投票不存在"}, 404, in_wl, block_until)
 
         data = request.get_json(silent=True) or {}
+        version = data.get('version', 'v2')
+
+        # 基础字段校验
         if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv', 'key_hash')):
             return rate_limit_json({"error": "数据不完整（缺少 rsa_key / aes_msg / iv / key_hash）"}, 400, in_wl, block_until)
 
-        rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
-        iv = data['iv'].replace('\n', '').replace('\r', '').strip()
-        aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
-        key_hash = data['key_hash'].strip()
+        # v3 额外字段校验
+        if version == 'v3':
+            if not all(data.get(k) for k in ('pqc_ciphertext', 'iv_shared', 'iv_content', 'encAESKey', 'encContent')):
+                return rate_limit_json({"error": "PQC数据不完整"}, 400, in_wl, block_until)
+
+        rsa_key    = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
+        iv         = data['iv'].replace('\n', '').replace('\r', '').strip()
+        aes_msg    = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+        key_hash   = data['key_hash'].strip()
         edit_token = secrets.token_urlsafe(24)
 
-        # ★ 读取备注
-        remark_iv = data.get('remark_iv', '').strip()
+        # 备注
+        remark_iv      = data.get('remark_iv', '').strip()
         remark_aes_msg = data.get('remark_aes_msg', '').strip()
-        remark_line = f"{remark_iv}|{remark_aes_msg}"
+        remark_line    = f"{remark_iv}|{remark_aes_msg}"
 
         server_time = datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S')
         server_meta = f"{get_client_ip()} | {server_time}"
-        server_enc = rsa_encrypt_report(server_meta)
+        server_enc  = rsa_encrypt_report(server_meta)
 
-        # 写入文件：v2|rsa_key|iv\n aes_msg\n server_enc\n edit_token\n key_hash\n remark_line
-        content = f"v2|{rsa_key}|{iv}\n{aes_msg}\n{server_enc}\n{edit_token}\n{key_hash}\n{remark_line}"
+        if version == 'v3':
+            pqc_ct   = data['pqc_ciphertext'].replace('\n', '').replace('\r', '').strip()
+            iv_sh    = data['iv_shared'].replace('\n', '').replace('\r', '').strip()
+            iv_ct    = data['iv_content'].replace('\n', '').replace('\r', '').strip()
+            enc_key  = data['encAESKey'].replace('\n', '').replace('\r', '').strip()
+            enc_ct   = data['encContent'].replace('\n', '').replace('\r', '').strip()
+
+            content = (
+                f"v3|{rsa_key}|{iv}|{server_time}\n"
+                f"{aes_msg}\n"
+                f"{server_enc}\n"
+                f"{edit_token}\n"
+                f"{key_hash}\n"
+                f"{remark_line}\n"
+                f"{pqc_ct}\n"
+                f"{iv_sh}\n"
+                f"{iv_ct}\n"
+                f"{enc_key}\n"
+                f"{enc_ct}"
+            )
+        else:
+            content = (
+                f"v2|{rsa_key}|{iv}\n"
+                f"{aes_msg}\n"
+                f"{server_enc}\n"
+                f"{edit_token}\n"
+                f"{key_hash}\n"
+                f"{remark_line}"
+            )
 
         with _file_lock:
             seq = get_vote_seq_unlocked(poll_dir)
@@ -2503,12 +2538,11 @@ def modify_vote(poll_id, seq):
         # 读取原文件
         with open(filepath, 'r', encoding='utf-8') as f:
             lines = [l.rstrip('\n') for l in f.readlines()]
-        # 确保至少6行
         while len(lines) < 6:
             lines.append('')
 
-        # 检查原文件格式
-        if len(lines) < 5 or not lines[0].startswith('v2|'):
+        # 检查原文件格式并提取存储的 key_hash
+        if len(lines) < 5 or not lines[0].startswith(('v2|', 'v3|')):
             return rate_limit_json({"error": "原投票文件格式无效"}, 400, in_wl, block_until)
 
         stored_key_hash = lines[4].strip()
@@ -2520,34 +2554,102 @@ def modify_vote(poll_id, seq):
         if not all(data.get(k) for k in ('rsa_key', 'aes_msg', 'iv')):
             return rate_limit_json({"error": "数据不完整（缺少 rsa_key / aes_msg / iv）"}, 400, in_wl, block_until)
 
-        # 更新内容行
-        lines[1] = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
-        # 更新第一行的 rsa_key 和 iv
+        version = data.get('version', 'v2')
         rsa_key = data['rsa_key'].replace('\n', '').replace('\r', '').strip()
         iv = data['iv'].replace('\n', '').replace('\r', '').strip()
-        # 保留原 server_enc 和 edit_token，但可以重新生成或保留
-        # 我们保留原 server_enc（第3行）和 edit_token（第4行）以及 key_hash（第5行）
-        # 但需要更新第一行的 rsa_key 和 iv
-        parts = lines[0].split('|')
-        if len(parts) >= 3:
-            parts[1] = rsa_key
-            parts[2] = iv
-            lines[0] = '|'.join(parts)
+        aes_msg = data['aes_msg'].replace('\n', '').replace('\r', '').strip()
+        key_hash = data.get('key_hash', '').strip()
 
-        # ★ 更新备注（如果有提供）
-        new_remark_iv = data.get('remark_iv', '').strip()
-        new_remark_aes = data.get('remark_aes_msg', '').strip()
-        if 'remark_iv' in data or 'remark_aes_msg' in data:
-            lines[5] = f"{new_remark_iv}|{new_remark_aes}"
+        # 备注
+        remark_iv = data.get('remark_iv', '').strip()
+        remark_aes_msg = data.get('remark_aes_msg', '').strip()
+        remark_line = f"{remark_iv}|{remark_aes_msg}"
 
-        # 写回文件
-        content = "\n".join(lines)
+        # 保留原有的 server_enc 和 edit_token
+        if len(lines) >= 3:
+            server_enc = lines[2].strip()
+        else:
+            server_enc = ''
+        if len(lines) >= 4:
+            edit_token = lines[3].strip()
+        else:
+            edit_token = ''
+
+        if version == 'v3':
+            # 需要 PQC 字段
+            if not all(data.get(k) for k in ('pqc_ciphertext', 'iv_shared', 'iv_content', 'encAESKey', 'encContent')):
+                return rate_limit_json({"error": "PQC 数据不完整"}, 400, in_wl, block_until)
+            pqc_ct = data['pqc_ciphertext'].replace('\n', '').replace('\r', '').strip()
+            iv_sh = data['iv_shared'].replace('\n', '').replace('\r', '').strip()
+            iv_ct = data['iv_content'].replace('\n', '').replace('\r', '').strip()
+            enc_key = data['encAESKey'].replace('\n', '').replace('\r', '').strip()
+            enc_ct = data['encContent'].replace('\n', '').replace('\r', '').strip()
+
+            # 构造 v3 文件内容（与 submit_vote 一致）
+            content = (
+                f"v3|{rsa_key}|{iv}|{server_enc}\n"
+                f"{aes_msg}\n"
+                f"{server_enc}\n"
+                f"{edit_token}\n"
+                f"{key_hash}\n"
+                f"{remark_line}\n"
+                f"{pqc_ct}\n"
+                f"{iv_sh}\n"
+                f"{iv_ct}\n"
+                f"{enc_key}\n"
+                f"{enc_ct}"
+            )
+        else:
+            # v2 格式
+            content = (
+                f"v2|{rsa_key}|{iv}\n"
+                f"{aes_msg}\n"
+                f"{server_enc}\n"
+                f"{edit_token}\n"
+                f"{key_hash}\n"
+                f"{remark_line}"
+            )
+
         atomic_write(filepath, content)
-
         block_until = set_rate_limit_after(ip)
         return rate_limit_json({'status': 'ok', 'seq': seq}, 200, in_wl, block_until)
+
     finally:
         release_processing_lock(ip)
+
+@app.route('/api/votes/<poll_id>/my-vote', methods=['GET'])
+def get_my_vote_by_hash(poll_id):
+    """根据 key_hash 查询用户的加密投票数据，用于恢复本地记录"""
+    key_hash = request.args.get('key_hash', '').strip()
+    if not key_hash:
+        return jsonify({'found': False}), 400
+
+    poll_dir = safe_vote_dir(poll_id)
+    if not poll_dir or not os.path.isdir(poll_dir):
+        return jsonify({'found': False}), 404
+
+    for f in glob.glob(os.path.join(poll_dir, '投票_*.txt')):
+        try:
+            with open(f, 'r', encoding='utf-8') as fh:
+                lines = [l.strip() for l in fh.readlines() if l.strip()]
+            if len(lines) >= 5 and lines[4].strip() == key_hash:
+                m = re.search(r'(\d+)', os.path.basename(f))
+                seq = m.group(1) if m else '0'
+                parts = lines[0].split('|')
+                remark_line = lines[5].strip() if len(lines) >= 6 else ''
+                remark_parts = remark_line.split('|', 1)
+                return jsonify({
+                    'found': True,
+                    'seq': seq,
+                    'rsa_key': parts[1] if len(parts) >= 2 else '',
+                    'iv': parts[2] if len(parts) >= 3 else '',
+                    'aes_msg': lines[1],
+                    'remark_iv': remark_parts[0] if len(remark_parts) >= 1 else '',
+                    'remark_aes_msg': remark_parts[1] if len(remark_parts) >= 2 else ''
+                })
+        except Exception:
+            continue
+    return jsonify({'found': False})
 
 @app.route('/admin/vote')
 def admin_vote_page():
@@ -2603,6 +2705,68 @@ def create_vote():
                  json.dumps(cfg, ensure_ascii=False))
     return jsonify({'ok': True, 'id': poll_id})
 
+@app.route('/api/admin/votes/<poll_id>/update', methods=['POST'])
+@require_csrf
+@require_private_key
+def update_vote_config(poll_id):
+    """管理员更新投票配置（标题、选项、自定义选项、允许编辑、多选限制）"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    poll_dir = safe_vote_dir(poll_id)
+    if not poll_dir or not os.path.isdir(poll_dir):
+        return jsonify({'error': '投票不存在'}), 404
+
+    data = request.get_json(silent=True) or {}
+    title = data.get('title', '').strip()
+    options = data.get('options', [])
+    custom = data.get('custom', False)
+    custom_hint = data.get('customHint', '')
+    allow_edit = data.get('allowEdit', False)
+    min_select = data.get('minSelect', 1)
+    max_select = data.get('maxSelect', 1)
+
+    if not title:
+        return jsonify({'error': '标题不能为空'}), 400
+    if len(options) < 2:
+        return jsonify({'error': '至少需要2个选项'}), 400
+
+    try:
+        min_select = int(min_select)
+        max_select = int(max_select)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'minSelect 和 maxSelect 必须是整数'}), 400
+
+    total = len(options)
+    if min_select < 1:
+        return jsonify({'error': '最少可选数不能小于 1'}), 400
+    if min_select >= total:
+        return jsonify({'error': f'最少可选数必须小于选项总数({total})'}), 400
+    if max_select < min_select:
+        return jsonify({'error': f'最多可选数({max_select})不能小于最少可选数({min_select})'}), 400
+    if max_select > total:
+        return jsonify({'error': f'最多可选数({max_select})不能超过选项总数({total})'}), 400
+
+    cfg_path = os.path.join(poll_dir, 'config.json')
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+
+    cfg['title'] = title
+    cfg['options'] = options
+    cfg['custom'] = custom
+    cfg['customHint'] = custom_hint
+    cfg['allowEdit'] = allow_edit
+    cfg['minSelect'] = min_select
+    cfg['maxSelect'] = max_select
+    # 保留创建时间，不覆盖
+    cfg.setdefault('created_at', datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'))
+
+    atomic_write(cfg_path, json.dumps(cfg, ensure_ascii=False))
+    return jsonify({'ok': True})
+
 @app.route('/api/admin/votes/<poll_id>/data', methods=['GET'])
 @require_csrf
 @require_private_key
@@ -2621,8 +2785,10 @@ def get_poll_data(poll_id):
             cfg = json.load(f)
 
     votes = []
-    for f in sorted(glob.glob(os.path.join(poll_dir, '投票_*.txt')),
-                    key=lambda x: int(m.group(1)) if (m := re.search(r'(\d+)', os.path.basename(x))) else 0):
+    for f in sorted(
+        glob.glob(os.path.join(poll_dir, '投票_*.txt')),
+        key=lambda x: int(m.group(1)) if (m := re.search(r'(\d+)', os.path.basename(x))) else 0
+    ):
         m = re.search(r'(\d+)', os.path.basename(f))
         if not m:
             continue
@@ -2631,43 +2797,72 @@ def get_poll_data(poll_id):
                 lines = [l.strip() for l in fh.readlines() if l.strip()]
                 if len(lines) < 3:
                     continue
+
+                is_v3 = lines[0].startswith('v3|')
                 is_v2 = lines[0].startswith('v2|')
-                # 解析备注行（第6行，索引5）
-                remark_line = lines[5].strip() if len(lines) >= 6 else ''
+
+                # 备注始终在第6行（索引5）
+                remark_line  = lines[5].strip() if len(lines) >= 6 else ''
                 remark_parts = remark_line.split('|', 1)
-                remark_iv = remark_parts[0] if len(remark_parts) >= 1 else ''
+                remark_iv      = remark_parts[0] if len(remark_parts) >= 1 else ''
                 remark_aes_msg = remark_parts[1] if len(remark_parts) >= 2 else ''
 
-                if is_v2:
+                if is_v3:
+                    parts = lines[0].split('|')
+                    entry = {
+                        'seq':            m.group(1),
+                        'rsa_key':        parts[1] if len(parts) >= 2 else '',
+                        'iv':             parts[2] if len(parts) >= 3 else '',
+                        'aes_msg':        lines[1],
+                        'server_enc':     lines[2] if len(lines) > 2 else '',
+                        'edit_token':     lines[3].strip() if len(lines) >= 4 else '',
+                        'remark_iv':      remark_iv,
+                        'remark_aes_msg': remark_aes_msg,
+                        'version':        'v3',
+                    }
+                    if len(lines) >= 11:
+                        entry['pqc_ciphertext'] = lines[6]
+                        entry['iv_shared']      = lines[7]
+                        entry['iv_content']     = lines[8]
+                        entry['encAESKey']      = lines[9]
+                        entry['encContent']     = lines[10]
+                    votes.append(entry)
+
+                elif is_v2:
                     parts = lines[0].split('|')
                     votes.append({
-                        'seq': m.group(1),
-                        'rsa_key': parts[1] if len(parts) >= 2 else '',
-                        'iv': parts[2] if len(parts) >= 3 else '',
-                        'aes_msg': lines[1],
-                        'server_enc': lines[2] if len(lines) > 2 else '',
-                        'edit_token': lines[3].strip() if len(lines) >= 4 else '',
-                        'remark_iv': remark_iv,
-                        'remark_aes_msg': remark_aes_msg
+                        'seq':            m.group(1),
+                        'rsa_key':        parts[1] if len(parts) >= 2 else '',
+                        'iv':             parts[2] if len(parts) >= 3 else '',
+                        'aes_msg':        lines[1],
+                        'server_enc':     lines[2] if len(lines) > 2 else '',
+                        'edit_token':     lines[3].strip() if len(lines) >= 4 else '',
+                        'remark_iv':      remark_iv,
+                        'remark_aes_msg': remark_aes_msg,
+                        'version':        'v2',
                     })
+
                 else:
+                    # 旧格式兼容
                     parts = lines[0].split('|')
                     votes.append({
-                        'seq': m.group(1),
-                        'rsa_key': parts[0] if len(parts) >= 1 else '',
-                        'iv': parts[1] if len(parts) >= 2 else '',
-                        'meta_enc': lines[1].strip(),
-                        'content_enc': lines[2].strip(),
-                        'edit_token': lines[3].strip() if len(lines) >= 4 else '',
-                        'remark_iv': remark_iv,
-                        'remark_aes_msg': remark_aes_msg
+                        'seq':            m.group(1),
+                        'rsa_key':        parts[0] if len(parts) >= 1 else '',
+                        'iv':             parts[1] if len(parts) >= 2 else '',
+                        'meta_enc':       lines[1].strip(),
+                        'content_enc':    lines[2].strip(),
+                        'edit_token':     lines[3].strip() if len(lines) >= 4 else '',
+                        'remark_iv':      remark_iv,
+                        'remark_aes_msg': remark_aes_msg,
+                        'version':        'v1',
                     })
+
         except Exception:
             continue
 
     return jsonify({
         'config': cfg,
-        'votes': votes
+        'votes':  votes,
     })
 
 @app.route('/api/admin/votes/<poll_id>', methods=['DELETE'])
