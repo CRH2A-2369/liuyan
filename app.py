@@ -26,7 +26,8 @@ CAPTCHA_DEFAULTS = {
     "scroll_speed": 2,
     "font_size": 75,
     "captcha_length": 5,
-    "allowed_chars": "23456789ABCDEFGHJKLMNPRSTXYZ"
+    "allowed_chars": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "max_verified_records": 50
 }
 
 # === ReDoS 防护 ===
@@ -120,6 +121,8 @@ _token_lock = threading.Lock()
 _download_counts_lock = threading.Lock()
 DOWNLOAD_COUNT_FILE = os.path.join(DATA_DIR, 'download_counts.json')
 PQC_PUB_KEY_PATH = os.path.join(BASE_DIR, 'gongyaoPQC.txt')
+IP_SALT_FILE = os.path.join(DATA_DIR, 'ip_salt.txt')
+IP_ENCRYPTION_MODE_FILE = os.path.join(DATA_DIR, 'ip_encryption_mode.txt')
 # ===== 文件管理配置 =====
 FILES_DIR = os.path.join(DATA_DIR, 'files')
 os.makedirs(FILES_DIR, exist_ok=True)
@@ -153,6 +156,10 @@ if not os.path.exists(NOTICE_FILE):
     json.dump([], open(NOTICE_FILE, 'w', encoding='utf-8'))
 if not os.path.exists(CHAT_RETENTION_FILE):
     open(CHAT_RETENTION_FILE, 'w', encoding='utf-8').write('0')
+if not os.path.exists(IP_SALT_FILE):
+    open(IP_SALT_FILE, 'w', encoding='utf-8').write('')
+if not os.path.exists(IP_ENCRYPTION_MODE_FILE):
+    open(IP_ENCRYPTION_MODE_FILE, 'w', encoding='utf-8').write('rsa')
 # === 4. 并发安全工具 ===
 _file_lock = threading.Lock()
 
@@ -398,6 +405,7 @@ CAPTCHA_VERIFIED_FILE = os.path.join(CAPTCHA_DIR, 'verified.json')
 CAPTCHA_CHALLENGES_FILE = os.path.join(CAPTCHA_DIR, 'challenges.json')
 CAPTCHA_LOG_FILE = os.path.join(CAPTCHA_DIR, 'verified_log.json')
 
+
 # 初始化文件
 for f, default in [
     (CAPTCHA_CONFIG_FILE, {"enabled": True, "duration_minutes": 30}),
@@ -504,15 +512,25 @@ def mark_captcha_verified(ip):
             f"{datetime.fromtimestamp(verified_at, CST).strftime('%Y-%m-%d %H:%M:%S')}|"
             f"{datetime.fromtimestamp(expiry, CST).strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        encrypted = rsa_encrypt_report(plaintext)
+        mode = get_ip_encryption_mode()
+        if mode == 'pqc':
+            encrypted = pqc_encrypt_simple(plaintext)
+            prefix = 'PQC:'
+        else:
+            encrypted = rsa_encrypt_report(plaintext)
+            prefix = 'RSA:'
         if encrypted:
             log = get_verified_log()
             log.append({
-                'data': 'RSA:' + encrypted,
+                'data': prefix + encrypted,
                 'ts': verified_at
             })
-            if len(log) > 500:
-                log = log[-500:]
+            max_records = get_captcha_config().get('max_verified_records', 50)
+            if max_records == 0:
+                log = []
+            elif max_records > 0 and len(log) > max_records:
+                log = log[-max_records:]
+            # -1 = 不设上限，不做任何裁剪
             save_verified_log(log)
 
     return expiry
@@ -616,7 +634,7 @@ def api_captcha_challenge():
     config = get_captcha_config()
     allowed_chars = config.get('allowed_chars', CAPTCHA_DEFAULTS['allowed_chars'])
     length = config.get('captcha_length', CAPTCHA_DEFAULTS['captcha_length'])
-    text = ''.join(random.choices(allowed_chars, k=length))
+    text = ''.join(secrets.choice(allowed_chars) for _ in range(length))
 
     challenge_id = secrets.token_urlsafe(16)
     answer_hash = hashlib.sha256(text.encode()).hexdigest()
@@ -729,6 +747,11 @@ def api_admin_captcha_config():
                 pass
     if 'allowed_chars' in data:
         config['allowed_chars'] = data['allowed_chars'].strip()
+    if 'max_verified_records' in data:
+        try:
+            config['max_verified_records'] = int(data['max_verified_records'])
+        except (ValueError, TypeError):
+            pass
 
     save_captcha_config(config)
     return jsonify({'ok': True, 'config': config})
@@ -808,7 +831,7 @@ def is_admin():
     return session.get('admin') is True
 
 def _migrate_ip_file(filepath, encrypted=False):
-    """迁移旧格式（纯IP）到新格式（hash|RSA加密）"""
+    """迁移旧格式（纯IP）到新格式（hash|加密）"""
     if not os.path.exists(filepath):
         return
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -821,14 +844,11 @@ def _migrate_ip_file(filepath, encrypted=False):
             continue
         if '|' not in line:   # 旧格式
             ip = line
-            ip_hash = sha512(ip)
-            enc = rsa_encrypt_report(ip)
+            ip_hash = hash_ip(ip)
+            enc = encrypt_ip_storage(ip)
             if enc:
                 new_lines.append(f"{ip_hash}|{enc}\n")
                 changed = True
-            else:
-                # 加密失败则保留原样（但会丢失）
-                pass
         else:
             new_lines.append(line + '\n')
     if changed:
@@ -918,8 +938,8 @@ def sha512(s):
 def log_ip_visit(ip):
     """记录 IP 访问（按天聚合：SHA512(IP) | RSA(IP) | 当天次数）"""
     date_str = datetime.now(CST).strftime('%Y-%m-%d')
-    ip_hash = sha512(ip)
-    ip_encrypted = rsa_encrypt_report(ip)
+    ip_hash = hash_ip(ip)
+    ip_encrypted = encrypt_ip_storage(ip)
 
     filepath = os.path.join(IP_DIR, f'ip_{date_str}')
 
@@ -1085,7 +1105,7 @@ def _init_rate_db():
 _init_rate_db()
 
 def _is_whitelisted(ip):
-    ip_hash = sha512(ip)
+    ip_hash = hash_ip(ip)
     return ip_hash in load_whitelist_hashes()
 
 def check_rate_limit_before(ip):
@@ -1161,7 +1181,7 @@ def check_rate_limit(action='read'):
 # === 7. 安全中间件 ===
 @app.before_request
 def security_checks():
-    if sha512(get_client_ip()) in load_blacklist_hashes():
+    if hash_ip(get_client_ip()) in load_blacklist_hashes():
         return "IP已被封禁，拒绝访问", 403
     if session.get('admin'):
         stored_fp = session.get('fp')
@@ -1350,6 +1370,42 @@ def rotate_pqc_key():
         return jsonify({'ok': True, 'message': 'PQC 公钥已更新'})
     except Exception as e:
         return jsonify({'error': f'写入公钥失败: {str(e)}'}), 500
+
+@app.route('/api/admin/ip-salt', methods=['GET', 'POST'])
+@require_csrf
+@require_private_key
+def manage_ip_salt():
+    """管理员读取/设置 IP 哈希盐值"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    if request.method == 'GET':
+        return jsonify({'salt': get_ip_salt()})
+
+    data = request.get_json(silent=True) or {}
+    new_salt = data.get('salt', '')
+    set_ip_salt(new_salt)
+    return jsonify({'ok': True, 'salt': new_salt})
+
+
+@app.route('/api/admin/ip-encryption-mode', methods=['GET', 'POST'])
+@require_csrf
+@require_private_key
+def manage_ip_encryption_mode():
+    """管理员读取/设置 IP 加密方式（rsa / pqc）"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    if request.method == 'GET':
+        return jsonify({'mode': get_ip_encryption_mode()})
+
+    data = request.get_json(silent=True) or {}
+    new_mode = data.get('mode', 'rsa').strip()
+    if new_mode not in ('rsa', 'pqc'):
+        return jsonify({'error': '无效模式（应为 rsa 或 pqc）'}), 400
+
+    set_ip_encryption_mode(new_mode)
+    return jsonify({'ok': True, 'mode': new_mode})
 # === 9. 路由：基础与留言（v2 三部分格式）===
 @app.route('/api/myip')
 def my_ip():
@@ -1379,6 +1435,77 @@ def load_pqc_public_key_bytes():
         return pub
     except Exception as e:
         app.logger.error(f"加载 PQC 公钥失败: {e}")
+        return None
+
+def get_ip_salt():
+    """读取 IP 哈希盐值"""
+    try:
+        with open(IP_SALT_FILE, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except Exception:
+        return ''
+
+def set_ip_salt(salt):
+    """设置 IP 哈希盐值"""
+    atomic_write(IP_SALT_FILE, salt)
+
+def get_ip_encryption_mode():
+    """读取 IP 加密方式：'rsa' 或 'pqc'"""
+    try:
+        with open(IP_ENCRYPTION_MODE_FILE, 'r', encoding='utf-8') as f:
+            mode = f.read().strip()
+            if mode in ('rsa', 'pqc'):
+                return mode
+    except Exception:
+        pass
+    return 'rsa'
+
+def set_ip_encryption_mode(mode):
+    """设置 IP 加密方式"""
+    atomic_write(IP_ENCRYPTION_MODE_FILE, mode)
+
+def hash_ip(ip):
+    """带盐的 IP 哈希（SHA-512）"""
+    salt = get_ip_salt()
+    return hashlib.sha512((ip + salt).encode()).hexdigest()
+
+def encrypt_ip_storage(ip):
+    """根据当前配置的加密方式加密 IP，用于黑/白名单和 IP 记录存储。
+    返回格式：
+      - RSA 模式：裸 base64（兼容旧格式）
+      - PQC 模式：'PQC:' + base64(json)
+      - 失败回退 RSA
+    """
+    mode = get_ip_encryption_mode()
+    if mode == 'pqc':
+        enc = pqc_encrypt_simple(ip)
+        if enc:
+            return 'PQC:' + enc
+        # PQC 失败 → 回退 RSA
+    enc = rsa_encrypt_report(ip)
+    return enc if enc else ''
+
+def pqc_encrypt_simple(plaintext):
+    """用 PQC 公钥加密任意明文（用于 IP 存储），返回 base64 JSON 字符串"""
+    try:
+        pub_bytes = load_pqc_public_key_bytes()
+        if pub_bytes is None:
+            return None
+        shared_secret, ciphertext = ML_KEM_1024.encaps(pub_bytes)
+        key = hashlib.sha256(shared_secret).digest()
+        iv = secrets.token_bytes(16)
+        pad_len = 16 - (len(plaintext.encode()) % 16)
+        padded = plaintext.encode() + bytes([pad_len] * pad_len)
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        enc = cipher.encrypt(padded)
+        data = {
+            'ct': base64.b64encode(ciphertext).decode(),
+            'iv': base64.b64encode(iv).decode(),
+            'enc': base64.b64encode(enc).decode()
+        }
+        return base64.b64encode(json.dumps(data).encode()).decode()
+    except Exception as e:
+        app.logger.error(f"PQC encrypt simple failed: {e}")
         return None
 
 @app.route('/gongyaoPQC.txt')
@@ -1833,8 +1960,8 @@ def manage_blacklist():
         # 添加时：前端传明文 IP，后端计算 hash 并加密
         ip = data.get('ip', '').strip()
         if not ip: return "IP无效", 400
-        ip_hash = sha512(ip)
-        enc = rsa_encrypt_report(ip)
+        ip_hash = hash_ip(ip)
+        enc = encrypt_ip_storage(ip)
         if not enc: return "加密失败", 500
         
         found = False
@@ -1896,8 +2023,8 @@ def manage_whitelist():
         # 添加时：前端传明文 IP，后端计算 hash 并加密
         ip = data.get('ip', '').strip()
         if not ip: return "IP无效", 400
-        ip_hash = sha512(ip)
-        enc = rsa_encrypt_report(ip)
+        ip_hash = hash_ip(ip)
+        enc = encrypt_ip_storage(ip)
         if not enc: return "加密失败", 500
         
         found = False
@@ -2023,7 +2150,7 @@ def post_qun():
         msg = {
             'nick': data['nick'].strip()[:32],
             'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
-            'ip': encrypt_ip(get_client_ip()),
+            'ip': encrypt_ip_storage(get_client_ip()),
             'content': content,
             'pinned': False,
             'state': initial_state,
@@ -2102,7 +2229,7 @@ def report_qun_msg(index):
             return rate_limit_json({"error": "公告不可举报"}, 403, in_wl, block_until)
 
         reporter_ip = get_client_ip()
-        ip_hash = sha512(reporter_ip)
+        ip_hash = hash_ip(reporter_ip)
         m.setdefault('reports', [])
         if any(r.get('ip_hash') == ip_hash for r in m['reports']):
             return rate_limit_json({'error': '您已经举报过这条消息，请勿重复举报'}, 429, in_wl, block_until)
@@ -2207,7 +2334,7 @@ def send_announce():
     msg = {
         'nick': 'admin',
         'time': datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S'),
-        'ip': encrypt_ip(get_client_ip()),
+        'ip': encrypt_ip_storage(get_client_ip()),
         'content': content,
         'pinned': False,
         'state': 'forced',
@@ -2324,8 +2451,7 @@ def get_ip_data():
        not re.match(r'^\d{4}-\d{2}-\d{2}$', end_str):
         return jsonify({'error': '日期格式错误（YYYY-MM-DD）'}), 400
 
-    whitelist = load_whitelist()
-    wl_hashes = {sha512(ip) for ip in whitelist}
+    wl_hashes = load_whitelist_hashes()
 
     aggregated = {}
     try:
@@ -3237,6 +3363,7 @@ def chat_send():
             encAESKey_val  = (data.get('encAESKey')      or '').replace('\n','').replace('\r','').strip()
             encContent_val = (data.get('encContent')     or '').replace('\n','').replace('\r','').strip()
             sender_pqc_pub = (data.get('sender_pqc_pub') or '').replace('\n','').replace('\r','').strip()
+            signature = (data.get('signature') or '').replace('\n','').replace('\r','').strip()
             content = (
                 f"v3|{sender_pub}|{iv}|{expire_at}\n"
                 f"{wrapped_key}\n"
@@ -3247,14 +3374,17 @@ def chat_send():
                 f"{iv_content}\n"
                 f"{encAESKey_val}\n"
                 f"{encContent_val}\n"
-                f"{sender_pqc_pub}"
+                f"{sender_pqc_pub}\n"
+                f"{signature}"
             )
         else:
+            signature = (data.get('signature') or '').replace('\n','').replace('\r','').strip()
             content = (
                 f"v2|{sender_pub}|{iv}|{expire_at}\n"
                 f"{wrapped_key}\n"
                 f"{aes_content}\n"
-                f"{admin_ip_enc} | {server_time}"
+                f"{admin_ip_enc} | {server_time}\n"
+                f"{signature}"
             )
 
         with _file_lock:
@@ -3366,6 +3496,13 @@ def chat_poll():
                 msg['encAESKey']      = lines[7]
                 msg['encContent']     = lines[8]
                 msg['sender_pqc_pub'] = lines[9]
+            # 签名在第11行(v3)或第5行(v2)
+            if is_v3:
+                msg['signature'] = lines[10].strip() if len(lines) >= 11 else ''
+            else:
+                msg['signature'] = lines[4].strip() if len(lines) >= 5 else ''
+                result['signature'] = lines[10].strip() if len(lines) >= 11 else ''
+            messages.append(msg)
             messages.append(msg)
     except Exception:
         pass
@@ -3736,7 +3873,8 @@ def admin_chat_messages():
                 'aes_content': lines[2],
                 'admin_ip': admin_parts[0].strip() if len(admin_parts) >= 1 else '',
                 'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else '',
-                'version': 'v3' if is_v3_detail else 'v2'
+                'version': 'v3' if is_v3_detail else 'v2',
+                'signature': lines[10].strip() if is_v3_detail and len(lines) >= 11 else (lines[4].strip() if not is_v3_detail and len(lines) >= 5 else '')
             }
             if is_v3_detail and len(lines) >= 10:
                 result['pqc_ciphertext'] = lines[4]
@@ -3745,6 +3883,7 @@ def admin_chat_messages():
                 result['encAESKey']      = lines[7]
                 result['encContent']     = lines[8]
                 result['sender_pqc_pub'] = lines[9]
+                result['signature'] = lines[10].strip() if len(lines) >= 11 else ''
             return jsonify({'messages': [result]})
         except Exception:
             return jsonify({'messages': []})
@@ -3944,7 +4083,8 @@ def admin_get_message_raw(filename):
             'aes_content': lines[2],
             'admin_ip': admin_parts[0].strip(),
             'server_time': admin_parts[1].strip() if len(admin_parts) >= 2 else '',
-            'version': 'v3' if is_v3 else 'v2'
+            'version': 'v3' if is_v3 else 'v2',
+            'signature': lines[10].strip() if is_v3 and len(lines) >= 11 else (lines[4].strip() if not is_v3 and len(lines) >= 5 else '')
         }
         if is_v3 and len(lines) >= 10:
             result['pqc_ciphertext'] = lines[4]
@@ -4107,6 +4247,91 @@ def import_data():
     except Exception as e:
         return jsonify({'error': f'导入失败: {str(e)}'}), 500
 
+@app.route('/api/admin/import-data-merge', methods=['POST'])
+@require_csrf
+@require_private_key
+def import_data_merge():
+    """增量导入 ZIP：哈希去重，配置文件可选保留/替换"""
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    if 'file' not in request.files:
+        return jsonify({'error': '未上传文件'}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': '文件名为空'}), 400
+    if not file.filename.lower().endswith('.zip'):
+        return jsonify({'error': '仅支持 ZIP 文件'}), 400
+
+    config_mode = request.form.get('config_mode', 'keep').strip()
+    if config_mode not in ('keep', 'replace'):
+        config_mode = 'keep'
+
+    CONFIG_PATHS = {
+        'under.txt', '群/permission.txt', '群/rule.txt', '群/threshold.txt',
+        'chat/retention_hours.txt', 'captcha/config.json', 'captcha/verified.json',
+        'ip_salt.txt', 'ip_encryption_mode.txt'
+    }
+
+    try:
+        zip_data = file.read()
+        zip_buffer = io.BytesIO(zip_data)
+        with zipfile.ZipFile(zip_buffer, 'r') as zf:
+            if zf.testzip() is not None:
+                return jsonify({'error': 'ZIP 文件损坏'}), 400
+
+            stats = {'added': 0, 'skipped': 0, 'renamed': 0, 'config_skipped': 0, 'config_replaced': 0, 'errors': []}
+
+            for member in zf.infolist():
+                name = member.filename
+                if name.startswith('/') or '..' in name.replace('\\', '/').split('/'):
+                    stats['errors'].append('非法路径跳过: ' + name)
+                    continue
+                if name.endswith('/'):
+                    continue
+
+                target = os.path.realpath(os.path.join(DATA_DIR, name))
+                data_real = os.path.realpath(DATA_DIR)
+                if not target.startswith(data_real + os.sep) and target != data_real:
+                    stats['errors'].append('路径遍历跳过: ' + name)
+                    continue
+
+                with zf.open(member) as src:
+                    content = src.read()
+                new_hash = hashlib.sha256(content).hexdigest()
+
+                normalized = name.replace('\\', '/')
+                is_config = normalized in CONFIG_PATHS
+
+                if is_config and config_mode == 'keep':
+                    stats['config_skipped'] += 1
+                    continue
+
+                if os.path.exists(target):
+                    with open(target, 'rb') as f_existing:
+                        existing_hash = hashlib.sha256(f_existing.read()).hexdigest()
+                    if new_hash == existing_hash:
+                        stats['skipped'] += 1
+                        continue
+                    else:
+                        base, ext = os.path.splitext(target)
+                        counter = 1
+                        while os.path.exists(f"{base}_{counter}{ext}"):
+                            counter += 1
+                        target = f"{base}_{counter}{ext}"
+                        stats['renamed'] += 1
+
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, 'wb') as dst:
+                    dst.write(content)
+                stats['added'] += 1
+
+        return jsonify({'ok': True, 'stats': stats})
+    except zipfile.BadZipFile:
+        return jsonify({'error': '无效的 ZIP 文件'}), 400
+    except Exception as e:
+        return jsonify({'error': f'导入失败: {str(e)}'}), 500
+
 @app.route('/health')
 def health():
     return "恭_喜_你_进_入_了_隐_藏_空_间_，_这_是_一_个_小_彩_蛋_，_程_序_运_转_正_常", 200
@@ -4224,7 +4449,6 @@ def delete_file():
             if not full_path:
                 return jsonify({'error': '非法路径'}), 400
 
-    full_path = os.path.join(FILES_DIR, rel_path)
     if not os.path.exists(full_path):
         return jsonify({'error': '文件或目录不存在'}), 404
 
@@ -4252,12 +4476,20 @@ def move_file():
     if not source or not dest:
         return jsonify({'error': '缺少源或目标路径'}), 400
 
-    # 安全检查
-    if '..' in source or source.startswith('/') or '..' in dest or dest.startswith('/'):
-        return jsonify({'error': '非法路径'}), 400
+    # 安全检查：逐段 safe_resolve
+    def resolve_path(rel_path):
+        parts = rel_path.replace('\\', '/').split('/')
+        cur = FILES_DIR
+        for part in parts:
+            cur = safe_resolve(cur, part)
+            if not cur:
+                return None
+        return cur
 
-    src_path = os.path.join(FILES_DIR, source)
-    dst_path = os.path.join(FILES_DIR, dest)
+    src_path = resolve_path(source)
+    dst_path = resolve_path(dest)
+    if not src_path or not dst_path:
+        return jsonify({'error': '非法路径'}), 400
 
     if not os.path.exists(src_path):
         return jsonify({'error': '源文件不存在'}), 404
@@ -4285,12 +4517,19 @@ def copy_file():
     if not source or not dest:
         return jsonify({'error': '缺少源或目标路径'}), 400
 
-    # 安全检查：禁止 '..' 和绝对路径
-    if '..' in source or source.startswith('/') or '..' in dest or dest.startswith('/'):
-        return jsonify({'error': '非法路径'}), 400
+    def resolve_path(rel_path):
+        parts = rel_path.replace('\\', '/').split('/')
+        cur = FILES_DIR
+        for part in parts:
+            cur = safe_resolve(cur, part)
+            if not cur:
+                return None
+        return cur
 
-    src_path = os.path.join(FILES_DIR, source)
-    dst_path = os.path.join(FILES_DIR, dest)
+    src_path = resolve_path(source)
+    dst_path = resolve_path(dest)
+    if not src_path or not dst_path:
+        return jsonify({'error': '非法路径'}), 400
 
     if not os.path.exists(src_path):
         return jsonify({'error': '源文件或目录不存在'}), 404
@@ -4299,10 +4538,8 @@ def copy_file():
 
     try:
         if os.path.isdir(src_path):
-            # 复制目录（递归）
             shutil.copytree(src_path, dst_path)
         else:
-            # 复制文件
             shutil.copy2(src_path, dst_path)
     except Exception as e:
         return jsonify({'error': f'复制失败: {str(e)}'}), 500
@@ -4325,10 +4562,21 @@ def mkdir_file():
     if not re.match(r'^[\w\u4e00-\u9fff\-]+$', dirname):
         return jsonify({'error': '文件夹名包含非法字符'}), 400
 
-    if parent_path and ('..' in parent_path or parent_path.startswith('/')):
-        return jsonify({'error': '非法路径'}), 400
+    def resolve_path(rel_path):
+        parts = rel_path.replace('\\', '/').split('/')
+        cur = FILES_DIR
+        for part in parts:
+            cur = safe_resolve(cur, part)
+            if not cur:
+                return None
+        return cur
 
-    target_dir = os.path.join(FILES_DIR, parent_path, dirname) if parent_path else os.path.join(FILES_DIR, dirname)
+    base = resolve_path(parent_path) if parent_path else FILES_DIR
+    if base is None:
+        return jsonify({'error': '非法路径'}), 400
+    target_dir = safe_resolve(base, dirname)
+    if not target_dir:
+        return jsonify({'error': '非法文件夹名'}), 400
     if os.path.exists(target_dir):
         return jsonify({'error': '目标已存在'}), 409
 
