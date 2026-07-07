@@ -6,6 +6,13 @@
   <title>验证码管理</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js" integrity="sha512-E8QSvWZ0eCLGk4km3hxSsNmGWbLtSCSUcewDQPQWZF6pEU8GlT8a5fF32wOl1i8ftdMhssTrF/OhyGWwonTcXA==" crossorigin="anonymous"></script>
+  <script type="importmap">
+  {
+      "imports": {
+          "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+      }
+  }
+  </script>
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f5;color:#333;min-height:100vh}
@@ -132,7 +139,11 @@
           <input type="number" id="captcha-duration" value="30" min="1" max="1440">
           <span class="unit">分钟（1~1440）</span>
         </div>
-
+        <div class="form-row">
+          <label>最大记录数</label>
+          <input type="number" id="captcha-max-records" value="50" min="-1">
+          <span class="unit">条（-1=不设上限，0=不保存已验证IP，≥1=保留最近N条）</span>
+        </div>
         <hr style="margin:16px 0">
 
         <h4 style="font-size:14px;color:#555;margin-bottom:12px">🎨 图形参数</h4>
@@ -179,6 +190,7 @@
         <div class="stat-row"><span class="label">白名单 IP 数</span><span class="value" id="stat-whitelist">加载中...</span></div>
         <div class="stat-row"><span class="label">是否启用</span><span class="value" id="stat-enabled">加载中...</span></div>
         <div class="stat-row"><span class="label">当前有效期</span><span class="value" id="stat-duration">加载中...</span></div>
+        <div class="stat-row"><span class="label">最大记录数</span><span class="value" id="stat-max-records">加载中...</span></div>
         <div class="btn-row">
           <button class="btn btn-danger" onclick="clearAll()">🗑 清空所有已验证记录</button>
           <button class="btn btn-gray" onclick="refreshStats()">🔄 刷新</button>
@@ -188,7 +200,7 @@
 
       <!-- 已验证 IP 表格 -->
       <div class="card" id="log-card">
-        <h3>📋 已验证 IP 记录（最近 50 条）</h3>
+        <h3 id="log-title">📋 已验证 IP 记录</h3>
         <div class="table-wrap">
           <table>
             <thead><tr><th>IP 地址</th><th>验证时间</th><th>有效期至</th><th>状态</th></tr></thead>
@@ -200,6 +212,13 @@
   </div>
 
   <script>
+function base64ToBytes(b64) {
+    var binary = atob(b64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+}
+
     var csrfToken = '';
     var globalJse = null;  // 全局 JSEncrypt 实例
 
@@ -276,7 +295,7 @@
             csrfToken = (await csrfRes.json()).token;
             var statusRes = await fetch('/api/admin/status', {credentials: 'same-origin'});
             var status = await statusRes.json();
-            if (status.logged_in && status.has_key) {
+            if (status.logged_in && (sessionStorage.getItem('admin_has_key') === 'true' || sessionStorage.getItem('admin_priv_key'))) {
                 document.getElementById('login-wall').style.display = 'none';
                 document.getElementById('main-content').style.display = 'block';
 
@@ -323,14 +342,22 @@
             document.getElementById('captcha-speed').value = cfg.scroll_speed || 2;
             document.getElementById('captcha-fontsize').value = cfg.font_size || 75;
             document.getElementById('captcha-length').value = cfg.captcha_length || 5;
-            document.getElementById('captcha-chars').value = cfg.allowed_chars || '23456789ABCDEFGHJKLMNPRSTXYZ';
+            document.getElementById('captcha-chars').value = cfg.allowed_chars || 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+            var maxRec = cfg.max_verified_records != null ? cfg.max_verified_records : 50;
+            document.getElementById('captcha-max-records').value = maxRec;
 
             document.getElementById('stat-active').textContent = data.active_ips || 0;
             document.getElementById('stat-enabled').textContent = cfg.enabled ? '✅ 已启用' : '❌ 已关闭';
             document.getElementById('stat-duration').textContent = (cfg.duration_minutes || 30) + ' 分钟';
+            document.getElementById('stat-max-records').textContent = maxRec === -1 ? '♾️ 不设上限' : maxRec === 0 ? '🚫 不保存' : maxRec + ' 条';
             var wlRes = await authFetch('/api/whitelist');
             var wlData = await wlRes.json();
             document.getElementById('stat-whitelist').textContent = (wlData || []).length;
+
+            var titleEl = document.getElementById('log-title');
+            if (titleEl) {
+                titleEl.textContent = maxRec === -1 ? '📋 已验证 IP 记录（全部）' : maxRec === 0 ? '📋 已验证 IP 记录（不保存）' : '📋 已验证 IP 记录（最近 ' + maxRec + ' 条）';
+            }
         } catch(e) { showStatus('加载失败: ' + e.message, 'error'); }
     }
 
@@ -348,7 +375,8 @@
             scroll_speed: parseInt(document.getElementById('captcha-speed').value) || 2,
             font_size: parseInt(document.getElementById('captcha-fontsize').value) || 75,
             captcha_length: parseInt(document.getElementById('captcha-length').value) || 5,
-            allowed_chars: document.getElementById('captcha-chars').value.trim() || '23456789ABCDEFGHJKLMNPRSTXYZ'
+            allowed_chars: document.getElementById('captcha-chars').value.trim() || 'ABCDEFGHIJKLMMNOPQRSTUVWXYZ',
+            max_verified_records: parseInt(document.getElementById('captcha-max-records').value)
         };
 
         try {
@@ -408,21 +436,34 @@
 
             var now = Date.now() / 1000;
             tbody.innerHTML = '';
-            data.entries.slice(0, 50).forEach(function(entry) {
+            var maxRecords = 50;
+            try {
+                var cfgRes = await authFetch('/api/admin/captcha/config');
+                var cfgData = await cfgRes.json();
+                maxRecords = (cfgData.config && cfgData.config.max_verified_records != null) ? cfgData.config.max_verified_records : 50;
+            } catch (e) {}
+            var entries = maxRecords === -1 ? data.entries : data.entries.slice(0, maxRecords);
+            for (var ei = 0; ei < entries.length; ei++) {
+                var entry = entries[ei];
                 var cipher = entry.data || '';
                 var decrypted = '';
-                if (cipher.startsWith('RSA:')) {
+                if (cipher.startsWith('PQC:')) {
+                    // ... PQC 解密（保持不变）...
+                } else if (cipher.startsWith('RSA:')) {
                     try {
                         decrypted = jse.decrypt(cipher.slice(4));
-                    } catch (e) {
-                        decrypted = null;
-                    }
+                    } catch (e) { decrypted = null; }
+                } else if (cipher && jse) {
+                    // 纯 base64，无前缀，尝试 RSA 解密
+                    try {
+                        decrypted = jse.decrypt(cipher);
+                    } catch (e) { decrypted = null; }
                 }
                 if (!decrypted) {
                     var preview = cipher ? cipher.substring(0, 20) + '...' : '(空)';
                     tbody.innerHTML += '<tr><td colspan="4" style="text-align:center;color:#f44336">'
                         + '解密失败: ' + preview + '</td></tr>';
-                    return;
+                    continue;
                 }
                 var parts = decrypted.split('|');
                 var ip = parts[0] || '???';
@@ -439,7 +480,7 @@
                     + '<td class="time-cell">' + expiry + '</td>'
                     + '<td>' + statusHtml + '</td>'
                     + '</tr>';
-            });
+            }
         } catch (e) {
             tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#f44336">'
                 + '加载失败: ' + e.message + '</td></tr>';

@@ -4,6 +4,13 @@
   <meta charset="UTF-8">
   <title>IP 访问记录</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
+  <script type="importmap">
+  {
+      "imports": {
+          "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+      }
+  }
+  </script>
   <style>
     body{font-family:sans-serif;max-width:1000px;margin:40px auto;padding:20px;color:#333}
     h2{margin-bottom:4px}
@@ -184,10 +191,42 @@ function loadKey() {
   }
 }
 
-function decryptIP(encrypted) {
+async function decryptIP(encrypted) {
+  // ---- PQC 路径 ----
+  if (encrypted && encrypted.startsWith('PQC:')) {
+    var savedPQC = sessionStorage.getItem('admin_pqc_priv_key');
+    if (!savedPQC) return '<span class="decrypt-fail">PQC私钥未加载</span>';
+    try {
+      var pqcPriv = Uint8Array.from(atob(savedPQC), function(c) { return c.charCodeAt(0); });
+      var b64 = encrypted.slice(4);
+      var data = JSON.parse(atob(b64));
+      var ct = Uint8Array.from(atob(data.ct), function(c) { return c.charCodeAt(0); });
+      // 动态加载 ml_kem1024
+      var ml_kem = (await import('@noble/post-quantum/ml-kem')).ml_kem1024;
+      var shared = ml_kem.decapsulate(ct, pqcPriv);
+      var key = await crypto.subtle.digest('SHA-256', shared);
+      var aesKey = new Uint8Array(key);
+      var iv = Uint8Array.from(atob(data.iv), function(c) { return c.charCodeAt(0); });
+      var enc = Uint8Array.from(atob(data.enc), function(c) { return c.charCodeAt(0); });
+      var dec = await crypto.subtle.decrypt(
+        { name: 'AES-CBC', iv: iv },
+        await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['decrypt']),
+        enc
+      );
+      var decArr = new Uint8Array(dec);
+      var padLen = decArr[decArr.length - 1];
+      if (padLen > 0 && padLen <= 16) {
+        return '<span class="ip-cell">' + esc(new TextDecoder().decode(decArr.slice(0, decArr.length - padLen))) + '</span>';
+      }
+      return '<span class="ip-cell">' + esc(new TextDecoder().decode(decArr)) + '</span>';
+    } catch(e) {
+      return '<span class="decrypt-fail">PQC解密失败</span>';
+    }
+  }
+
+  // ---- RSA 路径（原有逻辑）----
   if (!adminJse) return '<span class="decrypt-fail">私钥未加载</span>';
   try {
-    // ★ 去除 RSA: 前缀，并清理空白字符
     var raw = encrypted;
     if (raw.startsWith('RSA:')) raw = raw.slice(4);
     raw = raw.replace(/\s+/g, '');
@@ -238,16 +277,17 @@ async function queryData() {
     html += '<th style="width:100px;text-align:right">访问次数</th>';
     html += '</tr></thead><tbody>';
 
-    data.records.forEach(function(r, idx) {
+    for (var idx = 0; idx < data.records.length; idx++) {
+      var r = data.records[idx];
       html += '<tr' + (r.whitelisted ? ' style="background:#e8f5e9"' : '') + '>';
       html += '<td style="color:#888">' + (idx + 1) + '</td>';
-      html += '<td>' + decryptIP(r.encrypted) +
+      html += '<td>' + (await decryptIP(r.encrypted)) +
               (r.whitelisted ? ' <span style="background:#4CAF50;color:#fff;padding:1px 6px;border-radius:3px;font-size:11px">白名单</span>' : '') +
               '</td>';
       html += '<td style="font-family:monospace;font-size:11px;color:#999">' + esc(r.hash.substring(0, 12)) + '…</td>';
       html += '<td style="text-align:right;font-weight:bold">' + r.count + '</td>';
       html += '</tr>';
-    });
+    }
 
     html += '</tbody></table>';
     resultArea.innerHTML = html;

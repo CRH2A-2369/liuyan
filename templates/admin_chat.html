@@ -308,6 +308,29 @@ function viewDetail(filename){
       var adminIpDisplay = await decryptAdminIpDetail(m.admin_ip);  // ← 异步解密
       html += '<p><b>用户IP:</b> <span class="mono">'+adminIpDisplay+'</span></p>';
       html += '<p><b>服务器时间:</b> '+esc(m.server_time)+'</p>';
+      if (m.signature) {
+        html += '<p><b>✍️ RSA签名:</b> <span class="mono" style="font-size:10px">'+esc(m.signature.substring(0,80))+'...</span></p>';
+        // 尝试验签
+        if (m.aes_content && m.iv && m.wrapped_key && adminJse) {
+          try {
+            var aesKey2 = adminJse.decrypt(m.wrapped_key);
+            if (aesKey2) {
+              var k32 = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(aesKey2).toString());
+              var dec2 = CryptoJS.AES.decrypt(m.aes_content, k32, {iv:CryptoJS.enc.Base64.parse(m.iv),mode:CryptoJS.mode.CBC,padding:CryptoJS.pad.Pkcs7}).toString(CryptoJS.enc.Utf8);
+              if (dec2) {
+                var parts2 = dec2.split('|');
+                if (parts2.length >= 4) {
+                  var sigPayload = parts2[0]+'|'+parts2[1]+'|'+parts2.slice(2,parts2.length-1).join('|')+'|'+parts2[parts2.length-1];
+                  var jseV = new JSEncrypt();
+                  jseV.setPublicKey(m.sender_pub);
+                  var valid = jseV.verify(sigPayload, m.signature, CryptoJS.SHA256);
+                  html += '<p><b>验签结果:</b> <span style="color:'+(valid?'#4CAF50':'#f44336')+'">'+(valid?'✅ 通过':'❌ 失败')+'</span></p>';
+                }
+              }
+            }
+          } catch(e) {}
+        }
+      }
       document.getElementById('detail-content').innerHTML = html;
       document.getElementById('detail-modal').style.display = 'flex';
     });

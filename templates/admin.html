@@ -92,24 +92,75 @@
 
 <hr>
 <h3>📦 数据备份与恢复（全量操作，请谨慎）</h3>
-<div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0">
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0">
   <button onclick="exportData()" style="background:#2196F3;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📤 导出所有数据</button>
   <button onclick="document.getElementById('import-file-input').click()" style="background:#FF9800;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📥 导入数据并覆盖</button>
   <input type="file" id="import-file-input" accept=".zip" style="display:none" onchange="importData(this)">
+  <button onclick="document.getElementById('import-merge-input').click()" style="background:#4CAF50;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📥 增量导入（去重合并）</button>
+  <input type="file" id="import-merge-input" accept=".zip" style="display:none" onchange="importDataMerge(this)">
+  <button onclick="rotateRSAKey()" style="background:#d32f2f;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">🔄 重置 RSA 密钥</button>
 </div>
 <div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0">
-  <button onclick="exportPlainData()" style="background:#9C27B0;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导出明文数据</button>
- <button onclick="document.getElementById('import-plain-input').click()" style="background:#FF5722;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导入明文数据</button>
-  <button onclick="rotateRSAKey()" style="background:#d32f2f;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">🔄 重置 RSA 密钥</button>
+<button onclick="showSelectiveExport()" style="background:#E91E63;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导出明文数据（选择分类）</button>
+ <button onclick="showSelectiveImport('full')" style="background:#FF5722;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 导入明文数据（选择分类）</button>
+ <button onclick="showSelectiveImport('merge')" style="background:#009688;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">📄 增量导入明文（选择分类）</button>
+  <input type="file" id="import-plain-merge-input" accept=".json" style="display:none" onchange="importPlainDataMerge(this)">
   <button onclick="rotatePQCKey()" style="background:#9C27B0;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer">🔄 重置 PQC 密钥</button>
   <span style="font-size:12px;color:#888;margin-left:10px">⚠️ 操作前请先导出明文数据，否则旧数据将无法解密</span>
   <input type="file" id="import-plain-input" accept=".json" style="display:none" onchange="importPlainData(this)">
+</div>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0;align-items:center">
+  <span style="font-size:13px;color:#555;white-space:nowrap">🔑 IP哈希盐值:</span>
+  <input id="ip-salt-input" placeholder="留空则不加盐" style="flex:1;max-width:220px;padding:6px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px">
+  <button onclick="saveIPSalt()" style="background:#607D8B;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap">💾 保存盐值</button>
+  <span id="salt-status" style="font-size:11px;color:#888;margin-left:8px"></span>
+</div>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin:8px 0;align-items:center">
+  <span style="font-size:13px;color:#555;white-space:nowrap">🔐 IP加密方式:</span>
+  <select id="ip-encryption-mode" style="padding:6px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px">
+    <option value="rsa">RSA 加密</option>
+    <option value="pqc">PQC 加密 (Kyber-1024)</option>
+  </select>
+  <button onclick="saveIPEncryptionMode()" style="background:#607D8B;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap">💾 切换加密方式</button>
+  <span id="mode-status" style="font-size:11px;color:#888;margin-left:8px"></span>
 </div>
 <div id="plain-status" style="margin:8px 0;padding:8px;background:#f0f0f0;border-radius:4px;font-size:13px;display:none;"></div>
 <p style="font-size:12px;color:#888;margin:4px 0">导出将下载包含所有数据的 ZIP 文件；导入将用所选 ZIP 完全覆盖当前数据，操作不可逆！</p>
 
     <hr><h3>修改底部文字</h3><textarea id="footInput" placeholder="输入新内容"></textarea><button onclick="updateFoot()">保存底部</button>
   </div>
+<div class="modal" id="selective-import-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);align-items:center;justify-content:center;z-index:999">
+  <div class="modal-box" style="background:#fff;padding:24px 20px;border-radius:8px;max-width:500px;width:90%;position:relative;max-height:85vh;overflow-y:auto">
+    <button class="close-btn" onclick="closeSelectiveImport()" style="position:absolute;top:10px;right:10px;background:#f44336;color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0">✕</button>
+    <h3 style="margin:0 0 8px">📥 选择要导入的数据分类</h3>
+    <div style="margin-bottom:8px">
+      <label style="cursor:pointer;margin-right:12px"><input type="checkbox" id="sel-all" onchange="toggleAllCategories(this)" checked> 全选</label>
+      <label style="cursor:pointer"><input type="checkbox" id="sel-none" onchange="toggleAllCategories(this)"> 全不选</label>
+    </div>
+    <div id="category-checks" style="max-height:350px;overflow-y:auto"></div>
+    <div style="margin-top:8px;font-size:12px;color:#888" id="sel-count"></div>
+    <div style="margin-top:12px">
+      <input type="file" id="selective-import-file" accept=".json" style="display:none">
+      <button onclick="document.getElementById('selective-import-file').click()" style="background:#4CAF50;color:#fff;border:none;padding:10px 24px;border-radius:4px;cursor:pointer;font-size:14px;width:100%">📥 开始导入</button>
+    </div>
+  </div>
+</div>
+<!-- ★ 导出选择分类弹窗 -->
+<div class="modal" id="selective-export-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);align-items:center;justify-content:center;z-index:999">
+  <div class="modal-box" style="background:#fff;padding:24px 20px;border-radius:8px;max-width:500px;width:90%;position:relative;max-height:85vh;overflow-y:auto">
+    <button class="close-btn" onclick="closeSelectiveExport()" style="position:absolute;top:10px;right:10px;background:#f44336;color:#fff;border:none;border-radius:50%;width:28px;height:28px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0">✕</button>
+    <h3 style="margin:0 0 8px">📤 选择要导出的数据分类</h3>
+    <div style="margin-bottom:8px">
+      <label style="cursor:pointer;margin-right:12px"><input type="checkbox" id="sel-all-export" onchange="toggleAllCategoriesExport(this)" checked> 全选</label>
+      <label style="cursor:pointer"><input type="checkbox" id="sel-none-export" onchange="toggleAllCategoriesExport(this)"> 全不选</label>
+    </div>
+    <div id="category-checks-export" style="max-height:350px;overflow-y:auto"></div>
+    <div style="margin-top:8px;font-size:12px;color:#888" id="sel-count-export"></div>
+    <div style="margin-top:12px">
+      <button onclick="startSelectiveExport()" style="background:#E91E63;color:#fff;border:none;padding:10px 24px;border-radius:4px;cursor:pointer;font-size:14px;width:100%">📤 开始导出所选分类</button>
+    </div>
+  </div>
+</div>
   <footer id="footer"></footer>
 
 <script>
@@ -147,8 +198,43 @@
     }
     return k;
   }
-  // 解密 IP（使用管理员私钥）
-  function decryptIP(encrypted) {
+  // 解密 IP（支持 RSA 和 PQC）
+  async function decryptIP(encrypted) {
+    // ---- PQC 路径 ----
+    if (encrypted && encrypted.startsWith('PQC:')) {
+      if (!pqcPrivateKeyBytes) return '（PQC私钥未加载）';
+      try {
+        if (!ml_kem1024) {
+          const mod = await import('@noble/post-quantum/ml-kem');
+          ml_kem1024 = mod.ml_kem1024;
+        }
+        const b64 = encrypted.slice(4);
+        const data = JSON.parse(atob(b64));
+        const ct = Uint8Array.from(atob(data.ct), c => c.charCodeAt(0));
+        const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+        const key = await crypto.subtle.digest('SHA-256', shared);
+        const aesKey = new Uint8Array(key);
+        const iv = Uint8Array.from(atob(data.iv), c => c.charCodeAt(0));
+        const enc = Uint8Array.from(atob(data.enc), c => c.charCodeAt(0));
+        const dec = await crypto.subtle.decrypt(
+          { name: 'AES-CBC', iv: iv },
+          await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['decrypt']),
+          enc
+        );
+        // 去除 PKCS7 填充
+        const decArr = new Uint8Array(dec);
+        const padLen = decArr[decArr.length - 1];
+        if (padLen > 0 && padLen <= 16) {
+          return new TextDecoder().decode(decArr.slice(0, decArr.length - padLen));
+        }
+        return new TextDecoder().decode(decArr);
+      } catch(e) {
+        console.warn('PQC IP解密失败', e);
+        return '（PQC解密失败）';
+      }
+    }
+
+    // ---- RSA 路径（原有逻辑）----
     const tryDec = (jseInst) => {
       if (!jseInst || !jseInst.getPrivateKey()) return null;
       try {
@@ -230,8 +316,8 @@
     const container = document.getElementById('wl-list');
     container.innerHTML = '';
     let failCount = 0;
-    list.forEach(item => {
-      const plainIP = decryptIP(item.encrypted);
+    for (const item of list) {
+      const plainIP = await decryptIP(item.encrypted);
       if (plainIP === '（解密失败）') failCount++;
       const div = document.createElement('div');
       div.className = 'bl-item';
@@ -240,7 +326,7 @@
         <button class="bl-del" onclick="deleteIP('${item.hash}', 'white')">删除</button>
       `;
       container.appendChild(div);
-    });
+    }
     if (failCount > 0 && failCount === list.length && list.length > 0) {
       const ok = await promptDataKey();
       if (ok) loadWL();
@@ -280,8 +366,8 @@
     const container = document.getElementById('bl-list');
     container.innerHTML = '';
     let failCount = 0;
-    list.forEach(item => {
-      const plainIP = decryptIP(item.encrypted);
+    for (const item of list) {
+      const plainIP = await decryptIP(item.encrypted);
       if (plainIP === '（解密失败）') failCount++;
       const div = document.createElement('div');
       div.className = 'bl-item';
@@ -290,7 +376,7 @@
         <button class="bl-del" onclick="deleteIP('${item.hash}', 'black')">删除</button>
       `;
       container.appendChild(div);
-    });
+    }
     if (failCount > 0 && failCount === list.length && list.length > 0) {
       const ok = await promptDataKey();
       if (ok) loadBL();
@@ -333,10 +419,16 @@
 async function encryptAES(plaintext, keyBytes) {
     const iv = crypto.getRandomValues(new Uint8Array(16));
     const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']);
+    // ★ PKCS7 填充
+    const plainBytes = new TextEncoder().encode(plaintext);
+    const padLen = 16 - (plainBytes.length % 16);
+    const padded = new Uint8Array(plainBytes.length + padLen);
+    padded.set(plainBytes);
+    padded.fill(padLen, plainBytes.length);
     const enc = await crypto.subtle.encrypt(
         { name: 'AES-CBC', iv: iv },
         cryptoKey,
-        new TextEncoder().encode(plaintext)
+        padded
     );
     return { iv: iv, ciphertext: new Uint8Array(enc) };
 }
@@ -490,6 +582,8 @@ async function encryptAES(plaintext, keyBytes) {
     fetch('/api/footer', {credentials:'same-origin'}).then(function(r){return r.text();}).then(function(t){document.getElementById('footInput').value=t;});
     loadBL();
     loadWL();
+    loadIPSalt();
+    loadIPEncryptionMode();
   }
 
 async function render() {
@@ -539,7 +633,12 @@ async function render() {
                     await crypto.subtle.importKey('raw', aesKeyShared, { name: 'AES-CBC' }, false, ['decrypt']),
                     encAESKeyBytes
                 );
-                const userAESKey = new Uint8Array(decryptedKey);
+                let userAESKeyArr = new Uint8Array(decryptedKey);
+                const padLen = userAESKeyArr[userAESKeyArr.length - 1];
+                if (padLen > 0 && padLen <= 16) {
+                    userAESKeyArr = userAESKeyArr.slice(0, userAESKeyArr.length - padLen);
+                }
+                const userAESKey = userAESKeyArr;
                 rawAES = new TextDecoder().decode(userAESKey);
 
                 // 3) 解密内容 — 先 SHA-256 哈希用户密钥再解密
@@ -570,7 +669,13 @@ async function render() {
                         await crypto.subtle.importKey('raw', aesKeyIp, { name: 'AES-CBC' }, false, ['decrypt']),
                         encIpBytes
                     );
-                    const ipPlain = new TextDecoder().decode(decIp);
+                    // 去除 PKCS7 填充
+                    let decIpArr = new Uint8Array(decIp);
+                    const padLenIp = decIpArr[decIpArr.length - 1];
+                    if (padLenIp > 0 && padLenIp <= 16) {
+                        decIpArr = decIpArr.slice(0, decIpArr.length - padLenIp);
+                    }
+                    const ipPlain = new TextDecoder().decode(decIpArr);
                     meta = '🌐 ' + ipPlain;
                 }
             } else if (m.is_v2) {
@@ -811,6 +916,40 @@ async function render() {
     });
   }
 
+function importDataMerge(input) {
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    const configMode = confirm('对于配置文件（under.txt、规则、阈值、验证码配置等），\n\n点击"确定"=替换为导入的配置\n点击"取消"=保留服务器既有配置') ? 'replace' : 'keep';
+    const confirmMsg = `⚠️ 即将增量导入文件：${file.name}\n配置文件将${configMode === 'keep' ? '保留服务器既有' : '替换为导入的'}。\n请输入 "确认增量导入 ${file.name}" 以继续：`;
+    const confirmText = prompt(confirmMsg);
+    if (confirmText !== `确认增量导入 ${file.name}`) {
+        alert('操作已取消');
+        input.value = '';
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('config_mode', configMode);
+
+    authFetch('/api/admin/import-data-merge', {
+        method: 'POST',
+        body: formData,
+    }).then(res => res.json()).then(data => {
+        if (data.ok) {
+            const s = data.stats;
+            alert(`✅ 增量导入完成！\n新增: ${s.added}  跳过(相同): ${s.skipped}  重命名: ${s.renamed}\n${s.errors && s.errors.length ? '错误: ' + s.errors.join(', ') : ''}`);
+            location.reload();
+        } else {
+            alert('❌ 导入失败：' + (data.error || '未知错误'));
+        }
+    }).catch(err => {
+        alert('❌ 请求失败：' + err.message);
+    }).finally(() => {
+        input.value = '';
+    });
+}
+
   // 兼容旧代码（可能存在的调用）
   async function addCurrentIP() {
     try {
@@ -869,13 +1008,15 @@ function decryptV2Message(lines) {
 }
 
 // ===== 导出明文数据（完整版，包含所有原始 IP 和时间明文，含黑白名单、人机验证配置） =====
-async function exportPlainData() {
-    const confirmText = prompt('请输入 "确认导出所有明文数据" 以继续：');
-    if (confirmText !== '确认导出所有明文数据') {
+async function exportPlainData(categories) {
+    const confirmText = prompt('请输入 "确认导出已选择的明文数据" 以继续：');
+    if (confirmText !== '确认导出已选择的明文数据') {
         alert('操作已取消');
         return;
     }
     const statusDiv = document.getElementById('plain-status');
+        const exportErrors = [];
+        const addExportError = (msg) => { exportErrors.push(msg); statusDiv.textContent = '⚠️ ' + msg; };
     statusDiv.style.display = 'block';
     statusDiv.textContent = '⏳ 正在获取数据...';
     try {
@@ -885,12 +1026,13 @@ async function exportPlainData() {
         statusDiv.textContent = '⏳ 正在解压并解密数据...';
         const zip = await JSZip.loadAsync(zipBlob);
 
-        const result = {
+        let result = {
             messages: [],      // 留言 { nick, content, ip, time }
             votes: {},         // 投票 { poll_id: { config, votes: [ { seq, content, rawAES, key_hash, iv, ip, time } ] } }
             notices: [],       // 公告 { content, time, pinned }
             chat_qun: [],      // 群聊 { nick, time, content, state, pinned, ip }
             chat_private: [],  // 私聊 { filename, sender_pub, iv, expire_at, wrapped_key, aes_content, ip, time }
+            chat_reports: [],  // 群聊举报
             ip_records: [],    // IP 记录 { date, ip, count }
             captcha_logs: [],  // 验证日志 { ip, verified_time, expiry_time }
             configs: {},       // 配置文件 { under, permission, rule, threshold, retention }
@@ -900,19 +1042,48 @@ async function exportPlainData() {
             captcha_verified: null  // captcha/verified.json
         };
 
-        // 解密辅助：先试登录私钥，再试数据私钥
-        const tryDecrypt = (enc) => {
-            if (!enc || !enc.startsWith('RSA:')) return enc;
+        // 解密辅助：支持 RSA 和 PQC
+        const tryDecrypt = async (enc) => {
+            if (!enc) return enc;
+            // PQC 路径
+            if (enc.startsWith('PQC:')) {
+                if (!pqcPrivateKeyBytes) return null;
+                try {
+                    if (!ml_kem1024) {
+                        const mod = await import('@noble/post-quantum/ml-kem');
+                        ml_kem1024 = mod.ml_kem1024;
+                    }
+                    const b64 = enc.slice(4);
+                    const pqcData = JSON.parse(atob(b64));
+                    const ct = Uint8Array.from(atob(pqcData.ct), c => c.charCodeAt(0));
+                    const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+                    const key = await crypto.subtle.digest('SHA-256', shared);
+                    const aesKey = new Uint8Array(key);
+                    const iv = Uint8Array.from(atob(pqcData.iv), c => c.charCodeAt(0));
+                    const encBytes = Uint8Array.from(atob(pqcData.enc), c => c.charCodeAt(0));
+                    const dec = await crypto.subtle.decrypt(
+                        { name: 'AES-CBC', iv: iv },
+                        await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['decrypt']),
+                        encBytes
+                    );
+                    const decArr = new Uint8Array(dec);
+                    const padLen = decArr[decArr.length - 1];
+                    if (padLen > 0 && padLen <= 16) {
+                        return new TextDecoder().decode(decArr.slice(0, decArr.length - padLen));
+                    }
+                    return new TextDecoder().decode(decArr);
+                } catch(e) { return null; }
+            }
+            // RSA 路径
+            if (!enc.startsWith('RSA:')) return enc;
             const raw = enc.slice(4).replace(/\s+/g, '');
-            // 用登录私钥
             if (jse && jse.getPrivateKey()) {
                 try { const d = jse.decrypt(raw); if (d) return d; } catch(e) {}
             }
-            // 用数据私钥
             if (dataJse && dataJse.getPrivateKey()) {
                 try { const d = dataJse.decrypt(raw); if (d) return d; } catch(e) {}
             }
-            return null; // 解不开
+            return null;
         };
 
         const getFileContent = async (path) => {
@@ -947,7 +1118,7 @@ async function exportPlainData() {
                         const hash = parts[0].trim();
                         const encIp = parts[1].trim();
                         let ip = encIp;
-                        const dec = tryDecrypt(encIp);
+                        const dec = await tryDecrypt(encIp);
                         if (dec) ip = dec;
                         list.push({ hash, ip });
                     }
@@ -972,6 +1143,8 @@ async function exportPlainData() {
             } catch (e) {}
         }
 
+        // ★ 收集留言 seq → rawAES 映射（供回复解密使用）
+        const seqRawAESMap = {};
         // ---- 留言 ----
         for (const [path, file] of Object.entries(zip.files)) {
             if (file.dir) continue;
@@ -980,29 +1153,33 @@ async function exportPlainData() {
                 const lines = content.split('\n').filter(l => l.trim());
                 if (lines.length < 3) continue;
                 const first = lines[0];
-                if (first.startsWith('v3|')) {
-                    // ========== PQC v3 解密 ==========
-                    if (!pqcPrivateKeyBytes) continue;
-                    if (!ml_kem1024) {
-                        const mod = await import('@noble/post-quantum/ml-kem');
-                        ml_kem1024 = mod.ml_kem1024;
-                    }
-
-                    // 解析 v3 头部: v3|pqc_ciphertext|iv_shared|iv_content|encAESKey|encContent|identity_hash
-                    const v3parts = first.split('|');
-                    if (v3parts.length < 6) continue;
-                    const pqcCiphertextB64 = v3parts[1];
-                    const ivSharedB64 = v3parts[2];
-                    const ivContentB64 = v3parts[3];
-                    // encAESKey 和 encContent 在独立行
-                    const encAESKeyB64 = (lines[1] || '').trim();
-                    const encContentB64 = (lines[2] || '').trim();
-                    if (!encAESKeyB64 || !encContentB64) continue;
-
+              if (first.startsWith('v3|')) {
+                  const parts = first.split('|');
+                  // 服务端格式: v3|sender_pub|iv|expire_at (第0行, 4部分)
+                  // 第4行: pqc_ciphertext, 第5行: iv_shared, 第6行: iv_content
+                  // 第7行: encAESKey, 第8行: encContent, 第9行: sender_pqc_pub
+                  if (!pqcPrivateKeyBytes) continue;
+                  if (!ml_kem1024) {
+                      const mod = await import('@noble/post-quantum/ml-kem');
+                      ml_kem1024 = mod.ml_kem1024;
+                  }
+                  if (parts.length < 4) continue;
+                  if (lines.length < 10) continue;
+                  const senderPub = parts[1] || '';
+                  const iv = parts[2] || '';
+                  const expireAt = parts[3] || '';
+                  const pqcCiphertextB64 = (lines[4] || '').trim();
+                  const ivSharedB64 = (lines[5] || '').trim();
+                  const ivContentB64 = (lines[6] || '').trim();
+                  const encAESKeyB64 = (lines[7] || '').trim();
+                  const encContentB64 = (lines[8] || '').trim();
+                  const senderPqcPub = (lines[9] || '').trim();
+                  if (!pqcCiphertextB64 || !encAESKeyB64 || !encContentB64) continue;
                     try {
-                        // 1) 解封主密文，获取共享密钥
+                        // 1) 解封 PQC 主密文
                         const ct = Uint8Array.from(atob(pqcCiphertextB64), c => c.charCodeAt(0));
                         const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+                        // ★ 层1密钥 = SHA-256(shared)，与 chat.html / index.html v3 一致
                         const sharedKey = await crypto.subtle.digest('SHA-256', shared);
                         const aesKeyShared = new Uint8Array(sharedKey);
 
@@ -1014,7 +1191,13 @@ async function exportPlainData() {
                             await crypto.subtle.importKey('raw', aesKeyShared, { name: 'AES-CBC' }, false, ['decrypt']),
                             encAESKeyBytes
                         );
-                        const rawAES = new TextDecoder().decode(new Uint8Array(decKey));
+                        // 移除 PKCS7 填充
+                        let decKeyArr = new Uint8Array(decKey);
+                        const padLenK = decKeyArr[decKeyArr.length - 1];
+                        if (padLenK > 0 && padLenK <= 16) {
+                            decKeyArr = decKeyArr.slice(0, decKeyArr.length - padLenK);
+                        }
+                        const rawAES = new TextDecoder().decode(decKeyArr);
                         const userAESKeyDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rawAES));
 
                         // 3) 用用户 AES 密钥解密内容
@@ -1025,7 +1208,13 @@ async function exportPlainData() {
                             await crypto.subtle.importKey('raw', new Uint8Array(userAESKeyDigest), { name: 'AES-CBC' }, false, ['decrypt']),
                             encContentBytes
                         );
-                        const plain = new TextDecoder().decode(decContent);
+                        // 移除 PKCS7 填充
+                        let decContentArr2 = new Uint8Array(decContent);
+                        const padLenC2 = decContentArr2[decContentArr2.length - 1];
+                        if (padLenC2 > 0 && padLenC2 <= 16) {
+                            decContentArr2 = decContentArr2.slice(0, decContentArr2.length - padLenC2);
+                        }
+                        const plain = new TextDecoder().decode(decContentArr2);
 
                         // 分离昵称和内容
                         let nick = '匿名', contentText = plain;
@@ -1051,7 +1240,13 @@ async function exportPlainData() {
                                     await crypto.subtle.importKey('raw', aesKeyIp, { name: 'AES-CBC' }, false, ['decrypt']),
                                     encIpBytes
                                 );
-                                const ipPlain = new TextDecoder().decode(decIp);
+                                // 移除 PKCS7 填充
+                                let decIpArr2 = new Uint8Array(decIp);
+                                const padLenIp2 = decIpArr2[decIpArr2.length - 1];
+                                if (padLenIp2 > 0 && padLenIp2 <= 16) {
+                                    decIpArr2 = decIpArr2.slice(0, decIpArr2.length - padLenIp2);
+                                }
+                                const ipPlain = new TextDecoder().decode(decIpArr2);
                                 const ipParts = ipPlain.split(' | ');
                                 if (ipParts.length >= 2) {
                                     ip = ipParts[0];
@@ -1059,16 +1254,20 @@ async function exportPlainData() {
                                 } else {
                                     ip = ipPlain;
                                 }
-                            } catch(e) { console.warn('v3 IP解密失败', e); }
+                            } catch(e) { addExportError('v3 留言 IP 解密失败: ' + e.message); }
                         }
 
+                        const msgSeq = parseInt(path.match(/留言_(\d+)\.txt$/)[1], 10);
+                        seqRawAESMap[msgSeq] = rawAES;
+
                         result.messages.push({
+                            seq: parseInt(path.match(/留言_(\d+)\.txt$/)[1], 10),
                             version: 'v3',
                             nick, content: contentText, ip, time,
                             rawAES: rawAES
                         });
                     } catch(e) {
-                        console.warn('v3 留言解密失败', e);
+                        addExportError('v3 留言解密失败: ' + e.message);
                     }
                 } else if (first.startsWith('v2|')) {
                     // ========== RSA v2 解密（原有逻辑，增加 rawAES 和 version 导出）==========
@@ -1118,10 +1317,13 @@ async function exportPlainData() {
                     } catch(e) {}
                     // 跳过解密失败的消息，否则导入时 rawAES 为空会导致垃圾数据
                     if (!rawAES) {
-                        console.warn('v2 留言解密失败，跳过导出:', path);
+                        addExportError('v2 留言解密失败，跳过: ' + path);
                         continue;
                     }
+                    const msgSeq2 = parseInt(path.match(/留言_(\d+)\.txt$/)[1], 10);
+                    seqRawAESMap[msgSeq2] = rawAES;
                     result.messages.push({
+                        seq: parseInt(path.match(/留言_(\d+)\.txt$/)[1], 10),
                         version: 'v2',
                         nick, content: contentText, ip, time,
                         rawAES: rawAES
@@ -1129,6 +1331,46 @@ async function exportPlainData() {
                 }
                 }
        }
+
+        // ---- 回复（留言的回复） ----
+        for (const [path, file] of Object.entries(zip.files)) {
+            if (file.dir) continue;
+            const replyMatch = path.match(/^回复\/回复_(\d+)_(\d+)\.txt$/);
+            if (!replyMatch) continue;
+            const replySeq = parseInt(replyMatch[1], 10);
+            const replyNum = parseInt(replyMatch[2], 10);
+            const rawAES = seqRawAESMap[replySeq];
+            if (!rawAES) {
+                addExportError('回复缺少 rawAES，跳过: ' + path);
+                continue;
+            }
+            try {
+                const content = await file.async('string');
+                const lines = content.split('\n').filter(l => l.trim());
+                if (lines.length < 2) continue;
+                const ivB64 = lines[0].trim();
+                const aesMsg = lines[1].trim();
+                const key32 = deriveKey(rawAES);
+                const iv = CryptoJS.enc.Base64.parse(ivB64);
+                const plain = CryptoJS.AES.decrypt(aesMsg, key32, {
+                    iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+                }).toString(CryptoJS.enc.Utf8);
+                if (plain) {
+                    const targetMsg = result.messages.find(m => m.seq === replySeq);
+                    if (targetMsg) {
+                        if (!targetMsg.replies) targetMsg.replies = [];
+                        targetMsg.replies.push({
+                            num: replyNum,
+                            iv: ivB64,
+                            aes_msg: aesMsg,
+                            plain: plain
+                        });
+                    }
+                }
+            } catch(e) {
+                addExportError('回复解密失败: ' + path + ' - ' + e.message);
+            }
+        }
 
         // ---- 投票（支持 v2 和 v3） ----
         // 1. 收集所有投票目录中的文件
@@ -1152,7 +1394,7 @@ async function exportPlainData() {
                     const raw = await files['config.json'].async('string');
                     config = JSON.parse(raw);
                 } catch (e) {
-                    console.warn(`投票 ${pollId} 配置解析失败`, e);
+                    addExportError('投票配置解析失败: ' + pollId);
                 }
             }
 
@@ -1216,10 +1458,27 @@ async function exportPlainData() {
                             }
                         }
                     } catch (e) {
-                        console.warn(`投票 ${pollId} 序号 ${seq} v2 解密失败`, e);
+                        addExportError('v2 投票解密失败: ' + pollId + ' #' + seq + ' - ' + e.message);
                     }
                     // 跳过解密失败的数据（rawAES 为空则无法重新加密）
                     if (!rawAES) continue;
+
+                    // 解密备注 (line 5: remark_iv|remark_aes_msg)
+                    let remark = '';
+                    const remarkLine = (lines[5] || '').trim();
+                    if (remarkLine && remarkLine !== '|' && rawAES) {
+                        const rParts = remarkLine.split('|');
+                        if (rParts.length >= 2 && rParts[0] && rParts[1]) {
+                            try {
+                                const rKey32 = deriveKey(rawAES);
+                                const rIv = CryptoJS.enc.Base64.parse(rParts[0].replace(/\s+/g, ''));
+                                const rDec = CryptoJS.AES.decrypt(rParts[1].replace(/\s+/g, ''), rKey32, {
+                                    iv: rIv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+                                }).toString(CryptoJS.enc.Utf8);
+                                if (rDec) remark = rDec;
+                            } catch(e) {}
+                        }
+                    }
 
                     votes.push({
                         seq,
@@ -1229,94 +1488,147 @@ async function exportPlainData() {
                         iv: iv,
                         ip: ip,
                         time: time,
-                        version: 'v2'
+                        version: 'v2',
+                        remark: remark
                     });
                 }
                 // ---------- v3 格式（PQC 加密） ----------
                 else if (first.startsWith('v3|')) {
-                    // 服务端 v3 投票文件格式（11行）：
-                    // 0: v3|rsa_key|iv|server_time
-                    // 1: aes_msg     2: server_enc   3: edit_token
-                    // 4: key_hash    5: remark_line
-                    // 6: pqc_ct      7: iv_sh        8: iv_ct
-                    // 9: enc_key    10: enc_ct
-                    if (lines.length < 11) continue;
-                    const v3parts = first.split('|');
+                    // ★ 不用 filter，保留空行，但去掉末尾空行
+                    const rawLines = content.split('\n');
+                    while (rawLines.length > 0 && rawLines[rawLines.length - 1].trim() === '') {
+                        rawLines.pop();
+                    }
+                    const _l = (i) => (i < rawLines.length ? rawLines[i] : '').trim();
+                    if (rawLines.length < 6) continue;
+                    const v3parts = _l(0).split('|');
                     const rsaKeyEnc = v3parts[1] || '';
                     const aesIvB64 = v3parts[2] || '';
                     const serverTimeHdr = v3parts[3] || '';
-                    const serverEnc = (lines[2] || '').trim();
-                    const pqcCiphertextB64 = (lines[6] || '').trim();
-                    const ivSharedB64 = (lines[7] || '').trim();
-                    const ivContentB64 = (lines[8] || '').trim();
-                    const encAESKeyB64 = (lines[9] || '').trim();
-                    const encContentB64 = (lines[10] || '').trim();
-                    if (!encAESKeyB64 || !encContentB64) continue;
+                    const serverEnc = _l(2);
+                    const pqcCiphertextB64 = rawLines.length >= 7 ? _l(6) : '';
+                    const ivSharedB64 = rawLines.length >= 8 ? _l(7) : '';
+                    const ivContentB64 = rawLines.length >= 9 ? _l(8) : '';
+                    const encAESKeyB64 = rawLines.length >= 10 ? _l(9) : '';
+                    const encContentB64 = rawLines.length >= 11 ? _l(10) : '';
 
-                    try {
-                        // 1) 解封 PQC 主密文，得到共享密钥
-                        const ct = Uint8Array.from(atob(pqcCiphertextB64), c => c.charCodeAt(0));
-                        const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
-                        const sharedKey = await crypto.subtle.digest('SHA-256', shared);
-                        const aesKeyShared = new Uint8Array(sharedKey);
+                    let decrypted = false;
 
-                        // 2) 用共享密钥解密第二层 AES 密钥（layer2Key 的 base64）
-                        const ivShared = Uint8Array.from(atob(ivSharedB64), c => c.charCodeAt(0));
-                        const encAESKeyBytes = Uint8Array.from(atob(encAESKeyB64), c => c.charCodeAt(0));
-                        const decKey = await crypto.subtle.decrypt(
-                            { name: 'AES-CBC', iv: ivShared },
-                            await crypto.subtle.importKey('raw', aesKeyShared, { name: 'AES-CBC' }, false, ['decrypt']),
-                            encAESKeyBytes
-                        );
-                        const layer2KeyB64 = new TextDecoder().decode(new Uint8Array(decKey));
+                    // ---- 路径 A：RSA 回退优先（更可靠）----
+                    if (!decrypted && rsaKeyEnc && jse && jse.getPrivateKey()) {
+                        try {
+                            const rawAES = jse.decrypt(rsaKeyEnc);
+                            if (rawAES) {
+                                const key32 = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(rawAES).toString());
+                                const plain = CryptoJS.AES.decrypt(_l(1), key32, {
+                                    iv: CryptoJS.enc.Base64.parse(aesIvB64),
+                                    mode: CryptoJS.mode.CBC,
+                                    padding: CryptoJS.pad.Pkcs7
+                                }).toString(CryptoJS.enc.Utf8);
+                                if (plain) {
+                                    let contentText = plain;
+                                    const sepIdx = plain.indexOf(' | ');
+                                    if (sepIdx !== -1) { contentText = plain.substring(sepIdx + 3).trim(); }
 
-                        // 3) 用 layer2Key 解密内容 JSON {key, vote, remark}
-                        const ivContent = Uint8Array.from(atob(ivContentB64), c => c.charCodeAt(0));
-                        const encContentBytes = Uint8Array.from(atob(encContentB64), c => c.charCodeAt(0));
-                        const decContent = await crypto.subtle.decrypt(
-                            { name: 'AES-CBC', iv: ivContent },
-                            await crypto.subtle.importKey('raw', base64ToBytes(layer2KeyB64), { name: 'AES-CBC' }, false, ['decrypt']),
-                            encContentBytes
-                        );
-                        const plain = new TextDecoder().decode(decContent);
-                        let payload = {};
-                        try { payload = JSON.parse(plain); } catch(e) {}
-                        const rawAES = payload.key || '';
-                        const voteContent = payload.vote || plain;
-                        const remark = payload.remark || '';
+                                    let ip = '127.0.0.1', time = serverTimeHdr;
+                                    if (serverEnc) {
+                                        try {
+                                            const raw = serverEnc.startsWith('RSA:') ? serverEnc.slice(4) : serverEnc;
+                                            const dec = jse.decrypt(raw);
+                                            if (dec) {
+                                                const parts2 = dec.split(' | ');
+                                                if (parts2.length >= 2) { ip = parts2[0]; time = parts2[1]; }
+                                            }
+                                        } catch(e) {}
+                                    }
 
-                        let contentText = voteContent;
-                        const sepIdx = voteContent.indexOf(' | ');
-                        if (sepIdx !== -1) {
-                            contentText = voteContent.substring(sepIdx + 3).trim();
-                        }
+                                    let remark = '';
+                                    const remarkLine = _l(5);
+                                    if (remarkLine && remarkLine !== '|' && rawAES) {
+                                        const rParts = remarkLine.split('|');
+                                        if (rParts.length >= 2 && rParts[0] && rParts[1]) {
+                                            try {
+                                                const rKey32 = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(rawAES).toString());
+                                                const rDec = CryptoJS.AES.decrypt(rParts[1].replace(/\s+/g, ''), rKey32, {
+                                                    iv: CryptoJS.enc.Base64.parse(rParts[0].replace(/\s+/g, '')),
+                                                    mode: CryptoJS.mode.CBC,
+                                                    padding: CryptoJS.pad.Pkcs7
+                                                }).toString(CryptoJS.enc.Utf8);
+                                                if (rDec) remark = rDec;
+                                            } catch(e) {}
+                                        }
+                                    }
 
-                        // 4) 解密 IP 和时间（server_enc 是 RSA 加密的 IP|时间）
-                        let ip = '127.0.0.1', time = serverTimeHdr;
-                        if (serverEnc && jse && jse.getPrivateKey()) {
-                            try {
-                                const raw = serverEnc.startsWith('RSA:') ? serverEnc.slice(4) : serverEnc;
-                                const dec = jse.decrypt(raw);
-                                if (dec) {
-                                    const parts2 = dec.split(' | ');
-                                    if (parts2.length >= 2) { ip = parts2[0]; time = parts2[1]; }
+                                    votes.push({
+                                        seq, content: contentText, rawAES, key_hash: _l(4),
+                                        iv: aesIvB64, ip, time, version: 'v3', remark
+                                    });
+                                    decrypted = true;
                                 }
-                            } catch(e) {}
+                            }
+                        } catch(rsaErr) {
+                            // RSA 失败，继续尝试 PQC
                         }
+                    }
 
-                        votes.push({
-                            seq,
-                            content: contentText,
-                            rawAES: rawAES,
-                            key_hash: (lines[4] || '').trim(),
-                            iv: aesIvB64,
-                            ip: ip,
-                            time: time,
-                            version: 'v3',
-                            remark: remark
-                        });
-                    } catch (e) {
-                        console.warn(`v3 投票序号 ${seq} 解密失败`, e);
+                    // ---- 路径 B：PQC 双层解密 ----
+                    if (!decrypted && pqcPrivateKeyBytes && ml_kem1024 && encAESKeyB64 && encContentB64) {
+                        try {
+                            const ct = Uint8Array.from(atob(pqcCiphertextB64), c => c.charCodeAt(0));
+                            const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+                            const sharedWa = CryptoJS.lib.WordArray.create(shared);
+                            const layer1Key = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(sharedWa).toString().substring(0, 64));
+
+                            const layer2KeyB64 = CryptoJS.AES.decrypt(encAESKeyB64, layer1Key, {
+                                iv: CryptoJS.enc.Base64.parse(ivSharedB64),
+                                mode: CryptoJS.mode.CBC,
+                                padding: CryptoJS.pad.Pkcs7
+                            }).toString(CryptoJS.enc.Utf8);
+                            const layer2Key = CryptoJS.enc.Base64.parse(layer2KeyB64);
+
+                            const plain = CryptoJS.AES.decrypt(encContentB64, layer2Key, {
+                                iv: CryptoJS.enc.Base64.parse(ivContentB64),
+                                mode: CryptoJS.mode.CBC,
+                                padding: CryptoJS.pad.Pkcs7
+                            }).toString(CryptoJS.enc.Utf8);
+
+                            let payload = {};
+                            try { payload = JSON.parse(plain); } catch(e) {}
+                            const rawAES = payload.key || '';
+                            const voteContent = payload.vote || plain;
+                            const remark = payload.remark || '';
+
+                            let contentText = voteContent;
+                            const sepIdx = voteContent.indexOf(' | ');
+                            if (sepIdx !== -1) { contentText = voteContent.substring(sepIdx + 3).trim(); }
+
+                            let ip = '127.0.0.1', time = serverTimeHdr;
+                            if (serverEnc && jse && jse.getPrivateKey()) {
+                                try {
+                                    const raw = serverEnc.startsWith('RSA:') ? serverEnc.slice(4) : serverEnc;
+                                    const dec = jse.decrypt(raw);
+                                    if (dec) {
+                                        const parts2 = dec.split(' | ');
+                                        if (parts2.length >= 2) { ip = parts2[0]; time = parts2[1]; }
+                                    }
+                                } catch(e) {}
+                            }
+
+                            votes.push({
+                                seq, content: contentText, rawAES, key_hash: _l(4),
+                                iv: aesIvB64, ip, time, version: 'v3', remark
+                            });
+                            decrypted = true;
+                        } catch(pqcErr) {
+                            // PQC 也失败，记录
+                        }
+                    }
+
+                    if (!decrypted) {
+                        const hasPqcData = !!(encAESKeyB64 && encContentB64);
+                        const hasRsa = !!(rsaKeyEnc && jse && jse.getPrivateKey());
+                        addExportError('v3投票解密失败: ' + pollId + ' #' + seq
+                            + ' (RSA' + (hasRsa ? '已尝试' : '不可用') + ', PQC' + (hasPqcData ? '已尝试' : '无数据') + ')');
                     }
                 }
             }
@@ -1343,10 +1655,16 @@ async function exportPlainData() {
         if (chatRaw) {
             try {
                 const chat = JSON.parse(chatRaw);
-                result.chat_qun = chat.map(m => {
+                const chatResult = [];
+                for (const m of chat) {
                     let ip = '127.0.0.1';
                     const rawIp = m.ip || '';
-                    if (rawIp && rawIp.startsWith('RSA:')) {
+                    if (rawIp && rawIp.startsWith('PQC:')) {
+                        try {
+                            const dec = await tryDecrypt(rawIp);
+                            if (dec) ip = dec;
+                        } catch (e) {}
+                    } else if (rawIp && rawIp.startsWith('RSA:')) {
                         try {
                             const dec = jse.decrypt(rawIp.slice(4));
                             if (dec) ip = dec;
@@ -1356,15 +1674,16 @@ async function exportPlainData() {
                     } else if (rawIp) {
                         ip = rawIp;
                     }
-                    return {
+                    chatResult.push({
                         nick: m.nick,
                         time: m.time,
                         content: m.content,
                         state: m.state || 'enabled',
                         pinned: m.pinned || false,
                         ip: ip
-                    };
-                });
+                    });
+                }
+                result.chat_qun = chatResult;
             } catch (e) {}
         }
 
@@ -1404,70 +1723,41 @@ async function exportPlainData() {
                     aes_content: aesContent,
                     ip: ip,
                     time: serverTime,
-                    version: 'v2'
+                    version: 'v2',
+                    signature: (lines.length >= 5 ? lines[4].trim() : '')
                 });
             }
             // ---------- v3 PQC 加密 ----------
             else if (first.startsWith('v3|')) {
                 const parts = first.split('|');
-                // v3|sender_pub|iv|expire_at|pqc_ciphertext|iv_shared|iv_content|encAESKey|encContent|sender_pqc_pub
-                if (parts.length < 10) continue;
+                if (parts.length < 4) continue;
                 const senderPub = parts[1] || '';
                 const iv = parts[2] || '';
                 const expireAt = parts[3] || '';
-                const pqcCiphertextB64 = parts[4] || '';
-                const ivSharedB64 = parts[5] || '';
-                const ivContentB64 = parts[6] || '';
-                const encAESKeyB64 = (lines[1] || '').trim();
-                const encContentB64 = (lines[2] || '').trim();
-                const senderPqcPub = (lines[9] || '').trim();
-                if (!pqcCiphertextB64 || !encAESKeyB64 || !encContentB64) continue;
 
-                try {
-                    // 1) 解封 PQC 主密文
-                    const ct = Uint8Array.from(atob(pqcCiphertextB64), c => c.charCodeAt(0));
-                    const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
-                    const sharedKey = await crypto.subtle.digest('SHA-256', shared);
-                    const aesKeyShared = new Uint8Array(sharedKey);
+                // ★ 不解密端到端内容，只提取 IP（用 PQC 解密）和时间（直接提取），其他保持加密不变
+                // 服务端文件格式（lines 已 filter 空行）：
+                // [0]=v3|...  [1]=PQC_V3  [2]=aes_content  [3]=PQC_IP:...|time
+                // [4]=RSA加密的管理员密钥  [5]=iv_shared  [6]=iv_content
+                // [7]=encAESKey  [8]=encContent  [9]=pqc_ciphertext(1568字节)
 
-                    // 2) 用共享密钥解密用户 AES 密钥
-                    const ivShared = Uint8Array.from(atob(ivSharedB64), c => c.charCodeAt(0));
-                    const encAESKeyBytes = Uint8Array.from(atob(encAESKeyB64), c => c.charCodeAt(0));
-                    const decKey = await crypto.subtle.decrypt(
-                        { name: 'AES-CBC', iv: ivShared },
-                        await crypto.subtle.importKey('raw', aesKeyShared, { name: 'AES-CBC' }, false, ['decrypt']),
-                        encAESKeyBytes
-                    );
-                    const rawAES = new TextDecoder().decode(new Uint8Array(decKey));
+                if (lines.length < 4) continue;
+                const aesContent = (lines[2] || '').trim();
 
-                    // 3) 用 rawAES 解密消息内容（昵称|时间|内容|nonce）
-                    const userAESKeyDigest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rawAES));
-                    const ivContent = Uint8Array.from(atob(ivContentB64), c => c.charCodeAt(0));
-                    const encContentBytes = Uint8Array.from(atob(encContentB64), c => c.charCodeAt(0));
-                    const decContent = await crypto.subtle.decrypt(
-                        { name: 'AES-CBC', iv: ivContent },
-                        await crypto.subtle.importKey('raw', new Uint8Array(userAESKeyDigest), { name: 'AES-CBC' }, false, ['decrypt']),
-                        encContentBytes
-                    );
-                    const plain = new TextDecoder().decode(decContent);
-                    // 格式: 昵称|时间|内容|nonce
-                    const parts2 = plain.split('|');
-                    let nick = '匿名', time = '', msgContent = '', nonce = '';
-                    if (parts2.length >= 3) {
-                        nick = parts2[0].trim();
-                        time = parts2[1].trim();
-                        msgContent = parts2.slice(2, parts2.length - 1).join('|').trim();
-                        nonce = parts2[parts2.length - 1];
-                    }
+                // 提取 IP 和时间
+                let ip = '127.0.0.1', serverTime = '';
+                const adminLine = lines[3] || '';
+                const adminParts = adminLine.split('|', 2);
+                const adminIpEnc = (adminParts[0] || '').trim();
+                serverTime = (adminParts[1] || '').trim();
 
-                    // 4) 解密 IP 和时间（第4行：admin_ip | server_time）
-                    let ip = '127.0.0.1', serverTime = '';
-                    const adminLine = lines[3] || '';
-                    const adminParts = adminLine.split('|', 2);
-                    const adminIpEnc = adminParts[0] || '';
-                    serverTime = adminParts[1] || '';
-                    // 如果 adminIpEnc 是 PQC_IP: 格式，则需要用 PQC 解密
-                    if (adminIpEnc.startsWith('PQC_IP:')) {
+                // 解密 PQC_IP
+                if (adminIpEnc.startsWith('PQC_IP:')) {
+                    if (pqcPrivateKeyBytes) {
+                        if (!ml_kem1024) {
+                            const mod = await import('@noble/post-quantum/ml-kem');
+                            ml_kem1024 = mod.ml_kem1024;
+                        }
                         try {
                             const ipData = JSON.parse(atob(adminIpEnc.slice(7)));
                             const ctIp = Uint8Array.from(atob(ipData.ct), c => c.charCodeAt(0));
@@ -1481,38 +1771,86 @@ async function exportPlainData() {
                                 await crypto.subtle.importKey('raw', aesKeyIp, { name: 'AES-CBC' }, false, ['decrypt']),
                                 encIpBytes
                             );
-                            const ipPlain = new TextDecoder().decode(decIp);
+                            let decIpArr = new Uint8Array(decIp);
+                            const padLenIp = decIpArr[decIpArr.length - 1];
+                            if (padLenIp > 0 && padLenIp <= 16) {
+                                decIpArr = decIpArr.slice(0, decIpArr.length - padLenIp);
+                            }
+                            const ipPlain = new TextDecoder().decode(decIpArr);
                             const parts3 = ipPlain.split(' | ');
                             if (parts3.length >= 2) { ip = parts3[0]; serverTime = parts3[1]; }
-                        } catch(e) { /* 忽略 */ }
-                    } else if (adminIpEnc.startsWith('RSA:')) {
-                        try {
-                            const dec = jse.decrypt(adminIpEnc.slice(4));
-                            if (dec) {
-                                const parts3 = dec.split(' | ');
-                                if (parts3.length >= 2) { ip = parts3[0]; serverTime = parts3[1]; }
-                            }
-                        } catch(e) { /* 忽略 */ }
+                            else { ip = ipPlain; }
+                        } catch(e) {
+                            addExportError('v3 私聊 PQC_IP 解密失败: ' + filename);
+                        }
                     }
-
-                    result.chat_private.push({
-                        filename,
-                        sender_pub: senderPub,
-                        iv: iv,
-                        expire_at: expireAt,
-                        wrapped_key: 'PQC_V3',        // 标记
-                        aes_content: encContentB64,    // 保留密文
-                        ip: ip,
-                        time: serverTime,
-                        version: 'v3',
-                        nick: nick,
-                        content: msgContent,
-                        rawAES: rawAES,
-                        sender_pqc_pub: senderPqcPub
-                    });
-                } catch(e) {
-                    console.warn(`v3 私聊解密失败: ${filename}`, e);
+                } else if (adminIpEnc.startsWith('RSA:')) {
+                    try {
+                        const dec = jse.decrypt(adminIpEnc.slice(4));
+                        if (dec) {
+                            const parts3 = dec.split(' | ');
+                            if (parts3.length >= 2) { ip = parts3[0]; serverTime = parts3[1]; }
+                        }
+                    } catch(e) {}
                 }
+
+                // 服务端文件行: [4]=pqc_ciphertext [5]=iv_shared [6]=iv_content [7]=encAESKey [8]=encContent [9]=sender_pqc_pub
+                const pqcCiphertextB64 = (lines.length > 4 ? lines[4] : '').trim();
+                const ivShared   = (lines.length > 5 ? lines[5] : '').trim();
+                const ivContent  = (lines.length > 6 ? lines[6] : '').trim();
+                const encAESKey  = (lines.length > 7 ? lines[7] : '').trim();
+                const encContent = (lines.length > 8 ? lines[8] : '').trim();
+                const senderPqcPub = (lines.length > 9 ? lines[9] : '').trim();
+
+                result.chat_private.push({
+                    filename,
+                    sender_pub: senderPub,
+                    iv,
+                    expire_at: expireAt,
+                    wrapped_key: 'PQC_V3',
+                    aes_content: aesContent,
+                    ip: ip,
+                    time: serverTime,
+                    version: 'v3',
+                    pqc_ciphertext: pqcCiphertextB64,
+                    iv_shared: ivShared,
+                    iv_content: ivContent,
+                    encAESKey: encAESKey,
+                    encContent: encContent,
+                    sender_pqc_pub: senderPqcPub,
+                    signature: (lines.length >= 11 ? lines[10].trim() : '')
+                });
+            }
+        }
+
+        // ---- 群聊举报 ----
+        for (const [path, file] of Object.entries(zip.files)) {
+            if (file.dir) continue;
+            const reportMatch = path.match(/^chat_reports\/report_(\d+)_(\d+)\.json$/);
+            if (!reportMatch) continue;
+            try {
+                const raw = await file.async('string');
+                const report = JSON.parse(raw);
+                // 解密举报者 IP
+                let reporterIp = report.reporter_ip || '127.0.0.1';
+                if (reporterIp.startsWith('RSA:')) {
+                    try {
+                        const dec = jse.decrypt(reporterIp.slice(4));
+                        if (dec) reporterIp = dec;
+                    } catch(e) {}
+                } else if (reporterIp.startsWith('PQC:')) {
+                    const dec = await tryDecrypt(reporterIp);
+                    if (dec) reporterIp = dec;
+                }
+                result.chat_reports.push({
+                    chat_index: report.chat_index,
+                    reporter_ip: reporterIp,
+                    reason: report.reason || '',
+                    time: report.time || '',
+                    report_index: parseInt(reportMatch[2], 10)
+                });
+            } catch(e) {
+                addExportError('举报文件解析失败: ' + path);
             }
         }
 
@@ -1530,7 +1868,7 @@ async function exportPlainData() {
                 const encIp = parts[1].trim();
                 const count = parseInt(parts[2].trim(), 10) || 0;
                 // ★ 使用已有的 decryptIP 函数，无论成功还是失败都返回可读字符串
-                const ip = decryptIP(encIp);
+                const ip = await decryptIP(encIp);
                 result.ip_records.push({ date, ip, count });
             }
         }
@@ -1542,9 +1880,14 @@ async function exportPlainData() {
                 const logs = JSON.parse(captchaLogRaw);
                 for (const entry of logs) {
                     const encData = entry.data;
-                    if (encData && encData.startsWith('RSA:')) {
+                    if (encData) {
                         try {
-                            const dec = jse.decrypt(encData.slice(4));
+                            let dec = null;
+                            if (encData.startsWith('PQC:')) {
+                                dec = await tryDecrypt(encData);
+                            } else if (encData.startsWith('RSA:')) {
+                                dec = jse.decrypt(encData.slice(4));
+                            }
                             if (dec) {
                                 const parts = dec.split('|');
                                 if (parts.length >= 3) {
@@ -1562,6 +1905,14 @@ async function exportPlainData() {
         }
 
         // ---- 导出 JSON ----
+        if (exportErrors.length > 0) {
+            statusDiv.textContent += '\n⚠️ 解密失败 ' + exportErrors.length + ' 项，详见控制台';
+            console.error('导出解密失败汇总:', exportErrors);
+        }
+        // ★ 如果指定了分类，则过滤数据
+        if (categories) {
+          result = filterExportDataByCategories(result, categories);
+        }
         statusDiv.textContent = `✅ 导出完成：留言 ${result.messages.length} 条，投票 ${Object.keys(result.votes).length} 个，公告 ${result.notices.length} 条，群聊 ${result.chat_qun.length} 条，私聊 ${result.chat_private.length} 条，IP记录 ${result.ip_records.length} 条，验证日志 ${result.captcha_logs.length} 条，黑名单 ${result.blacklist.length} 条，白名单 ${result.whitelist.length} 条，正在下载...`;
         const jsonStr = JSON.stringify(result, null, 2);
         const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -1581,35 +1932,53 @@ async function exportPlainData() {
 }
 
 // ===== 导入明文数据（构造 ZIP 并全量覆盖，使用当前公钥重新加密，包含黑白名单、人机验证配置） =====
-async function importPlainData(input) {
-    if (!input.files || input.files.length === 0) return;
-    const file = input.files[0];
-    if (!file.name.endsWith('.json')) {
-        alert('请上传 .json 文件');
-        input.value = '';
-        return;
-    }
-    const confirmMsg = `⚠️ 即将导入文件：${file.name}\n此操作将覆盖当前所有明文数据，不可撤销！\n请输入 "确认导入来自于 ${file.name} 的明文数据并覆盖" 以继续：`;
-    const confirmText = prompt(confirmMsg);
-    if (confirmText !== `确认导入来自于 ${file.name} 的明文数据并覆盖`) {
-        alert('操作已取消');
-        input.value = '';
-        return;
-    }
-
-    const statusDiv = document.getElementById('plain-status');
-    statusDiv.style.display = 'block';
-    statusDiv.textContent = '⏳ 读取文件...';
-    try {
-        const text = await file.text();
-        const data = JSON.parse(text);
+// ===== 共享：将明文 JSON 构造为 ZIP（importPlainData 与 importPlainDataMerge 共用） =====
+async function buildZipFromPlainData(data, statusDiv) {
+    const importErrors = [];
+    const addImportError = (msg) => { importErrors.push(msg); if (statusDiv) statusDiv.textContent = '⚠️ ' + msg; };
 
         // ---- 获取公钥用于加密 ----
         const pubRes = await fetch('/gongyao.txt');
+        // ---- 获取当前盐值和 IP 加密方式 ----
+        let currentSalt = '';
+        let currentEncMode = 'rsa';
+        try {
+            const saltRes = await authFetch('/api/admin/ip-salt');
+            const saltData = await saltRes.json();
+            currentSalt = saltData.salt || '';
+        } catch(e) { console.warn('获取盐值失败', e); }
+        try {
+            const modeRes = await authFetch('/api/admin/ip-encryption-mode');
+            const modeData = await modeRes.json();
+            currentEncMode = modeData.mode || 'rsa';
+        } catch(e) { console.warn('获取加密方式失败', e); }
         if (!pubRes.ok) throw new Error('无法获取公钥');
         const pubKey = await pubRes.text();
         const encryptor = new JSEncrypt();
+        // 带盐哈希
+        const hashIP = (ip) => {
+            return CryptoJS.SHA512(ip + currentSalt).toString(CryptoJS.enc.Hex);
+        };
         encryptor.setPublicKey(pubKey);
+
+        // ★ 检测是否有 v3 数据，提前加载 PQC 公钥（覆盖留言、投票、私聊）
+        let pqcPubBytes = null;
+        let ml_kem1024_import = null;
+        const hasAnyV3 = (Array.isArray(data.messages) && data.messages.some(m => m.version === 'v3'))
+            || (data.votes && typeof data.votes === 'object' && Object.values(data.votes).some(p =>
+                p.votes && Array.isArray(p.votes) && p.votes.some(v => v.version === 'v3')))
+            || (Array.isArray(data.chat_private) && data.chat_private.some(m => m.version === 'v3'));
+        if (hasAnyV3) {
+            try {
+                const pqcPubRes = await fetch('/gongyaoPQC.txt');
+                if (pqcPubRes.ok) {
+                    const pubB64 = await pqcPubRes.text();
+                    pqcPubBytes = Uint8Array.from(atob(pubB64.trim()), c => c.charCodeAt(0));
+                    const mod = await import('@noble/post-quantum/ml-kem');
+                    ml_kem1024_import = mod.ml_kem1024;
+                }
+            } catch(e) { console.warn('加载PQC公钥失败，v3数据将回退到v2', e); }
+        }
 
         // 辅助加密函数
         const encryptRSA = (plain) => {
@@ -1622,7 +1991,39 @@ async function importPlainData(input) {
                 return '';
             }
         };
-
+        // IP 存储加密（根据当前模式选择 RSA 或 PQC）
+        const encryptIPStorage = async (plain) => {
+            if (currentEncMode === 'pqc' && pqcPubBytes && ml_kem1024_import) {
+                try {
+                    const { cipherText: ct, sharedSecret } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                    const key = await crypto.subtle.digest('SHA-256', sharedSecret);
+                    const aesKey = new Uint8Array(key);
+                    const iv = crypto.getRandomValues(new Uint8Array(16));
+                    const cryptoKey = await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['encrypt']);
+                    const plainBytes = new TextEncoder().encode(plain);
+                    const padLen = 16 - (plainBytes.length % 16);
+                    const padded = new Uint8Array(plainBytes.length + padLen);
+                    padded.set(plainBytes);
+                    padded.fill(padLen, plainBytes.length);
+                    const enc = await crypto.subtle.encrypt(
+                        { name: 'AES-CBC', iv: iv },
+                        cryptoKey,
+                        padded
+                    );
+                    const data = {
+                        ct: btoa(String.fromCharCode(...ct)),
+                        iv: btoa(String.fromCharCode(...iv)),
+                        enc: btoa(String.fromCharCode(...new Uint8Array(enc)))
+                    };
+                    return 'PQC:' + btoa(JSON.stringify(data));
+                } catch(e) {
+                    console.warn('PQC IP加密失败，回退RSA', e);
+                }
+            }
+            // RSA 回退
+            const enc = encryptRSA(plain);
+            return enc || '';
+        };
         // ---- 创建 ZIP ----
         const zip = new JSZip();
 
@@ -1645,22 +2046,21 @@ async function importPlainData(input) {
         }
 
         // ---- 黑白名单 ----
-        const writeList = (list, filename) => {
-            // 始终写入文件，即使列表为空也写入空字符串，以确保文件存在
+        const writeList = async (list, filename) => {
             if (Array.isArray(list)) {
-                const lines = list.map(item => {
+                const resultLines = [];
+                for (const item of list) {
                     const ip = item.ip || '127.0.0.1';
-                    const hash = item.hash || CryptoJS.SHA512(ip).toString(CryptoJS.enc.Hex);
-                    const encrypted = encryptRSA(ip);
-                    if (!encrypted) return null; // 加密失败跳过
-                    return `${hash} | ${encrypted}`;
-                }).filter(line => line !== null);
-                // 即使 lines 为空，也写入空字符串，创建空文件
-                addFile(filename, lines.join('\n'));
+                    const hash = item.hash || hashIP(ip);
+                    const encrypted = await encryptIPStorage(ip);
+                    if (!encrypted) continue;
+                    resultLines.push(`${hash} | ${encrypted}`);
+                }
+                addFile(filename, resultLines.join('\n'));
             }
         };
-        writeList(data.blacklist, 'black.txt');
-        writeList(data.whitelist, 'white.txt');
+        await writeList(data.blacklist, 'black.txt');
+        await writeList(data.whitelist, 'white.txt');
 
         // ---- 人机验证配置 ----
         if (data.captcha_config && typeof data.captcha_config === 'object') {
@@ -1678,32 +2078,22 @@ async function importPlainData(input) {
                 const cryptoKey = await crypto.subtle.importKey(
                         'raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']
                 );
+                // ★ PKCS7 填充
+                const plainBytes = new TextEncoder().encode(plaintext);
+                const padLen = 16 - (plainBytes.length % 16);
+                const padded = new Uint8Array(plainBytes.length + padLen);
+                padded.set(plainBytes);
+                padded.fill(padLen, plainBytes.length);
                 const enc = await crypto.subtle.encrypt(
                         { name: 'AES-CBC', iv: iv },
                         cryptoKey,
-                        new TextEncoder().encode(plaintext)
+                        padded
                 );
                 return { iv: iv, ciphertext: new Uint8Array(enc) };
         }
 
         // ---- 留言 ----
         if (Array.isArray(data.messages)) {
-            // ★ 检测是否有 v3 消息，如有则提前加载 PQC 公钥
-            let pqcPubBytes = null;
-            let ml_kem1024_import = null;
-            const hasV3 = data.messages.some(m => m.version === 'v3');
-            if (hasV3) {
-                try {
-                    const pubRes = await fetch('/gongyaoPQC.txt');
-                    if (pubRes.ok) {
-                        const pubB64 = await pubRes.text();
-                        pqcPubBytes = Uint8Array.from(atob(pubB64.trim()), c => c.charCodeAt(0));
-                        const mod = await import('@noble/post-quantum/ml-kem');
-                        ml_kem1024_import = mod.ml_kem1024;
-                    }
-                } catch(e) { console.warn('加载PQC公钥失败，v3消息将回退到v2', e); }
-            }
-
             let seq = 1;
             for (const msg of data.messages) {
                 if (!msg.nick || !msg.content) continue;
@@ -1715,15 +2105,13 @@ async function importPlainData(input) {
                     // 但共同密钥（ML-KEM 封装）重新生成
                     let rawAES = msg.rawAES;
                     if (!rawAES) {
-                        // 无原始 AES 密钥则生成新密钥
                         const aesKeyBytes = crypto.getRandomValues(new Uint8Array(32));
-                        rawAES = new TextDecoder().decode(aesKeyBytes);
+                        rawAES = btoa(String.fromCharCode(...aesKeyBytes));
                     }
-                    const userAESKeyRaw = new TextEncoder().encode(rawAES);
-                    const userAESKeyDigest = await crypto.subtle.digest('SHA-256', userAESKeyRaw);
 
-                    // ★ 重新生成共同密钥（新 ML-KEM 封装）
+                    // 生成新的 ML-KEM 封装
                     const { cipherText, sharedSecret } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                    // ★ 层1密钥 = SHA-256(sharedSecret)，与 chat.html 一致
                     const sharedKey = await crypto.subtle.digest('SHA-256', sharedSecret);
                     const aesKeyShared = new Uint8Array(sharedKey);
 
@@ -1758,20 +2146,36 @@ async function importPlainData(input) {
                     // 组装 v3 文件内容
                     const encAESKeyB64 = btoa(String.fromCharCode(...encAESKeyResult.ciphertext));
                     const encContentB64 = btoa(String.fromCharCode(...encContentResult.ciphertext));
+                    const newIvContentB64 = btoa(String.fromCharCode(...encContentResult.iv));
 
+                    const serverTime = time || new Date().toISOString().replace('T', ' ').slice(0, 19);
                     const v3Header = [
                         'v3',
                         btoa(String.fromCharCode(...cipherText)),
                         btoa(String.fromCharCode(...encAESKeyResult.iv)),
                         btoa(String.fromCharCode(...encContentResult.iv)),
-                        encAESKeyB64,
-                        encContentB64,
+                        serverTime,
                         identityHash
                     ].join('|');
 
-                    // encAESKey 和 encContent 同时在独立行，供 exportPlainData 解析
+                    // encAESKey 和 encContent 在独立行，与服务端格式一致
                     const fileContent = v3Header + '\n' + encAESKeyB64 + '\n' + encContentB64 + '\n' + JSON.stringify(ipData);
                     addFile(`留言/留言_${seq}.txt`, fileContent);
+                    // ★ 导入该留言的回复
+                    if (Array.isArray(msg.replies)) {
+                        const userKey32 = deriveKey(rawAES);
+                        let repNum = 1;
+                        for (const rep of msg.replies) {
+                            const repIv = CryptoJS.lib.WordArray.random(16);
+                            const repIvB64 = repIv.toString(CryptoJS.enc.Base64);
+                            const repPld = rep.plain || '';
+                            const repEnc = CryptoJS.AES.encrypt(repPld, userKey32, {
+                                iv: repIv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+                            }).toString();
+                            addFile(`回复/回复_${seq}_${repNum}.txt`, repIvB64 + '\n' + repEnc);
+                            repNum++;
+                        }
+                    }
                     seq++;
                 } else {
                     // ========== RSA v2 重新加密（原有逻辑）==========
@@ -1804,6 +2208,21 @@ async function importPlainData(input) {
                         serverEnc = encryptor.encrypt(`127.0.0.1 | ${time}`) || '';
                     }
                     const fileContent = `v2|${rsaKey}|${ivBase64}|${time}\n${encrypted}\n${serverEnc}`;                    addFile(`留言/留言_${seq}.txt`, fileContent);
+                    // ★ 导入该留言的回复
+                    if (Array.isArray(msg.replies)) {
+                        const msgKey32 = deriveKey(rawAES);
+                        let repNum = 1;
+                        for (const rep of msg.replies) {
+                            const repIv = CryptoJS.lib.WordArray.random(16);
+                            const repIvB64 = repIv.toString(CryptoJS.enc.Base64);
+                            const repPld = rep.plain || '';
+                            const repEnc = CryptoJS.AES.encrypt(repPld, msgKey32, {
+                                iv: repIv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+                            }).toString();
+                            addFile(`回复/回复_${seq}_${repNum}.txt`, repIvB64 + '\n' + repEnc);
+                            repNum++;
+                        }
+                    }
                     seq++;
                 }
             }
@@ -1833,7 +2252,7 @@ async function importPlainData(input) {
                     let rawAES = vote.rawAES;
                     if (!rawAES) {
                         const aesKeyBytes = crypto.getRandomValues(new Uint8Array(32));
-                        rawAES = new TextDecoder().decode(aesKeyBytes);
+                        rawAES = btoa(String.fromCharCode(...aesKeyBytes));
                     }
 
                     // 公共字段
@@ -1880,7 +2299,7 @@ async function importPlainData(input) {
                     if (isV3) {
                         // ---------- PQC v3 重新加密 ----------
                         // 第二层随机 AES 密钥（32字节 WordArray）
-                        const layer2Key = CryptoJS.lib.WordArray.random(32);
+                        const layer2Key = CryptoJS.lib.WordArray.random(8);
                         const layer2KeyB64 = CryptoJS.enc.Base64.stringify(layer2Key);
 
                         // PQC 封装
@@ -1907,7 +2326,8 @@ async function importPlainData(input) {
                         const ivSharedB64 = CryptoJS.enc.Base64.stringify(ivShared).replace(/[\r\n\s]+/g, '');
                         const ivContentB64 = CryptoJS.enc.Base64.stringify(ivContent).replace(/[\r\n\s]+/g, '');
 
-                        // 组装 11 行 v3 文件（与 submit_vote 一致）
+                        // 组装 11 行 v3 文件（与服务端 submit_vote 一致）
+                        // 组装 v3 私聊文件（与服务端 chat_send 格式一致）
                         const fileContent = [
                             `v3|${rsaKeyEnc}|${aesIvB64}|${time}`,
                             aesMsg,
@@ -1920,17 +2340,6 @@ async function importPlainData(input) {
                             ivContentB64,
                             encAESKeyStr,
                             encContentStr
-                        ].join('\n');
-                        addFile(`${dir}/投票_${voteSeq}.txt`, fileContent);
-                    } else {
-                        // ---------- v2 RSA 重新加密 ----------
-                        const fileContent = [
-                            `v2|${rsaKeyEnc}|${aesIvB64}`,
-                            aesMsg,
-                            serverEnc,
-                            editToken,
-                            keyHash,
-                            remarkLine
                         ].join('\n');
                         addFile(`${dir}/投票_${voteSeq}.txt`, fileContent);
                     }
@@ -1951,10 +2360,11 @@ async function importPlainData(input) {
 
         // ---- 群聊 ----
         if (Array.isArray(data.chat_qun)) {
-            const chat = data.chat_qun.map(m => {
+            const chat = [];
+            for (const m of data.chat_qun) {
                 const ip = m.ip || '127.0.0.1';
-                const encryptedIp = encryptRSA(ip);
-                return {
+                const encryptedIp = await encryptIPStorage(ip);
+                chat.push({
                     nick: m.nick,
                     time: m.time || new Date().toISOString().replace('T', ' ').slice(0, 19),
                     content: m.content,
@@ -1963,9 +2373,26 @@ async function importPlainData(input) {
                     ip: encryptedIp || 'PLAIN:' + ip,
                     key_hash: '',
                     reports: []
-                };
-            });
+                });
+            }
             addFile('chat_data.json', JSON.stringify(chat, null, 2));
+        // ---- 群聊举报 ----
+        if (Array.isArray(data.chat_reports)) {
+            let reportIdx = 1;
+            for (const report of data.chat_reports) {
+                const chatIndex = report.chat_index !== undefined ? report.chat_index : reportIdx;
+                const reporterIp = report.reporter_ip || '127.0.0.1';
+                const encryptedReporterIp = await encryptIPStorage(reporterIp) || 'PLAIN:' + reporterIp;
+                const reportData = {
+                    chat_index: chatIndex,
+                    reporter_ip: encryptedReporterIp,
+                    reason: report.reason || '',
+                    time: report.time || new Date().toISOString().replace('T', ' ').slice(0, 19)
+                };
+                addFile(`chat_reports/report_${chatIndex}_${reportIdx}.json`, JSON.stringify(reportData, null, 2));
+                reportIdx++;
+            }
+        }
         }
 
         // ---- 私聊（支持 v2 和 v3） ----
@@ -1976,68 +2403,56 @@ async function importPlainData(input) {
                 const isV3 = (msg.version === 'v3' && pqcPubBytes && ml_kem1024_import);
 
                 if (isV3) {
-                    // ---------- PQC v3 重新加密 ----------
-                    let rawAES = msg.rawAES;
-                    if (!rawAES) {
-                        const aesKeyBytes = crypto.getRandomValues(new Uint8Array(32));
-                        rawAES = new TextDecoder().decode(aesKeyBytes);
-                    }
-                    const userAESKeyRaw = new TextEncoder().encode(rawAES);
-                    const userAESKeyDigest = await crypto.subtle.digest('SHA-256', userAESKeyRaw);
+                  // ★ v3 私聊：仅重加密 IP，其余所有字段原封不动
+                  const ip = msg.ip || '127.0.0.1';
+                  const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-                    // 生成新的 ML-KEM 封装
-                    const { cipherText, sharedSecret } = ml_kem1024_import.encapsulate(pqcPubBytes);
-                    const sharedKey = await crypto.subtle.digest('SHA-256', sharedSecret);
-                    const aesKeyShared = new Uint8Array(sharedKey);
+                  // 重新加密管理员 IP 数据
+                  const ipPlain = `${ip} | ${time}`;
+                  const { cipherText: ctIp, sharedSecret: sharedIp } = ml_kem1024_import.encapsulate(pqcPubBytes);
+                  const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
+                  const aesKeyIp = new Uint8Array(keyIp);
+                  const encIpResult = await encryptAES(ipPlain, aesKeyIp);
+                  const ipData = {
+                    ct: btoa(String.fromCharCode(...ctIp)),
+                    iv: btoa(String.fromCharCode(...encIpResult.iv)),
+                    enc: btoa(String.fromCharCode(...encIpResult.ciphertext))
+                  };
+                  const adminIpEnc = 'PQC_IP:' + btoa(JSON.stringify(ipData));
 
-                    // 加密 rawAES
-                    const encAESKeyResult = await encryptAES(rawAES, aesKeyShared);
+                  // 其余字段全部原样使用
+                  const senderPub = msg.sender_pub || '';
+                  const iv = msg.iv || '';
+                  const expireAt = msg.expire_at || '';
+                  const aesContent = msg.aes_content || '';
+                  const pqcCiphertextB64 = msg.pqc_ciphertext || '';
+                  const ivSharedB64 = msg.iv_shared || '';
+                  const ivContentB64 = msg.iv_content || '';
+                  const encAESKeyB64 = msg.encAESKey || '';
+                  const encContentB64 = msg.encContent || '';
+                  const senderPqcPub = msg.sender_pqc_pub || '';
 
-                    // 加密消息内容（格式：昵称|时间|内容|nonce）
-                    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(8)))
-                        .map(b => b.toString(16).padStart(2,'0')).join('');
-                    const contentPlain = `${msg.nick || '匿名'}|${msg.time || new Date().toISOString().replace('T', ' ').slice(0,19)}|${msg.content || ''}|${nonce}`;
-                    const encContentResult = await encryptAES(contentPlain, new Uint8Array(userAESKeyDigest));
+                  const fileContent = [
+                    `v3|${senderPub}|${iv}|${expireAt}`,
+                    'PQC_V3',
+                    aesContent,
+                    `${adminIpEnc} | ${time}`,
+                    pqcCiphertextB64,
+                    ivSharedB64,
+                    ivContentB64,
+                    encAESKeyB64,
+                    encContentB64,
+                    senderPqcPub,
+                    msg.signature || ''
+                  ].join('\n');
 
-                    // 加密 IP 和时间（用新的 ML-KEM 封装）
-                    const ip = msg.ip || '127.0.0.1';
-                    const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
-                    const ipPlain = `${ip} | ${time}`;
-                    const { cipherText: ctIp, sharedSecret: sharedIp } = ml_kem1024_import.encapsulate(pqcPubBytes);
-                    const keyIp = await crypto.subtle.digest('SHA-256', sharedIp);
-                    const aesKeyIp = new Uint8Array(keyIp);
-                    const encIpResult = await encryptAES(ipPlain, aesKeyIp);
-                    const ipData = {
-                        ct: btoa(String.fromCharCode(...ctIp)),
-                        iv: btoa(String.fromCharCode(...encIpResult.iv)),
-                        enc: btoa(String.fromCharCode(...encIpResult.ciphertext))
-                    };
-                    const adminIpEnc = 'PQC_IP:' + btoa(JSON.stringify(ipData));
-
-                    // 组装 v3 私聊文件
-                    const senderPub = msg.sender_pub || 'PQC:' + hashlib.sha256((msg.sender_pqc_pub||'')).substring(0,32);
-                    const iv = msg.iv || CryptoJS.enc.Base64.stringify(CryptoJS.lib.WordArray.random(16));
-                    const expireAt = msg.expire_at || '';
-                    const pqcCiphertextB64 = btoa(String.fromCharCode(...cipherText));
-                    const ivSharedB64 = btoa(String.fromCharCode(...encAESKeyResult.iv));
-                    const ivContentB64 = btoa(String.fromCharCode(...encContentResult.iv));
-                    const encAESKeyB64 = btoa(String.fromCharCode(...encAESKeyResult.ciphertext));
-                    const encContentB64 = btoa(String.fromCharCode(...encContentResult.ciphertext));
-                    const senderPqcPub = msg.sender_pqc_pub || '';
-
-                    const fileContent = [
-                        `v3|${senderPub}|${iv}|${expireAt}|${pqcCiphertextB64}|${ivSharedB64}|${ivContentB64}|${encAESKeyB64}|${encContentB64}|${senderPqcPub}`,
-                        encAESKeyB64,
-                        encContentB64,
-                        `${adminIpEnc} | ${time}`
-                    ].join('\n');
-                    addFile(`chat/${filename}`, fileContent);
+                  addFile(`chat/${filename}`, fileContent);
                 } else {
                     // ---------- v2 RSA 加密（原有逻辑） ----------
                     const ip = msg.ip || '127.0.0.1';
                     const encryptedIp = encryptRSA(ip) || 'PLAIN:' + ip;
                     const time = msg.time || new Date().toISOString().replace('T', ' ').slice(0, 19);
-                    const content = `v2|${msg.sender_pub}|${msg.iv}|${msg.expire_at || ''}\n${msg.wrapped_key}\n${msg.aes_content}\n${encryptedIp} | ${time}`;
+                    const content = `v2|${msg.sender_pub}|${msg.iv}|${msg.expire_at || ''}\n${msg.wrapped_key}\n${msg.aes_content}\n${encryptedIp} | ${time}\n${msg.signature || ''}`;
                     addFile(`chat/${filename}`, content);
                 }
             }
@@ -2117,8 +2532,8 @@ async function importPlainData(input) {
                 const count = rec.count && !isNaN(rec.count) ? parseInt(rec.count, 10) : 1;
 
                 // 7. 加密 IP
-                const hash = CryptoJS.SHA512(ip).toString(CryptoJS.enc.Hex);
-                const encrypted = encryptRSA(ip);
+                const hash = hashIP(ip);
+                const encrypted = await encryptIPStorage(ip);
                 if (!encrypted) {
                     console.warn('IP加密失败，跳过:', ip);
                     skippedCount++;
@@ -2149,7 +2564,7 @@ async function importPlainData(input) {
                 const verified = entry.verified_time || new Date().toISOString().replace('T', ' ').slice(0, 19);
                 const expiry = entry.expiry_time || new Date(Date.now() + 3600000).toISOString().replace('T', ' ').slice(0, 19);
                 const plain = `${ip}|${verified}|${expiry}`;
-                const encrypted = encryptRSA(plain);
+                const encrypted = await encryptIPStorage(plain);
                 if (encrypted) {
                     logs.push({ data: encrypted, ts: Date.now() / 1000 });
                 }
@@ -2158,6 +2573,34 @@ async function importPlainData(input) {
                 addFile('captcha/verified_log.json', JSON.stringify(logs, null, 2));
             }
         }
+
+    return { zip, importErrors };
+}
+
+async function importPlainData(input) {
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    if (!file.name.endsWith('.json')) {
+        alert('请上传 .json 文件');
+        input.value = '';
+        return;
+    }
+    const confirmMsg = `⚠️ 即将导入文件：${file.name}\n此操作将覆盖当前所有明文数据，不可撤销！\n请输入 "确认导入来自于 ${file.name} 的明文数据并覆盖" 以继续：`;
+    const confirmText = prompt(confirmMsg);
+    if (confirmText !== `确认导入来自于 ${file.name} 的明文数据并覆盖`) {
+        alert('操作已取消');
+        input.value = '';
+        return;
+    }
+
+    const statusDiv = document.getElementById('plain-status');
+    statusDiv.style.display = 'block';
+    statusDiv.textContent = '⏳ 读取文件...';
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+
+        const { zip, importErrors } = await buildZipFromPlainData(data, statusDiv);
 
         // ---- 生成 ZIP 并上传 ----
         statusDiv.textContent = '⏳ 正在打包 ZIP...';
@@ -2171,6 +2614,10 @@ async function importPlainData(input) {
             body: formData
         });
         const result = await res.json();
+        if (importErrors.length > 0) {
+            statusDiv.textContent = '⚠️ 导入过程中有 ' + importErrors.length + ' 项失败，详见控制台\n✅ 其余数据导入成功！页面即将刷新。';
+            console.error('导入加密失败汇总:', importErrors);
+        }
         if (result.ok) {
             statusDiv.textContent = '✅ 导入成功！页面即将刷新。';
             setTimeout(() => location.reload(), 1500);
@@ -2185,6 +2632,58 @@ async function importPlainData(input) {
     }
 }
 
+async function importPlainDataMerge(input) {
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
+    if (!file.name.endsWith('.json')) {
+        alert('请上传 .json 文件');
+        input.value = '';
+        return;
+    }
+    const configMode = confirm('对于配置文件（under.txt、规则、阈值、验证码配置等），\n\n点击"确定"=替换为导入的配置\n点击"取消"=保留服务器既有配置') ? 'replace' : 'keep';
+    const confirmMsg = `⚠️ 即将增量导入文件：${file.name}\n配置文件将${configMode === 'keep' ? '保留服务器既有' : '替换为导入的'}。\n请输入 "确认增量导入 ${file.name}" 以继续：`;
+    const confirmText = prompt(confirmMsg);
+    if (confirmText !== `确认增量导入 ${file.name}`) {
+        alert('操作已取消');
+        input.value = '';
+        return;
+    }
+
+    const statusDiv = document.getElementById('plain-status');
+    statusDiv.style.display = 'block';
+    statusDiv.textContent = '⏳ 读取文件...';
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+
+        const { zip, importErrors } = await buildZipFromPlainData(data, statusDiv);
+
+        statusDiv.textContent = '⏳ 正在打包 ZIP...';
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const formData = new FormData();
+        formData.append('file', zipBlob, 'import.zip');
+        formData.append('config_mode', configMode);
+
+        statusDiv.textContent = '⏳ 正在增量导入...';
+        const res = await authFetch('/api/admin/import-data-merge', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await res.json();
+        if (result.ok) {
+            const s = result.stats;
+            statusDiv.textContent = `✅ 增量导入完成：新增 ${s.added}，跳过 ${s.skipped}，重命名 ${s.renamed}。页面即将刷新。`;
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            throw new Error(result.error || '导入失败');
+        }
+    } catch (e) {
+        statusDiv.textContent = '❌ 导入失败：' + e.message;
+        console.error(e);
+    } finally {
+        input.value = '';
+    }
+}
 // ===== 生成随机字符串 =====
 function generateRandomString(length) {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -2264,73 +2763,349 @@ async function rotateRSAKey() {
         console.error(e);
     }
 }
-// ===== 重置 PQC 密钥 =====
-async function rotatePQCKey() {
-    const randomStr = generateRandomString(8);
-    const expectedPhrase = `我已下载明文数据，确定重置PQC密钥${randomStr}`;
+// ===== IP 哈希盐值管理 =====
+async function loadIPSalt() {
+  try {
+    const res = await authFetch('/api/admin/ip-salt');
+    const data = await res.json();
+    document.getElementById('ip-salt-input').value = data.salt || '';
+    document.getElementById('salt-status').textContent = data.salt ? '✅ 已设置' : '（未加盐）';
+    document.getElementById('salt-status').style.color = data.salt ? '#4CAF50' : '#888';
+  } catch(e) {
+    console.warn('加载盐值失败', e);
+  }
+}
+
+async function saveIPSalt() {
+  const newSalt = document.getElementById('ip-salt-input').value;
+  const currentSalt = (await authFetch('/api/admin/ip-salt').then(r => r.json())).salt || '';
+  if (newSalt !== currentSalt) {
+    const randomStr = generateRandomString(6);
+    const expected = `我已下载明文数据，确定切换盐值${randomStr}`;
     const userInput = prompt(
-        `⚠️ 即将生成新 Kyber-1024 密钥对并替换服务器 PQC 公钥！\n\n` +
-        `此操作将导致所有用旧 PQC 公钥加密的数据无法解密。\n` +
-        `请确保您已通过「导出明文数据」功能备份了所有数据。\n\n` +
-        `请输入以下确认短语以继续：\n\n` +
-        `"${expectedPhrase}"\n\n` +
-        `（输入后点击「确定」）`
+      `⚠️ 即将修改 IP 哈希盐值！\n\n` +
+      `旧盐值: "${currentSalt || '（无）'}"\n` +
+      `新盐值: "${newSalt || '（无）'}"\n\n` +
+      `切换盐值后，所有已有的 IP 哈希将不匹配，\n` +
+      `黑/白名单和 IP 记录将无法正确匹配。\n\n` +
+      `请务必先「导出明文数据」备份，切换后再重新导入。\n\n` +
+      `请输入以下确认短语以继续：\n\n` +
+      `"${expected}"`
     );
-
-    if (userInput === null) return;
-    if (userInput.trim() !== expectedPhrase) {
-        alert('❌ 确认短语输入错误，操作已取消。');
-        return;
+    if ((userInput || '').trim() !== expected) {
+      alert('❌ 确认短语输入错误，操作已取消。');
+      return;
     }
-
-    try {
-        // 加载 Kyber 库
-        const mod = await import('@noble/post-quantum/ml-kem');
-        const ml_kem1024_local = mod.ml_kem1024;
-
-        // 生成密钥对
-        const keys = ml_kem1024_local.keygen();
-        const privBytes = new Uint8Array(keys.secretKey);  // Kyber-1024 私钥 3168 字节
-        const pubBytes = new Uint8Array(keys.publicKey);   // Kyber-1024 公钥 1568 字节
-
-        const privB64 = btoa(String.fromCharCode(...privBytes));
-        const pubB64 = btoa(String.fromCharCode(...pubBytes));
-
-        // 下载私钥
-        const blob = new Blob([privB64], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'PQC私钥.txt';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        alert('✅ PQC 私钥已下载为 PQC私钥.txt，请妥善保管！');
-
-        // 上传公钥
-        const uploadConfirm = confirm('PQC 公钥将上传至服务器，确认继续？');
-        if (!uploadConfirm) return;
-
-        const res = await authFetch('/api/admin/rotate-pqc-key', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ public_key: pubB64 })
-        });
-
-        const data = await res.json();
-        if (data.ok) {
-            alert('✅ PQC 公钥已更新成功！');
-            if (confirm('公钥已更换，建议重新登录以确保会话安全，是否现在刷新？')) {
-                location.reload();
-            }
-        } else {
-            alert('❌ 上传 PQC 公钥失败：' + (data.error || '未知错误'));
-        }
-    } catch (e) {
-        alert('❌ 生成或上传 PQC 密钥失败：' + e.message);
-        console.error(e);
+  }
+  try {
+    const res = await authFetch('/api/admin/ip-salt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ salt: newSalt })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('salt-status').textContent = newSalt ? '✅ 已保存' : '（未加盐）';
+      document.getElementById('salt-status').style.color = newSalt ? '#4CAF50' : '#888';
+      alert('✅ 盐值已更新！\n\n⚠️ 请重新导入明文数据以使哈希生效。');
     }
+  } catch(e) {
+    alert('❌ 保存盐值失败：' + e.message);
+  }
+}
+
+// ===== IP 加密方式管理 =====
+async function loadIPEncryptionMode() {
+  try {
+    const res = await authFetch('/api/admin/ip-encryption-mode');
+    const data = await res.json();
+    document.getElementById('ip-encryption-mode').value = data.mode || 'rsa';
+    document.getElementById('mode-status').textContent = data.mode === 'pqc' ? '🔐 PQC' : '🔐 RSA';
+    document.getElementById('mode-status').style.color = data.mode === 'pqc' ? '#9C27B0' : '#2196F3';
+  } catch(e) {
+    console.warn('加载加密方式失败', e);
+  }
+}
+
+async function saveIPEncryptionMode() {
+  const newMode = document.getElementById('ip-encryption-mode').value;
+  const currentMode = (await authFetch('/api/admin/ip-encryption-mode').then(r => r.json())).mode || 'rsa';
+  if (newMode !== currentMode) {
+    const randomStr = generateRandomString(6);
+    const expected = `我已下载明文数据，确定切换加密方式${randomStr}`;
+    const modeLabel = newMode === 'pqc' ? 'PQC (Kyber-1024)' : 'RSA';
+    const userInput = prompt(
+      `⚠️ 即将切换 IP 加密方式！\n\n` +
+      `当前方式: ${currentMode === 'pqc' ? 'PQC' : 'RSA'}\n` +
+      `新方式: ${modeLabel}\n\n` +
+      `切换后，新存储的 IP 将使用新的加密方式，\n` +
+      `旧数据（黑/白名单、IP 记录）仍为旧加密方式，\n` +
+      `混用会导致部分数据无法解密。\n\n` +
+      `请务必先「导出明文数据」备份，切换后再重新导入。\n\n` +
+      `请输入以下确认短语以继续：\n\n` +
+      `"${expected}"`
+    );
+    if ((userInput || '').trim() !== expected) {
+      alert('❌ 确认短语输入错误，操作已取消。');
+      loadIPEncryptionMode(); // 恢复下拉框
+      return;
+    }
+  }
+  try {
+    const res = await authFetch('/api/admin/ip-encryption-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: newMode })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById('mode-status').textContent = newMode === 'pqc' ? '🔐 PQC' : '🔐 RSA';
+      document.getElementById('mode-status').style.color = newMode === 'pqc' ? '#9C27B0' : '#2196F3';
+      alert('✅ 加密方式已切换！\n\n⚠️ 请重新导入明文数据以使新加密方式生效。');
+    }
+  } catch(e) {
+    alert('❌ 切换加密方式失败：' + e.message);
+    loadIPEncryptionMode();
+  }
+}
+
+var CATEGORIES = [
+  {key:'configs', label:'⚙️ 配置文件'},
+  {key:'messages', label:'📨 留言信件'},
+  {key:'message_replies', label:'💬 留言信件回复'},
+  {key:'votes_config', label:'📋 投票配置'},
+  {key:'votes_data', label:'🗳️ 投票结果'},
+  {key:'chat_qun', label:'👥 群聊内容'},
+  {key:'chat_private', label:'🔐 私聊内容'},
+  {key:'chat_reports', label:'🚨 举报内容'},
+  {key:'notices', label:'📢 公告内容'},
+  {key:'ip_records', label:'🌐 IP记录'},
+  {key:'captcha', label:'🤖 人机验证'}
+];
+var selectiveMode = 'full';
+
+function showSelectiveImport(mode) {
+  selectiveMode = mode;
+  var container = document.getElementById('category-checks');
+  container.innerHTML = '';
+  CATEGORIES.forEach(function(c) {
+    container.innerHTML += '<div style="margin:4px 0"><label style="cursor:pointer;font-size:13px"><input type="checkbox" class="sel-cat" data-key="'+c.key+'" checked onchange="updateSelCount()"> '+c.label+'</label></div>';
+  });
+  document.getElementById('sel-all').checked = true;
+  document.getElementById('sel-none').checked = false;
+  updateSelCount();
+  document.getElementById('selective-import-modal').style.display = 'flex';
+  // 绑定文件选择
+  var fileInput = document.getElementById('selective-import-file');
+  fileInput.onchange = function() {
+    if (selectiveMode === 'full') importPlainDataSelective(this);
+    else importPlainDataMergeSelective(this);
+  };
+}
+
+function closeSelectiveImport() {
+  document.getElementById('selective-import-modal').style.display = 'none';
+}
+
+function toggleAllCategories(src) {
+  var checkAll = src.id === 'sel-all';
+  document.getElementById('sel-all').checked = checkAll;
+  document.getElementById('sel-none').checked = !checkAll;
+  document.querySelectorAll('.sel-cat').forEach(function(cb){ cb.checked = checkAll; });
+  updateSelCount();
+}
+
+function updateSelCount() {
+  var total = document.querySelectorAll('.sel-cat').length;
+  var sel = document.querySelectorAll('.sel-cat:checked').length;
+  document.getElementById('sel-count').textContent = '已选 ' + sel + ' / ' + total + ' 个分类';
+}
+
+function getSelectedCategories() {
+  var sel = {};
+  document.querySelectorAll('.sel-cat:checked').forEach(function(cb){ sel[cb.dataset.key] = true; });
+  return sel;
+}
+
+function filterDataByCategories(data, categories) {
+  var filtered = { configs: {}, blacklist: [], whitelist: [], captcha_config: null, captcha_verified: null };
+  if (categories.configs) filtered.configs = data.configs || {};
+  if (categories.messages) filtered.messages = data.messages || [];
+  if (categories.votes_config && data.votes) {
+    filtered.votes = {};
+    for (var pid in data.votes) {
+      if (data.votes[pid].config) {
+        filtered.votes[pid] = { config: data.votes[pid].config, votes: categories.votes_data ? (data.votes[pid].votes || []) : [] };
+      }
+    }
+  } else if (categories.votes_data && data.votes) {
+    filtered.votes = {};
+    for (var pid in data.votes) {
+      filtered.votes[pid] = { config: {}, votes: data.votes[pid].votes || [] };
+    }
+  }
+  if (categories.chat_qun) filtered.chat_qun = data.chat_qun || [];
+  if (categories.chat_private) filtered.chat_private = data.chat_private || [];
+  if (categories.chat_reports) filtered.chat_reports = data.chat_reports || [];
+  if (categories.notices) filtered.notices = data.notices || [];
+  if (categories.ip_records) filtered.ip_records = data.ip_records || [];
+  if (categories.captcha) {
+    filtered.captcha_logs = data.captcha_logs || [];
+    filtered.captcha_config = data.captcha_config;
+    filtered.captcha_verified = data.captcha_verified;
+  }
+  if (categories.configs || categories.messages || categories.ip_records) {
+    filtered.blacklist = data.blacklist || [];
+    filtered.whitelist = data.whitelist || [];
+  }
+  return filtered;
+}
+
+async function importPlainDataSelective(input) {
+  if (!input.files || input.files.length === 0) return;
+  var file = input.files[0];
+  if (!file.name.endsWith('.json')) { alert('请上传 .json 文件'); input.value = ''; return; }
+  var confirmMsg = '⚠️ 即将按所选分类导入文件：'+file.name+'\n此操作将覆盖选中分类的当前数据！\n请输入 "确认覆盖" 以继续：';
+  var confirmText = prompt(confirmMsg);
+  if (confirmText !== '确认覆盖') { alert('操作已取消'); input.value = ''; return; }
+  var statusDiv = document.getElementById('plain-status');
+  statusDiv.style.display = 'block';
+  statusDiv.textContent = '⏳ 读取文件...';
+  try {
+    var text = await file.text();
+    var data = JSON.parse(text);
+    var categories = getSelectedCategories();
+    var filtered = filterDataByCategories(data, categories);
+    var buildResult = await buildZipFromPlainData(filtered, statusDiv);
+    statusDiv.textContent = '⏳ 正在打包 ZIP...';
+    var zipBlob = await buildResult.zip.generateAsync({ type: 'blob' });
+    var formData = new FormData();
+    formData.append('file', zipBlob, 'import.zip');
+    statusDiv.textContent = '⏳ 正在上传并覆盖数据...';
+    var res = await authFetch('/api/admin/import-data', { method: 'POST', body: formData });
+    var result = await res.json();
+    if (result.ok) { statusDiv.textContent = '✅ 导入成功！页面即将刷新。'; setTimeout(function(){ location.reload(); }, 1500); }
+    else { throw new Error(result.error || '导入失败'); }
+  } catch(e) { statusDiv.textContent = '❌ 导入失败：' + e.message; console.error(e); }
+  finally { input.value = ''; closeSelectiveImport(); }
+}
+
+async function importPlainDataMergeSelective(input) {
+  if (!input.files || input.files.length === 0) return;
+  var file = input.files[0];
+  if (!file.name.endsWith('.json')) { alert('请上传 .json 文件'); input.value = ''; return; }
+  var configMode = confirm('对于配置文件，点击"确定"=替换，点击"取消"=保留服务器既有') ? 'replace' : 'keep';
+  var confirmMsg = '⚠️ 即将按所选分类增量导入文件：'+file.name+'\n请输入 "确认增量导入" 以继续：';
+  var confirmText = prompt(confirmMsg);
+  if (confirmText !== '确认增量导入') { alert('操作已取消'); input.value = ''; return; }
+  var statusDiv = document.getElementById('plain-status');
+  statusDiv.style.display = 'block';
+  statusDiv.textContent = '⏳ 读取文件...';
+  try {
+    var text = await file.text();
+    var data = JSON.parse(text);
+    var categories = getSelectedCategories();
+    var filtered = filterDataByCategories(data, categories);
+    var buildResult = await buildZipFromPlainData(filtered, statusDiv);
+    statusDiv.textContent = '⏳ 正在打包 ZIP...';
+    var zipBlob = await buildResult.zip.generateAsync({ type: 'blob' });
+    var formData = new FormData();
+    formData.append('file', zipBlob, 'import.zip');
+    formData.append('config_mode', configMode);
+    statusDiv.textContent = '⏳ 正在增量导入...';
+    var res = await authFetch('/api/admin/import-data-merge', { method: 'POST', body: formData });
+    var result = await res.json();
+    if (result.ok) { var s = result.stats; statusDiv.textContent = '✅ 增量导入完成：新增 '+s.added+'，跳过 '+s.skipped+'。页面即将刷新。'; setTimeout(function(){ location.reload(); }, 1500); }
+    else { throw new Error(result.error || '导入失败'); }
+  } catch(e) { statusDiv.textContent = '❌ 导入失败：' + e.message; console.error(e); }
+  finally { input.value = ''; closeSelectiveImport(); }
+}
+// ===== 导出选择分类 =====
+function showSelectiveExport() {
+  var container = document.getElementById('category-checks-export');
+  container.innerHTML = '';
+  CATEGORIES.forEach(function(c) {
+    container.innerHTML += '<div style="margin:4px 0"><label style="cursor:pointer;font-size:13px"><input type="checkbox" class="sel-cat-export" data-key="'+c.key+'" checked onchange="updateSelCountExport()"> '+c.label+'</label></div>';
+  });
+  document.getElementById('sel-all-export').checked = true;
+  document.getElementById('sel-none-export').checked = false;
+  updateSelCountExport();
+  document.getElementById('selective-export-modal').style.display = 'flex';
+}
+
+function closeSelectiveExport() {
+  document.getElementById('selective-export-modal').style.display = 'none';
+}
+
+function toggleAllCategoriesExport(src) {
+  var checkAll = src.id === 'sel-all-export';
+  document.getElementById('sel-all-export').checked = checkAll;
+  document.getElementById('sel-none-export').checked = !checkAll;
+  document.querySelectorAll('.sel-cat-export').forEach(function(cb){ cb.checked = checkAll; });
+  updateSelCountExport();
+}
+
+function updateSelCountExport() {
+  var total = document.querySelectorAll('.sel-cat-export').length;
+  var sel = document.querySelectorAll('.sel-cat-export:checked').length;
+  document.getElementById('sel-count-export').textContent = '已选 ' + sel + ' / ' + total + ' 个分类';
+}
+
+function getSelectedExportCategories() {
+  var sel = {};
+  document.querySelectorAll('.sel-cat-export:checked').forEach(function(cb){ sel[cb.dataset.key] = true; });
+  return sel;
+}
+
+function startSelectiveExport() {
+  var categories = getSelectedExportCategories();
+  var hasSelection = Object.values(categories).some(function(v) { return v; });
+  if (!hasSelection) { alert('请至少选择一个分类'); return; }
+  closeSelectiveExport();
+  exportPlainData(categories);
+}
+
+function filterExportDataByCategories(data, categories) {
+  var filtered = { configs: {}, blacklist: [], whitelist: [], captcha_config: null, captcha_verified: null };
+
+  if (categories.configs) filtered.configs = data.configs || {};
+
+  if (categories.messages || categories.message_replies) {
+    filtered.messages = (data.messages || []).map(function(m) {
+      var copy = { seq: m.seq, version: m.version, nick: m.nick, content: m.content, ip: m.ip, time: m.time, rawAES: m.rawAES };
+      if (categories.message_replies && m.replies) copy.replies = m.replies;
+      return copy;
+    });
+  }
+
+  if (categories.votes_config || categories.votes_data) {
+    filtered.votes = {};
+    for (var pid in data.votes || {}) {
+      var poll = data.votes[pid];
+      filtered.votes[pid] = {};
+      if (categories.votes_config) filtered.votes[pid].config = poll.config || {};
+      if (categories.votes_data) filtered.votes[pid].votes = poll.votes || [];
+    }
+  }
+
+  if (categories.chat_qun) filtered.chat_qun = data.chat_qun || [];
+  if (categories.chat_private) filtered.chat_private = data.chat_private || [];
+  if (categories.chat_reports) filtered.chat_reports = data.chat_reports || [];
+  if (categories.notices) filtered.notices = data.notices || [];
+  if (categories.ip_records) filtered.ip_records = data.ip_records || [];
+
+  if (categories.captcha) {
+    filtered.captcha_logs = data.captcha_logs || [];
+    filtered.captcha_config = data.captcha_config;
+    filtered.captcha_verified = data.captcha_verified;
+  }
+
+  if (categories.configs || categories.messages || categories.ip_records) {
+    filtered.blacklist = data.blacklist || [];
+    filtered.whitelist = data.whitelist || [];
+  }
+
+  return filtered;
 }
 </script>
 </body>

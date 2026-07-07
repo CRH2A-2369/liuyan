@@ -869,6 +869,8 @@ function editMyVote(pollId) {
     editOptsDiv.parentNode.insertBefore(remarkEditContainer, editOptsDiv);
 
     // ★★★ 加密方式选择器（修改投票时也需要）
+    var oldEncModeRow = document.getElementById('edit-enc-mode-row');
+    if (oldEncModeRow) oldEncModeRow.remove();
     var encModeRow = document.createElement('div');
     encModeRow.id = 'edit-enc-mode-row';
     encModeRow.style.cssText = 'margin:8px 0;font-size:13px;color:#666';
@@ -877,6 +879,13 @@ function editMyVote(pollId) {
       '<label style="margin-left:8px;cursor:pointer"><input type="radio" name="edit-enc-mode" value="pqc"> 🔮 PQC</label>' +
       '<label style="margin-left:8px;cursor:pointer"><input type="radio" name="edit-enc-mode" value="auto" checked> 🤖 自动</label>';
     editOptsDiv.parentNode.insertBefore(encModeRow, editOptsDiv);
+    // ★ 根据原投票的加密方式自动选中对应选项
+    var voteVersion = mv.version || '';
+    var editEncRadios = encModeRow.querySelectorAll('input[name="edit-enc-mode"]');
+    editEncRadios.forEach(function(r) {
+      if (voteVersion === 'v3' && r.value === 'pqc') r.checked = true;
+      else if (voteVersion === 'v2' && r.value === 'rsa') r.checked = true;
+    });
 
     var prevChoices = choice.split(', ');
     editOptsDiv.innerHTML = '';
@@ -1008,6 +1017,7 @@ async function confirmEdit() {
       mv.nick = identity.nick;
       mv.remark_iv = remarkIvB64;
       mv.remark_aes_msg = remarkEnc;
+      mv.version = pqcData ? 'v3' : 'v2';
       saveMyVote(currentEditingPollId, mv);
 
       sessionStorage.removeItem('pending_edit_poll');
@@ -1182,7 +1192,8 @@ async function submitVote() {
       aes_enc: msgEnc,
       edit_token: data.edit_token || editToken,
       remark_iv: remarkIvB64,
-      remark_aes_msg: remarkEnc
+      remark_aes_msg: remarkEnc,
+      version: pqcData ? 'v3' : 'v2'
     });
 
     // ★ 清除待提交数据

@@ -6,6 +6,13 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
+  <script type="importmap">
+  {
+      "imports": {
+          "@noble/post-quantum/ml-kem": "https://esm.sh/@noble/post-quantum@0.6.1/ml-kem"
+      }
+  }
+  </script>
   <style>
     body{font-family:sans-serif;max-width:960px;margin:40px auto;padding:20px}
     #controls{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
@@ -353,9 +360,43 @@ function decryptIdentity(cipherText) {
   }
 }
 
-// ── IP 解密（RSA 加密 / PLAIN 降级） ──
-function decryptIp(raw) {
+// ── IP 解密（RSA / PQC / PLAIN） ──
+async function decryptIp(raw) {
   if (!raw) return '—';
+
+  // PQC 解密
+  if (raw.startsWith('PQC_IP:') || raw.startsWith('PQC:')) {
+    var savedPQC = sessionStorage.getItem('admin_pqc_priv_key');
+    if (!savedPQC) return '(PQC私钥未加载)';
+    try {
+      var b64 = raw.startsWith('PQC_IP:') ? raw.slice(7) : raw.slice(4);
+      var pqcData = JSON.parse(atob(b64));
+      var pqcPriv = Uint8Array.from(atob(savedPQC), function(c) { return c.charCodeAt(0); });
+      var ct = Uint8Array.from(atob(pqcData.ct), function(c) { return c.charCodeAt(0); });
+      var ml_kem_mod = await import('@noble/post-quantum/ml-kem');
+      var ml_kem = ml_kem_mod.ml_kem1024;
+      var shared = ml_kem.decapsulate(ct, pqcPriv);
+      var key = await crypto.subtle.digest('SHA-256', shared);
+      var aesKey = new Uint8Array(key);
+      var iv = Uint8Array.from(atob(pqcData.iv), function(c) { return c.charCodeAt(0); });
+      var enc = Uint8Array.from(atob(pqcData.enc), function(c) { return c.charCodeAt(0); });
+      var dec = await crypto.subtle.decrypt(
+        { name: 'AES-CBC', iv: iv },
+        await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['decrypt']),
+        enc
+      );
+      var decArr = new Uint8Array(dec);
+      var padLen = decArr[decArr.length - 1];
+      if (padLen > 0 && padLen <= 16) {
+        return new TextDecoder().decode(decArr.slice(0, decArr.length - padLen));
+      }
+      return new TextDecoder().decode(decArr);
+    } catch(e) {
+      return '(PQC解密失败)';
+    }
+  }
+
+  // RSA 解密
   if (raw.startsWith('RSA:')) {
     if (!adminJse) return '(私钥未加载)';
     try {
@@ -365,10 +406,13 @@ function decryptIp(raw) {
       return '(解密出错)';
     }
   }
+
+  // PLAIN 降级
   if (raw.startsWith('PLAIN:')) {
     return raw.slice(6);
   }
-  // 纯明文兜底（历史数据）
+
+  // 纯明文兜底
   return raw;
 }
 
@@ -480,7 +524,7 @@ function saveThreshold() {
 }
 
 // ── 单条消息渲染（管理员版） ──
-function renderAdminMsg(m) {
+async function renderAdminMsg(m) {
   var safeHtml = DOMPurify.sanitize(marked.parse(m.content));
   var state = m.state || 'enabled';
   var pinnedClass = m.pinned ? ' pinned' : '';
@@ -528,7 +572,7 @@ function renderAdminMsg(m) {
   pinLabel.className = 'pin-label'; pinLabel.textContent = '📌 已置底';
   metaDiv.appendChild(pinLabel);
 
-  metaDiv.appendChild(document.createTextNode('👤 ' + m.nick + ' | 🌐 ' + decryptIp(m.ip) + ' | 🕒 ' + m.time));
+  metaDiv.appendChild(document.createTextNode('👤 ' + m.nick + ' | 🌐 ' + (await decryptIp(m.ip)) + ' | 🕒 ' + m.time));
   if (m.key_hash) {
     metaDiv.appendChild(document.createTextNode(' | 🔑 ' + m.key_hash.substring(0, 12) + '…'));
   }
@@ -598,7 +642,7 @@ function loadMsgs() {
 
       if (!oldMsg) {
         // 全新
-        var div = renderAdminMsg(m);
+        var div = await renderAdminMsg(m);
         msgElements[m.index] = div;
         var refNode = c.children[idx];
         if (refNode) {
@@ -616,7 +660,7 @@ function loadMsgs() {
         JSON.stringify(oldMsg.reports) !== JSON.stringify(m.reports)
       ) {
         // 变更 → 替换
-        var newDiv = renderAdminMsg(m);
+        var newDiv = await renderAdminMsg(m);
         msgElements[m.index] = newDiv;
         if (existingEl && existingEl.parentNode) {
           existingEl.parentNode.replaceChild(newDiv, existingEl);

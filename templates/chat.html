@@ -7,6 +7,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.2/jsencrypt.min.js" integrity="sha512-94ncgEEqkuZ4yNTFmu2dSn1TJ6Ij+ANQqpR7eLVU99kzvYzu6UjBxuVoNHtnd29R+T6nvK+ugCVI698pbyEkvQ==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js" integrity="sha512-rfX4p3RNnxdwLT3wWP1K0NR3ztTobn+sISlT9WhxDDK00zNYbQ6MCHA5OHm0hqKAzEMXYCgFrp8iY/ER5MkXqA==" crossorigin="anonymous"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" integrity="sha512-H+rglffZ6f5gF7UJgvH4Naa+fGCgjrHKMgoFOGmcPTRwR6oILo5R+gtzNrpDp7iMV3udbymBVjkeZGNz1Em4rQ==" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/forge/1.3.1/forge.min.js" integrity="sha512-95iy0RZIbw3H/FgfAj2wnCQJlzFQ+eaSfUeV/l8WVyGHKSRMzm3M/O+85j9ba/HFphkijrCTDjcuDX0BL2lthA==" crossorigin="anonymous"></script>
   <script type="importmap">
   {
       "imports": {
@@ -591,7 +592,7 @@ async function sendChatMsgPqc(slotIdx, recvPqcPubB64, recvPub, msg) {
     var encAESKey = CryptoJS.AES.encrypt(bytesToBase64(msgKey), sharedKeyHex, {iv:ivShared,mode:CryptoJS.mode.CBC,padding:CryptoJS.pad.Pkcs7}).toString().replace(/[\r\n\s]+/g,'');
     var body = {
         version:'v3',
-        sender_pub: 'PQC:' + sha256hex(id.pqcPub||'').substring(0,32),
+        sender_pub: id.pub ? id.pub.replace(/[\r\n]+/g,'') : ('PQC:' + sha256hex(id.pqcPub||'').substring(0,32)),
         sender_pqc_pub:(id.pqcPub||'').replace(/[\r\n\s]+/g,''),
         receiver_hash:recvHash,
         pqc_ciphertext:bytesToBase64(encapsResult.cipherText),
@@ -602,14 +603,30 @@ async function sendChatMsgPqc(slotIdx, recvPqcPubB64, recvPub, msg) {
         aes_content: encContent,
         iv: CryptoJS.enc.Base64.stringify(ivContent).replace(/[\r\n\s]+/g,''),
         wrapped_key: 'PQC_V3',
-        nonce:nonce
+        nonce:nonce,
+        signature: ''
     };
+    // ★ RSA 签名
+    if (id.priv) {
+      try {
+        var privKeyObj = forge.pki.privateKeyFromPem(id.priv);
+        var md = forge.md.sha256.create();
+        md.update(payload, 'utf8');
+        var pss = forge.pss.create({
+          md: forge.md.sha256.create(),
+          mgf: forge.mgf.mgf1.create(forge.md.sha256.create()),
+          saltLength: 32
+        });
+        var sigBytes = privKeyObj.sign(md, pss);
+        body.signature = forge.util.encode64(sigBytes);
+      } catch(e) { console.warn('PQC签名失败', e); }
+    }
     var res = await fetch('/api/chat/send', {method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify(body)});
     if (res.status===418) { sessionStorage.setItem('pending_chat_msg',msg);sessionStorage.setItem('pending_chat_slot',slotIdx);sessionStorage.setItem('pending_chat_recv',recvPub);sessionStorage.setItem('pending_chat_pqc',recvPqcPubB64);window.location.href='/captcha?redirect='+encodeURIComponent(window.location.href);return; }
     window.handleRateLimitResponse(res);
     if(!res.ok){var t=await res.text();throw new Error(t);}
     var data=await res.json();
-        sentMessages.push({nick:id.nick,time:timeStr,content:msg,recvHash:recvHash,slotIdx:slotIdx,seq:data.seq,filename:data.filename,version:'v3',pqcCiphertext:bytesToBase64(encapsResult.cipherText),ivShared:CryptoJS.enc.Base64.stringify(ivShared).replace(/[\r\n\s]+/g,''),encAESKey:encAESKey,iv:CryptoJS.enc.Base64.stringify(ivContent).replace(/[\r\n\s]+/g,''),msgKeyB64:bytesToBase64(msgKey)});
+        sentMessages.push({nick:id.nick,time:timeStr,content:msg,recvHash:recvHash,slotIdx:slotIdx,seq:data.seq,filename:data.filename,version:'v3',pqcCiphertext:bytesToBase64(encapsResult.cipherText),ivShared:CryptoJS.enc.Base64.stringify(ivShared).replace(/[\r\n\s]+/g,''),encAESKey:encAESKey,iv:CryptoJS.enc.Base64.stringify(ivContent).replace(/[\r\n\s]+/g,''),msgKeyB64:bytesToBase64(msgKey),signature: body.signature,senderPub: id.pub});
     saveSent(sentMessages);
     // ★ 独立持久化 PQC msgKey，清除缓存后仍可解密自己发送的消息
     pqcSentKeys[data.filename] = bytesToBase64(msgKey);
@@ -621,11 +638,9 @@ async function sendChatMsgPqc(slotIdx, recvPqcPubB64, recvPub, msg) {
 
 function sendChatMsgRsa(slotIdx, recvPub, msg) {
   var id = identities[slotIdx];
-
   var iv = CryptoJS.lib.WordArray.random(16);
   var ivB64 = CryptoJS.enc.Base64.stringify(iv).replace(/[\r\n\s]+/g,'');
   var key32 = deriveAESKey(id.aes);
-
   var now = new Date();
   var timeStr = now.getFullYear()+'-'+
     String(now.getMonth()+1).padStart(2,'0')+'-'+
@@ -634,18 +649,30 @@ function sendChatMsgRsa(slotIdx, recvPub, msg) {
     String(now.getMinutes()).padStart(2,'0')+':'+
     String(now.getSeconds()).padStart(2,'0');
   var nonce = Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
-
   var payload = id.nick + '|' + timeStr + '|' + msg + '|' + nonce;
   var aesContent = CryptoJS.AES.encrypt(payload, key32, {iv:iv, mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7}).toString().replace(/[\r\n\s]+/g,'');
-
   var jse = new JSEncrypt();
   jse.setPublicKey(recvPub);
   var wrappedKey = jse.encrypt(id.aes);
   if(!wrappedKey){ alert('RSA加密失败（接收方公钥无效）'); return; }
   wrappedKey = wrappedKey.replace(/[\r\n\s]+/g,'');
-
+  // ★ RSA 签名
+  var signature = '';
+  if (id.priv) {
+    try {
+      var privKeyObj = forge.pki.privateKeyFromPem(id.priv);
+      var md = forge.md.sha256.create();
+      md.update(payload, 'utf8');
+      var pss = forge.pss.create({
+        md: forge.md.sha256.create(),
+        mgf: forge.mgf.mgf1.create(forge.md.sha256.create()),
+        saltLength: 32
+      });
+      var sigBytes = privKeyObj.sign(md, pss);
+      signature = forge.util.encode64(sigBytes);
+    } catch(e) { console.warn('签名失败', e); }
+  }
   var recvHash = pubKeyHash(recvPub);
-
   fetch('/api/chat/send', {
     method: 'POST',
     headers: {'Content-Type': 'application/json','X-CSRF-Token': csrfToken},
@@ -655,7 +682,8 @@ function sendChatMsgRsa(slotIdx, recvPub, msg) {
       iv: ivB64,
       wrapped_key: wrappedKey,
       aes_content: aesContent,
-      nonce: nonce
+      nonce: nonce,
+      signature: signature
     })
   }).then(function(r){
     if (r.status === 418) {
@@ -679,7 +707,9 @@ function sendChatMsgRsa(slotIdx, recvPub, msg) {
       seq: data.seq,
       filename: data.filename,
       wrappedKey: wrappedKey,
-      iv: ivB64
+      iv: ivB64,
+      signature: signature,
+      senderPub: id.pub
     });
     saveSent(sentMessages);
     document.getElementById('chat-msg').value = '';
@@ -917,7 +947,7 @@ async function decryptAndDisplay(messages){
       }
     }
 
-    if(decrypted){
+    if (decrypted) {
       var msgObj = {
         nick: decrypted.nick,
         time: decrypted.time,
@@ -930,10 +960,26 @@ async function decryptAndDisplay(messages){
         wrappedKey: m.wrapped_key || '',
         iv: m.iv || '',
         version: msgVersion,
-        msgKeyB64: v3MsgKey || ''
+        msgKeyB64: v3MsgKey || '',
+        signature: m.signature || '',
+        sigValid: null
       };
-      if(isSentFlag){
-        msgObj.isReceived = false;
+      // ★ 验证签名
+      if (msgObj.signature) {
+        var sigPayload = decrypted.nick + '|' + decrypted.time + '|' + decrypted.content + '|' + decrypted.nonce;
+        try {
+          var pubKeyObj = forge.pki.publicKeyFromPem(msgObj.senderPub);
+          var vMd = forge.md.sha256.create();
+          vMd.update(sigPayload, 'utf8');
+          var vPss = forge.pss.create({
+            md: forge.md.sha256.create(),
+            mgf: forge.mgf.mgf1.create(forge.md.sha256.create()),
+            saltLength: 32
+          });
+          msgObj.sigValid = pubKeyObj.verify(vMd.digest().bytes(), forge.util.decode64(msgObj.signature), vPss);
+        } catch(e) { msgObj.sigValid = false; }
+      }
+      if (isSentFlag) {
         newSent.push(msgObj);
       } else {
         msgObj.isReceived = true;
@@ -959,7 +1005,6 @@ async function decryptAndDisplay(messages){
   }
   renderChat();
 }
-
 // ═══════════════════════════════════════════
 // 渲染聊天
 // ═══════════════════════════════════════════
@@ -1005,7 +1050,11 @@ function renderChatWithData(allMsgs){
              + '<span class="c-time">' + esc(m.time) + '</span>';
     }
     var encLabel = (m.version==='v3') ? ' 🔮' : ' 🔐';
-    header += '<span style="font-size:9px;color:#aaa;margin-left:4px" title="'+(m.version==='v3'?'PQC后量子加密':'RSA加密')+'">'+encLabel+'</span>';
+    if (m.signature) {
+      var sigIcon = m.sigValid === true ? '✅' : (m.sigValid === false ? '❌' : '❓');
+      var sigTitle = m.sigValid === true ? 'RSA签名验证通过' : (m.sigValid === false ? 'RSA签名验证失败！消息可能被篡改' : '无法验证签名（无发送方公钥）');
+      header += '<span style="font-size:9px;margin-left:4px;cursor:help" title="'+sigTitle+'">'+sigIcon+'</span>';
+    }
     html += '<div>' + header
          + '<button class="copy-msg-btn" data-copy="' + esc(m.content) + '">📋复制</button>';
 
@@ -1513,7 +1562,8 @@ async function revokeMessage(filename, slotIdxStr){
           base64ToBytes(challData2.ct),
           base64ToBytes(id.pqcPriv)
         );
-        var key2 = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(bytesToHex(shared2)).toString().substring(0, 64));
+        var sharedWa2 = CryptoJS.lib.WordArray.create(shared2);
+        var key2 = CryptoJS.enc.Hex.parse(CryptoJS.SHA256(sharedWa2).toString().substring(0, 64));
         var decrypted2 = CryptoJS.AES.decrypt(
           challData2.enc,
           key2,
