@@ -13,6 +13,7 @@
       }
   }
   </script>
+  <script src="/static/key-manager.js"></script>
   <style>
     body{font-family:sans-serif;max-width:960px;margin:40px auto;padding:20px}
     #controls{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
@@ -341,13 +342,60 @@ var msgElements = {};
 
 // ── 管理员 RSA 私钥（用于解密举报身份） ──
 var adminJse = null;
-try {
-  var savedPriv = sessionStorage.getItem('admin_priv_key');
-  if (savedPriv) {
-    adminJse = new JSEncrypt();
-    adminJse.setPrivateKey(savedPriv);
-  }
-} catch(e) { console.error('私钥初始化失败', e); }
+var adminPqcPrivBytes = null;
+
+async function loadAdminKeys() {
+    // 1. 优先尝试 KeyManager（SharedWorker）
+    if (typeof KeyManager !== 'undefined') {
+        try {
+            const keys = await KeyManager.init();
+            if (keys) {
+                adminJse = new JSEncrypt();
+                adminJse.setPrivateKey(keys.rsaKey);
+                const binary = atob(keys.pqcKey);
+                adminPqcPrivBytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                    adminPqcPrivBytes[i] = binary.charCodeAt(i);
+                }
+                // 存入 sessionStorage 备用
+                sessionStorage.setItem('admin_priv_key', keys.rsaKey);
+                sessionStorage.setItem('admin_pqc_priv_key', keys.pqcKey);
+                if (keys.dataKey) {
+                    sessionStorage.setItem('admin_data_key', keys.dataKey);
+                    adminDataJse = new JSEncrypt();
+                    adminDataJse.setPrivateKey(keys.dataKey);
+                }
+                return true;
+            }
+        } catch (e) {
+            console.warn('KeyManager.init() 失败，尝试从 sessionStorage 恢复', e);
+        }
+    }
+
+    // 2. 回退：从 sessionStorage 读取明文私钥
+    const rsaKey = sessionStorage.getItem('admin_priv_key');
+    const pqcKey = sessionStorage.getItem('admin_pqc_priv_key');
+    if (rsaKey && pqcKey) {
+        try {
+            adminJse = new JSEncrypt();
+            adminJse.setPrivateKey(rsaKey);
+            const binary = atob(pqcKey);
+            adminPqcPrivBytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                adminPqcPrivBytes[i] = binary.charCodeAt(i);
+            }
+            const dataKey = sessionStorage.getItem('admin_data_key');
+            if (dataKey) {
+                adminDataJse = new JSEncrypt();
+                adminDataJse.setPrivateKey(dataKey);
+            }
+            return true;
+        } catch (e) {
+            console.error('从 sessionStorage 恢复私钥失败', e);
+        }
+    }
+    return false;
+}
 
 function decryptIdentity(cipherText) {
   if (!cipherText) return '（空）';
@@ -366,8 +414,7 @@ async function decryptIp(raw) {
 
   // PQC 解密
   if (raw.startsWith('PQC_IP:') || raw.startsWith('PQC:')) {
-    var savedPQC = sessionStorage.getItem('admin_pqc_priv_key');
-    if (!savedPQC) return '(PQC私钥未加载)';
+    if (!adminPqcPrivBytes) return '(PQC私钥未加载)';
     try {
       var b64 = raw.startsWith('PQC_IP:') ? raw.slice(7) : raw.slice(4);
       var pqcData = JSON.parse(atob(b64));
@@ -422,14 +469,18 @@ async function init() {
     csrfToken = (await csrfRes.json()).token;
     var statusRes = await fetch('/api/admin/status', {credentials:'same-origin'});
     var status = await statusRes.json();
-    if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
+    if (status.logged_in) {
+      var keysLoaded = await loadAdminKeys();
+      if (!keysLoaded) {
+        await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
+        sessionStorage.clear();
+        window.location.href = '/admin';
+        return;
+      }
       document.getElementById('login-wall').style.display = 'none';
       document.getElementById('main-content').style.display = 'block';
       loadPerm(); loadMsgs(); loadRule(); loadThreshold();loadAdminAiConfig();
       fetch('/api/footer').then(function(r){return r.text();}).then(function(t){document.getElementById('footer').textContent=t;});
-    } else if (status.logged_in) {
-      await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
-      sessionStorage.clear(); location.reload();
     } else {
       document.getElementById('login-wall').style.display = 'block';
     }
@@ -616,7 +667,7 @@ async function renderAdminMsg(m) {
   return div;
 }
 function loadMsgs() {
-  authFetch('/api/admin/qun').then(function(r){return r.json();}).then(function(data){
+  authFetch('/api/admin/qun').then(function(r){return r.json();}).then(async function(data){
     var c = document.getElementById('chat');
 
     var oldIdx = {};
@@ -636,7 +687,8 @@ function loadMsgs() {
     });
 
     // ② 新增 & 更新
-    data.forEach(function(m, idx){
+    for (var idx = 0; idx < data.length; idx++) {
+      var m = data[idx];
       var oldMsg = oldIdx[m.index];
       var existingEl = msgElements[m.index];
 
@@ -674,7 +726,7 @@ function loadMsgs() {
           c.insertBefore(existingEl, refNode);
         }
       }
-    });
+    }
 
     // ③ 更新缓存
     messagesCache = data;

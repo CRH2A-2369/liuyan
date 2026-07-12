@@ -12,6 +12,7 @@
       }
   }
   </script>
+  <script src="/static/key-manager.js"></script>
   <style>
     body{font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px;color:#333}
     h2{margin:0 0 16px}
@@ -106,23 +107,60 @@ function bytesToHex(bytes) {
 }
 // ========== 鉴权初始化 ==========
 var adminJse = null;
-try {
-  var savedKey = sessionStorage.getItem('admin_priv_key');
-  if (savedKey) {
-    adminJse = new JSEncrypt();
-    adminJse.setPrivateKey(savedKey);
-  }
-} catch(e) {}
-
 var adminPqcPrivBytes = null;
-try {
-  var savedPqcKey = sessionStorage.getItem('admin_pqc_priv_key');
-  if (savedPqcKey) {
-    var binary = atob(savedPqcKey);
-    adminPqcPrivBytes = new Uint8Array(binary.length);
-    for (var i = 0; i < binary.length; i++) adminPqcPrivBytes[i] = binary.charCodeAt(i);
-  }
-} catch(e) {}
+
+async function loadAdminKeys() {
+    // 1. 优先尝试 KeyManager（SharedWorker）
+    if (typeof KeyManager !== 'undefined') {
+        try {
+            const keys = await KeyManager.init();
+            if (keys) {
+                adminJse = new JSEncrypt();
+                adminJse.setPrivateKey(keys.rsaKey);
+                const binary = atob(keys.pqcKey);
+                adminPqcPrivBytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                    adminPqcPrivBytes[i] = binary.charCodeAt(i);
+                }
+                // 存入 sessionStorage 备用
+                sessionStorage.setItem('admin_priv_key', keys.rsaKey);
+                sessionStorage.setItem('admin_pqc_priv_key', keys.pqcKey);
+                if (keys.dataKey) {
+                    sessionStorage.setItem('admin_data_key', keys.dataKey);
+                    adminDataJse = new JSEncrypt();
+                    adminDataJse.setPrivateKey(keys.dataKey);
+                }
+                return true;
+            }
+        } catch (e) {
+            console.warn('KeyManager.init() 失败，尝试从 sessionStorage 恢复', e);
+        }
+    }
+
+    // 2. 回退：从 sessionStorage 读取明文私钥
+    const rsaKey = sessionStorage.getItem('admin_priv_key');
+    const pqcKey = sessionStorage.getItem('admin_pqc_priv_key');
+    if (rsaKey && pqcKey) {
+        try {
+            adminJse = new JSEncrypt();
+            adminJse.setPrivateKey(rsaKey);
+            const binary = atob(pqcKey);
+            adminPqcPrivBytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                adminPqcPrivBytes[i] = binary.charCodeAt(i);
+            }
+            const dataKey = sessionStorage.getItem('admin_data_key');
+            if (dataKey) {
+                adminDataJse = new JSEncrypt();
+                adminDataJse.setPrivateKey(dataKey);
+            }
+            return true;
+        } catch (e) {
+            console.error('从 sessionStorage 恢复私钥失败', e);
+        }
+    }
+    return false;
+}
 
 var csrfToken = '';
 var authFetch = function(url, opts) {
@@ -138,7 +176,14 @@ async function init() {
     csrfToken = (await csrfRes.json()).token;
     var statusRes = await fetch('/api/admin/status', {credentials:'same-origin'});
     var status = await statusRes.json();
-    if (status.logged_in && status.has_key) {
+    if (status.logged_in) {
+      var keysLoaded = await loadAdminKeys();
+      if (!keysLoaded) {
+        await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
+        sessionStorage.clear();
+        window.location.href = '/admin';
+        return;
+      }
       document.getElementById('login-wall').style.display = 'none';
       document.getElementById('main-content').classList.remove('hidden');
       loadMessages();
@@ -147,9 +192,6 @@ async function init() {
       fetch('/api/footer').then(function(r){return r.text();}).then(function(t){
         document.getElementById('footer').textContent = t;
       });
-    } else if (status.logged_in && !status.has_key) {
-      document.getElementById('login-wall').innerHTML = '<h2>⚠️ 密钥未加载</h2><p>请<a href="/admin">重新登录管理员面板</a>上传RSA私钥和PQC私钥</p>';
-      document.getElementById('main-content').classList.add('hidden');
     } else {
       document.getElementById('login-wall').style.display = 'block';
       document.getElementById('main-content').classList.add('hidden');

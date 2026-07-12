@@ -158,32 +158,21 @@
       return fetch(url, Object.assign({credentials: 'same-origin'}, opts, {headers: headers}));
     };
 
-    // ★ init：鉴权流程（与 admin_qun.html 一致）
     async function init() {
       try {
-        // 1. 拿 CSRF token
         var csrfRes = await fetch('/api/csrf', {credentials: 'same-origin'});
         csrfToken = (await csrfRes.json()).token;
 
-        // 2. 检查登录状态
         var statusRes = await fetch('/api/admin/status', {credentials: 'same-origin'});
         var status = await statusRes.json();
-
-        if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
-          // 已登录且已加载私钥 → 显示管理界面
+ 
+        if (status.logged_in) {
           document.getElementById('login-wall').style.display = 'none';
           document.getElementById('main-content').style.display = 'block';
           loadNotices();
-        } else if (status.logged_in) {
-          // 已登录但无 key → 登出重来
-          await fetch('/api/admin/logout', {
-            credentials: 'same-origin', method: 'POST',
-            headers: { 'X-CSRF-Token': csrfToken }
-          });
-          sessionStorage.clear();
-          location.reload();
+        } else {
+          document.getElementById('login-wall').style.display = 'block';
         }
-        // 未登录 → login-wall 保持显示
       } catch(e) {
         console.error('Init:', e);
       }
@@ -300,58 +289,77 @@
 // ---- 文件管理 ----
 function loadAdminFiles() {
     const url = '/api/files' + (currentPath ? '?path=' + encodeURIComponent(currentPath) : '');
-    fetch(url)
-        .then(r => r.json())
-        .then(data => {
-            const container = document.getElementById('adminFileList');
-            let html = '';
+    const countsUrl = '/api/admin/files/download-counts';
+    // 同时获取文件列表和下载计数
+    Promise.all([
+        fetch(url).then(r => r.json()),
+        fetch(countsUrl, {
+            credentials: 'same-origin',
+            headers: { 'X-CSRF-Token': csrfToken }
+        }).then(r => r.json())
+    ])
+    .then(([fileData, countsData]) => {
+        const container = document.getElementById('adminFileList');
+        let html = '';
 
-            // ---- 固定导航区域（始终显示） ----
-            let pathDisplay = currentPath || '根目录';
-            html += `
-                <div style="margin-bottom: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: #f9f9f9; padding: 8px 12px; border-radius: 6px;">
-                    <span style="font-size: 14px; color: #666;">📂 当前路径：<strong>${pathDisplay}</strong></span>
-                    <button class="btn btn-primary btn-sm" onclick="goRootAdmin()">🏠 返回根目录</button>
-                    ${currentPath ? `<button class="btn btn-primary btn-sm" onclick="goUpAdmin()">⬆ 返回上级</button>` : ''}
-                </div>
-            `;
+        // ---- 固定导航区域 ----
+        let pathDisplay = currentPath || '根目录';
+        html += `
+            <div style="margin-bottom: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: #f9f9f9; padding: 8px 12px; border-radius: 6px;">
+                <span style="font-size: 14px; color: #666;">📂 当前路径：<strong>${pathDisplay}</strong></span>
+                <button class="btn btn-primary btn-sm" onclick="goRootAdmin()">🏠 返回根目录</button>
+                ${currentPath ? `<button class="btn btn-primary btn-sm" onclick="goUpAdmin()">⬆ 返回上级</button>` : ''}
+            </div>
+        `;
 
-            // ---- 内容区域 ----
-            if (!data.length) {
-                html += '<div class="empty-state">📭 此目录为空</div>';
-                container.innerHTML = html;
-                return;
-            }
-
-            html += '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
-            html += '<tr><th style="text-align:left;padding:6px 8px;">名称</th><th style="text-align:left;padding:6px 8px;">大小</th><th style="text-align:left;padding:6px 8px;">修改时间</th><th style="text-align:left;padding:6px 8px;">操作</th></tr>';
-            data.forEach(item => {
-                const isDir = item.is_dir;
-                const icon = isDir ? '📁' : '📄';
-                const actions = isDir
-                    ? `
-                        <button class="btn btn-primary btn-sm" onclick="enterDirAdmin('${item.rel_path}')">进入</button>
-                        <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','move')">移动</button>
-                        <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','copy')">复制</button>
-                        <button class="btn btn-danger btn-sm" onclick="adminDelete('${item.rel_path}')">删除</button>
-                    `
-                    : `
-                        <button class="btn btn-primary btn-sm" onclick="adminDownload('${item.rel_path}')">下载</button>
-                        <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','move')">移动</button>
-                        <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','copy')">复制</button>
-                        <button class="btn btn-danger btn-sm" onclick="adminDelete('${item.rel_path}')">删除</button>
-                    `;
-                html += `<tr>
-                    <td style="padding:6px 8px;">${icon} ${esc(item.name)}</td>
-                    <td style="padding:6px 8px;">${isDir ? '-' : (item.size/1024).toFixed(1)+' KB'}</td>
-                    <td style="padding:6px 8px;">${esc(item.mtime)}</td>
-                    <td style="padding:6px 8px;">${actions}</td>
-                </tr>`;
-            });
-            html += '</table>';
+        // ---- 内容区域 ----
+        if (!fileData.length) {
+            html += '<div class="empty-state">📭 此目录为空</div>';
             container.innerHTML = html;
-        })
-        .catch(() => { document.getElementById('adminFileList').innerHTML = '<div class="empty-state">加载失败</div>'; });
+            return;
+        }
+
+        html += '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
+        html += `<tr>
+            <th style="text-align:left;padding:6px 8px;">名称</th>
+            <th style="text-align:left;padding:6px 8px;">大小</th>
+            <th style="text-align:left;padding:6px 8px;">修改时间</th>
+            <th style="text-align:left;padding:6px 8px;">下载次数</th>
+            <th style="text-align:left;padding:6px 8px;">操作</th>
+        </tr>`;
+
+        fileData.forEach(item => {
+            const isDir = item.is_dir;
+            const icon = isDir ? '📁' : '📄';
+            // 从 countsData 中获取该文件的下载次数，文件夹显示 '-'
+            const downloadCount = isDir ? '-' : (countsData[item.rel_path] || 0);
+            const actions = isDir
+                ? `
+                    <button class="btn btn-primary btn-sm" onclick="enterDirAdmin('${item.rel_path}')">进入</button>
+                    <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','move')">移动</button>
+                    <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','copy')">复制</button>
+                    <button class="btn btn-danger btn-sm" onclick="adminDelete('${item.rel_path}')">删除</button>
+                `
+                : `
+                    <button class="btn btn-primary btn-sm" onclick="adminDownload('${item.rel_path}')">下载</button>
+                    <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','move')">移动</button>
+                    <button class="btn btn-warning btn-sm" onclick="adminMoveCopy('${item.rel_path}','copy')">复制</button>
+                    <button class="btn btn-danger btn-sm" onclick="adminDelete('${item.rel_path}')">删除</button>
+                `;
+            html += `<tr>
+                <td style="padding:6px 8px;">${icon} ${esc(item.name)}</td>
+                <td style="padding:6px 8px;">${isDir ? '-' : (item.size/1024).toFixed(1)+' KB'}</td>
+                <td style="padding:6px 8px;">${esc(item.mtime)}</td>
+                <td style="padding:6px 8px;">${downloadCount}</td>
+                <td style="padding:6px 8px;">${actions}</td>
+            </tr>`;
+        });
+        html += '</table>';
+        container.innerHTML = html;
+    })
+    .catch(() => {
+        document.getElementById('adminFileList').innerHTML = '<div class="empty-state">加载失败</div>';
+    });
 }
 
 // 上传文件

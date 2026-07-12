@@ -16,6 +16,7 @@
       }
   }
 </script>
+  <script src="/static/key-manager.js"></script>
   <style>
     .copy-btn { background:#eee; border:1px solid #ddd; border-radius:3px; padding:2px 8px; font-size:11px; cursor:pointer; color:#555; margin-left:8px; vertical-align:middle; }
     .copy-btn:hover { background:#ddd; }
@@ -55,10 +56,30 @@
   <div id="login-panel" class="login">
     <h2>管理员验证</h2>
     <p>输入 RSA 私钥（用于解密旧留言）和 PQC 私钥（用于登录及解密 PQC 留言）</p>
-    <textarea id="privKey" placeholder="-----BEGIN RSA PRIVATE KEY-----..."></textarea>
-    <textarea id="pqcPrivKey" placeholder="Base64 编码的 Kyber-1024 私钥"></textarea>
-    <div id="err" class="err"></div>
-    <button onclick="verify()">验证并进入</button>
+<!-- 首次设置模式（无已存储密钥时显示） -->
+<div id="setup-mode" style="display:none">
+  <textarea id="privKey" placeholder="-----BEGIN RSA PRIVATE KEY-----..."></textarea>
+  <textarea id="pqcPrivKey" placeholder="Base64 编码的 Kyber-1024 私钥"></textarea>
+  <input type="password" id="setup-password" placeholder="设置管理密码（请牢记）">
+  <div id="err" class="err"></div>
+  <button onclick="verify()">验证并设置密码</button>
+</div>
+
+  <!-- 密码解锁模式（已有存储密钥时显示） -->
+  <div id="unlock-mode" style="display:none">
+    <p>已存储加密密钥，请输入管理密码解锁</p>
+    <input type="password" id="unlock-password" placeholder="管理密码">
+    <div id="err-unlock" class="err"></div>
+    <button onclick="unlock()">解锁并进入</button>
+    <hr>
+    <p style="font-size:13px;color:#555">或使用 PIN 快捷登录</p>
+    <input type="password" id="pin-input" placeholder="8位数字PIN" maxlength="8" autocomplete="off" style="font-size:18px;letter-spacing:4px;text-align:center">
+    <div id="pin-status" style="font-size:11px;color:#888;margin:4px 0"></div>
+    <hr>
+    <p style="font-size:12px;color:#888">
+    忘记密码？<a href="javascript:resetKeys()">重置（需重新粘贴私钥）</a>
+    </p>
+  </div>
   </div>
 
   <div id="msg-panel" style="display:none">
@@ -71,6 +92,10 @@
     </div>
     <h2>信件管理
   <a href="javascript:logout()" style="font-size:14px">[退出登录]</a>
+  <span id="pin-setup-area" style="display:none;margin-left:10px">
+    <button onclick="setupPinPrompt()" style="background:#FF9800;color:#fff;border:none;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:13px" id="pin-setup-btn">🔢 设置PIN</button>
+    <button onclick="disablePin()" style="background:#9E9E9E;color:#fff;border:none;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:13px;display:none" id="pin-disable-btn">关闭PIN</button>
+  </span>
   <a href="/admin/qun" style="font-size:14px;margin-left:10px;color:#4CAF50;text-decoration:none;border:1px solid #4CAF50;padding:3px 10px;border-radius:4px">💬 群聊管理</a>
   <a href="/admin/vote" style="font-size:14px;margin-left:10px;color:#673AB7;text-decoration:none;border:1px solid #673AB7;padding:3px 10px;border-radius:4px">🗳️ 投票管理</a>
   <a href="/admin/ip" style="font-size:14px;margin-left:10px;color:#009688;text-decoration:none;border:1px solid #009688;padding:3px 10px;border-radius:4px">🌐 IP记录</a>
@@ -174,6 +199,9 @@
   try { jse = new JSEncrypt(); } catch(e) {}
   let dataJse = null;  // 独立的数据解密实例
   let dataKeyPromptShown = false;
+  // PIN 快捷登录
+  const PIN_BLOB_KEY = 'pin_encrypted_key';
+  let pinCheckDone = false;
 
   // 工具函数：获取 CSRF Token
   function getCsrfToken() {
@@ -449,35 +477,85 @@ async function encryptAES(plaintext, keyBytes) {
     return res;
   };
 
-  async function init() {
-    try {
-      csrfToken = (await fetch('/api/csrf', {credentials:'same-origin'}).then(r=>r.json())).token;
-      const status = await fetch('/api/admin/status', {credentials:'same-origin'}).then(r=>r.json());
-      if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
-        const savedKey = sessionStorage.getItem('admin_priv_key');
-        if (savedKey) {
-          jse.setPrivateKey(savedKey);
-          // ★ 恢复 PQC 私钥
-          const savedPQCKey = sessionStorage.getItem('admin_pqc_priv_key');
-          if (savedPQCKey) {
-            try {
-              pqcPrivateKeyBytes = Uint8Array.from(atob(savedPQCKey), c => c.charCodeAt(0));
-            } catch(e) { console.warn('恢复PQC私钥失败', e); }
+async function init() {
+      try {
+        csrfToken = (await fetch('/api/csrf', {credentials:'same-origin'}).then(r=>r.json())).token;
+        const status = await fetch('/api/admin/status', {credentials:'same-origin'}).then(r=>r.json());
+        if (status.logged_in) {
+          const workerReady = (typeof KeyManager !== 'undefined') && await KeyManager.isWorkerReady();
+          if (workerReady) {
+          const keys = await KeyManager.init();
+            if (keys) {
+              rsaPrivateKeyPem = keys.rsaKey;
+              jse.setPrivateKey(keys.rsaKey);
+              try {
+                pqcPrivateKeyBytes = Uint8Array.from(atob(keys.pqcKey), c => c.charCodeAt(0));
+              } catch(e) { console.warn('恢复PQC私钥失败', e); }
+              if (keys.dataKey) {
+                dataJse = new JSEncrypt();
+                dataJse.setPrivateKey(keys.dataKey);
+              }
+              // ★ 写入 sessionStorage 供子页面回退使用
+              sessionStorage.setItem('admin_has_key', 'true');
+              sessionStorage.setItem('admin_priv_key', keys.rsaKey);
+              sessionStorage.setItem('admin_pqc_priv_key', keys.pqcKey);
+              if (keys.dataKey) {
+                sessionStorage.setItem('admin_data_key', keys.dataKey);
+              }
+              // ★ 存储 derived key 到 sessionStorage，供 SharedWorker 丢失时恢复
+              if (typeof KeyManager !== 'undefined') {
+                const wk = await KeyManager.getWorkerKey();
+                if (wk) sessionStorage.setItem('admin_worker_key', wk);
+              }
+              showAdmin();
+            } else {
+              await KeyManager.destroy();
+              await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
+              location.reload();
+            }
+          } else if (typeof KeyManager !== 'undefined' && KeyManager.hasStoredKeys()) {
+              // 尝试从 sessionStorage 恢复（不再强制登出）
+              const rsaKey = sessionStorage.getItem('admin_priv_key');
+              const pqcKey = sessionStorage.getItem('admin_pqc_priv_key');
+              if (rsaKey && pqcKey) {
+                  rsaPrivateKeyPem = rsaKey;
+                  jse.setPrivateKey(rsaKey);
+                  try {
+                      pqcPrivateKeyBytes = Uint8Array.from(atob(pqcKey), c => c.charCodeAt(0));
+                  } catch(e) {}
+                  // ★ 恢复 SharedWorker 中的 derived key
+                  const wk = sessionStorage.getItem('admin_worker_key');
+                  if (wk && typeof KeyManager !== 'undefined') {
+                    await KeyManager.restoreWorkerKey(wk);
+                  }
+                  showAdmin();
+                  return;
+              }
+              // 如果 sessionStorage 也没有，才走登出流程
+              await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
+              sessionStorage.clear();
+              location.reload();
           }
-          showAdmin();
+        } else {
+          const chal = await fetch('/api/admin/challenge', {credentials:'same-origin'}).then(r=>r.json());
+          if (chal.ciphertext) {
+            window.challenge = chal.challenge;
+            document.getElementById('login-panel').style.display = 'block';
+            if (typeof KeyManager !== 'undefined' && KeyManager.hasStoredKeys()) {
+              document.getElementById('unlock-mode').style.display = 'block';
+              document.getElementById('setup-mode').style.display = 'none';
+              checkPinStatus();
+            } else {
+              document.getElementById('setup-mode').style.display = 'block';
+              document.getElementById('unlock-mode').style.display = 'none';
+              }
         }
-        else { await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}}); sessionStorage.clear(); location.reload(); }
-      } else if (status.logged_in) {
-        await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}}); sessionStorage.clear(); location.reload();
-      } else {
-        const chal = await fetch('/api/admin/challenge', {credentials:'same-origin'}).then(r=>r.json());
-        if (chal.challenge && chal.challenge !== 'ERROR') { window.challenge = chal.challenge; document.getElementById('login-panel').style.display = 'block'; }
-      }
-    } catch(e) { console.error('Init:', e); }
-  }
+        }
+      } catch(e) { console.error('Init:', e); }
+    }
   init();
 
-  async function verify() {
+async function verify() {
     const rsaKey = document.getElementById('privKey').value.trim();
     const pqcKeyB64 = document.getElementById('pqcPrivKey').value.trim();
     if (!rsaKey || !pqcKeyB64) { alert('请同时输入RSA私钥和PQC私钥'); return; }
@@ -498,7 +576,15 @@ async function encryptAES(plaintext, keyBytes) {
 
     try {
         const chalRes = await fetch('/api/admin/challenge', { credentials: 'same-origin' });
-        if (!chalRes.ok) throw new Error('获取挑战失败');
+        if (!chalRes.ok) {
+            const errData = await chalRes.json().catch(() => ({}));
+            if (errData.error === '已登录') {
+                await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token': csrfToken}});
+                location.reload();
+                return;
+            }
+            throw new Error('获取挑战失败');
+        }
         const chal = await chalRes.json();
         if (!chal.ciphertext) {
             document.getElementById('err').textContent = '挑战响应缺少 ciphertext';
@@ -514,13 +600,11 @@ async function encryptAES(plaintext, keyBytes) {
         console.log('ivBytes 长度:', ivBytes.length);
         console.log('encNonce 长度:', encNonce.length);
 
-        // 加载 Kyber 库
         if (!ml_kem1024) {
             const mod = await import('@noble/post-quantum/ml-kem');
             ml_kem1024 = mod.ml_kem1024;
         }
 
-        // 解封
         const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
         console.log('shared 长度:', shared.length);
 
@@ -532,7 +616,6 @@ async function encryptAES(plaintext, keyBytes) {
         const sharedKey = await crypto.subtle.digest('SHA-256', shared);
         const aesKey = new Uint8Array(sharedKey);
 
-        // 解密 nonce
         try {
             const decrypted = await crypto.subtle.decrypt(
                 { name: 'AES-CBC', iv: ivBytes },
@@ -543,7 +626,6 @@ async function encryptAES(plaintext, keyBytes) {
             console.log('nonce 长度:', nonceBytes.length);
             const nonceHex = Array.from(nonceBytes).map(b => b.toString(16).padStart(2,'0')).join('');
 
-            // 提交验证
             const verifyRes = await fetch('/api/admin/verify', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
@@ -554,7 +636,23 @@ async function encryptAES(plaintext, keyBytes) {
                 document.getElementById('err').textContent = errText || '验证失败';
                 return;
             }
-            // 登录成功
+
+            // ★ 首次设置：加密并存储密钥
+            if (typeof KeyManager !== 'undefined' && !KeyManager.hasStoredKeys()) {
+                const password = document.getElementById('setup-password').value;
+                if (!password) {
+                    document.getElementById('err').textContent = '请输入密码';
+                    return;
+                }
+                try {
+                    await KeyManager.setup(rsaKey, pqcKeyB64, password);
+                } catch(e) {
+                    await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token': csrfToken}});
+                    document.getElementById('err').textContent = '密钥加密存储失败: ' + e.message;
+                    return;
+                }
+            }
+
             sessionStorage.setItem('admin_has_key', 'true');
             sessionStorage.setItem('admin_priv_key', rsaKey);
             sessionStorage.setItem('admin_pqc_priv_key', pqcKeyB64);
@@ -569,10 +667,27 @@ async function encryptAES(plaintext, keyBytes) {
     }
 }
 
-  function showAdmin(){
+function showAdmin(){
+    if (!rsaPrivateKeyPem || !jse.getPrivateKey()) {
+        if (typeof KeyManager !== 'undefined') {
+            KeyManager.init().then(function(keys) {
+                if (keys) {
+                    rsaPrivateKeyPem = keys.rsaKey;
+                    jse.setPrivateKey(keys.rsaKey);
+                    try { pqcPrivateKeyBytes = Uint8Array.from(atob(keys.pqcKey), c => c.charCodeAt(0)); } catch(e) {}
+                    if (keys.dataKey) { dataJse = new JSEncrypt(); dataJse.setPrivateKey(keys.dataKey); }
+                    continueShowAdmin();
+                }
+            });
+            return;
+        }
+    }
+    continueShowAdmin();
+}
+function continueShowAdmin() {
     document.getElementById('login-panel').style.display='none';
     document.getElementById('msg-panel').style.display='block';
-    // 恢复独立数据私钥
+    document.getElementById('pin-setup-area').style.display='inline';
     const savedDataKey = sessionStorage.getItem('admin_data_key');
     if (savedDataKey) {
       dataJse = new JSEncrypt();
@@ -584,7 +699,8 @@ async function encryptAES(plaintext, keyBytes) {
     loadWL();
     loadIPSalt();
     loadIPEncryptionMode();
-  }
+    refreshPinSetupUI();
+}
 
 async function render() {
     const list = document.getElementById('list');
@@ -845,7 +961,15 @@ async function render() {
       }).then(r=>r.ok?(alert('已发送'),closeReply(),location.reload()):alert('失败'));
   }
   function updateFoot(){ authFetch('/api/footer',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'content='+encodeURIComponent(document.getElementById('footInput').value)}).then(()=>{alert('已更新');location.reload();}); }
-  function logout(){ sessionStorage.removeItem('admin_has_key'); sessionStorage.removeItem('admin_priv_key'); authFetch('/api/admin/logout').then(()=>location.reload()); }
+  function logout(){
+    if (typeof KeyManager !== 'undefined') KeyManager.destroy();
+    sessionStorage.removeItem('admin_has_key');
+    sessionStorage.removeItem('admin_priv_key');
+    sessionStorage.removeItem('admin_pqc_priv_key');
+    sessionStorage.removeItem('admin_data_key');
+    sessionStorage.removeItem('admin_worker_key');
+    authFetch('/api/admin/logout').then(()=>location.reload());
+}
 
   // ── 导出数据 ──
   async function exportData() {
@@ -1104,6 +1228,14 @@ async function exportPlainData(categories) {
         for (const { key, path } of configFiles) {
             const content = await getFileContent(path);
             if (content !== null) result.configs[key] = content.trim();
+        }
+
+        // ---- PIN 数据（直接复制，因为是哈希不可逆） ----
+        const pinDataRaw = await getFileContent('admin_pin.json');
+        if (pinDataRaw) {
+            try {
+                result.pin_data = JSON.parse(pinDataRaw);
+            } catch(e) {}
         }
 
         // ---- 黑白名单 ----
@@ -2045,6 +2177,11 @@ async function buildZipFromPlainData(data, statusDiv) {
             }
         }
 
+        // ---- PIN 数据（直接复制，哈希不可逆） ----
+        if (data.pin_data && typeof data.pin_data === 'object') {
+            addFile('admin_pin.json', JSON.stringify(data.pin_data));
+        }
+
         // ---- 黑白名单 ----
         const writeList = async (list, filename) => {
             if (Array.isArray(list)) {
@@ -2117,7 +2254,9 @@ async function buildZipFromPlainData(data, statusDiv) {
 
                     // 用新共享密钥加密用户 AES 密钥
                     const encAESKeyResult = await encryptAES(rawAES, aesKeyShared);
-
+                    // 计算用户 AES 密钥的 SHA-256 摘要
+                    const userAESKeyBytes = new TextEncoder().encode(rawAES);
+                    const userAESKeyDigest = await crypto.subtle.digest('SHA-256', userAESKeyBytes);
                     // 用用户 AES 密钥加密内容
                     const contentPlain = `${msg.nick} | ${msg.content}`;
                     const encContentResult = await encryptAES(contentPlain, new Uint8Array(userAESKeyDigest));
@@ -2326,8 +2465,6 @@ async function buildZipFromPlainData(data, statusDiv) {
                         const ivSharedB64 = CryptoJS.enc.Base64.stringify(ivShared).replace(/[\r\n\s]+/g, '');
                         const ivContentB64 = CryptoJS.enc.Base64.stringify(ivContent).replace(/[\r\n\s]+/g, '');
 
-                        // 组装 11 行 v3 文件（与服务端 submit_vote 一致）
-                        // 组装 v3 私聊文件（与服务端 chat_send 格式一致）
                         const fileContent = [
                             `v3|${rsaKeyEnc}|${aesIvB64}|${time}`,
                             aesMsg,
@@ -2340,6 +2477,17 @@ async function buildZipFromPlainData(data, statusDiv) {
                             ivContentB64,
                             encAESKeyStr,
                             encContentStr
+                        ].join('\n');
+                        addFile(`${dir}/投票_${voteSeq}.txt`, fileContent);
+                    } else {
+                        // ---------- v2 RSA 重新加密 ----------
+                        const fileContent = [
+                            `v2|${rsaKeyEnc}|${aesIvB64}`,
+                            aesMsg,
+                            serverEnc,
+                            editToken,
+                            keyHash,
+                            remarkLine
                         ].join('\n');
                         addFile(`${dir}/投票_${voteSeq}.txt`, fileContent);
                     }
@@ -2929,7 +3077,10 @@ function getSelectedCategories() {
 
 function filterDataByCategories(data, categories) {
   var filtered = { configs: {}, blacklist: [], whitelist: [], captcha_config: null, captcha_verified: null };
-  if (categories.configs) filtered.configs = data.configs || {};
+  if (categories.configs) {
+    filtered.configs = data.configs || {};
+    filtered.pin_data = data.pin_data || null;
+  }
   if (categories.messages) filtered.messages = data.messages || [];
   if (categories.votes_config && data.votes) {
     filtered.votes = {};
@@ -3068,7 +3219,10 @@ function startSelectiveExport() {
 function filterExportDataByCategories(data, categories) {
   var filtered = { configs: {}, blacklist: [], whitelist: [], captcha_config: null, captcha_verified: null };
 
-  if (categories.configs) filtered.configs = data.configs || {};
+  if (categories.configs) {
+    filtered.configs = data.configs || {};
+    filtered.pin_data = data.pin_data || null;
+  }
 
   if (categories.messages || categories.message_replies) {
     filtered.messages = (data.messages || []).map(function(m) {
@@ -3106,6 +3260,493 @@ function filterExportDataByCategories(data, categories) {
   }
 
   return filtered;
+}
+async function unlock() {
+    const password = document.getElementById('unlock-password').value;
+    if (!password) {
+        document.getElementById('err-unlock').textContent = '请输入密码';
+        return;
+    }
+    document.getElementById('err-unlock').textContent = '';
+    try {
+        const keys = await KeyManager.unlock(password);
+        if (!keys) {
+            document.getElementById('err-unlock').textContent = '密码错误';
+            return;
+        }
+        rsaPrivateKeyPem = keys.rsaKey;
+        jse.setPrivateKey(keys.rsaKey);
+        try {
+            pqcPrivateKeyBytes = Uint8Array.from(atob(keys.pqcKey), c => c.charCodeAt(0));
+        } catch(e) {}
+        if (keys.dataKey) {
+            dataJse = new JSEncrypt();
+            dataJse.setPrivateKey(keys.dataKey);
+        }
+
+        // ★ 执行 PQC 挑战验证以建立后端 session
+        const chalRes = await fetch('/api/admin/challenge', { credentials: 'same-origin' });
+        if (!chalRes.ok) {
+            const errData = await chalRes.json().catch(() => ({}));
+            if (errData.error === '已登录') {
+                await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token': csrfToken}});
+                location.reload();
+                return;
+            }
+            throw new Error('获取挑战失败');
+        }
+        const chal = await chalRes.json();
+        if (!chal.ciphertext) { document.getElementById('err-unlock').textContent = '挑战响应异常'; return; }
+
+        if (!ml_kem1024) {
+            const mod = await import('@noble/post-quantum/ml-kem');
+            ml_kem1024 = mod.ml_kem1024;
+        }
+        const ct = Uint8Array.from(atob(chal.ciphertext), c => c.charCodeAt(0));
+        const ivBytes = Uint8Array.from(atob(chal.iv), c => c.charCodeAt(0));
+        const encNonce = Uint8Array.from(atob(chal.enc_nonce), c => c.charCodeAt(0));
+        const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+        const sharedKey = await crypto.subtle.digest('SHA-256', shared);
+        const aesKey = new Uint8Array(sharedKey);
+        const decrypted = await crypto.subtle.decrypt(
+            { name: 'AES-CBC', iv: ivBytes },
+            await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['decrypt']),
+            encNonce
+        );
+        const nonceBytes = new Uint8Array(decrypted);
+        const nonceHex = Array.from(nonceBytes).map(b => b.toString(16).padStart(2,'0')).join('');
+
+        const verifyRes = await fetch('/api/admin/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ nonce: nonceHex })
+        });
+        if (!verifyRes.ok) { document.getElementById('err-unlock').textContent = '验证失败'; return; }
+
+        sessionStorage.setItem('admin_has_key', 'true');
+        sessionStorage.setItem('admin_priv_key', rsaPrivateKeyPem);
+        sessionStorage.setItem('admin_pqc_priv_key', keys.pqcKey);
+        if (keys.dataKey) { sessionStorage.setItem('admin_data_key', keys.dataKey); }
+        // ★ 存储 derived key 供 SharedWorker 恢复
+        if (typeof KeyManager !== 'undefined') {
+            const wk = await KeyManager.getWorkerKey();
+            if (wk) sessionStorage.setItem('admin_worker_key', wk);
+        }
+
+        // ★ 刷新 CSRF token（session 重建后 token 可能已变）
+        csrfToken = (await fetch('/api/csrf', {credentials:'same-origin'}).then(r=>r.json())).token;
+
+        showAdmin();
+    } catch(e) {
+        document.getElementById('err-unlock').textContent = '解锁失败: ' + e.message;
+    }
+}
+
+// ═══════════ PIN 快捷登录 ═══════════
+
+async function checkPinStatus() {
+    if (pinCheckDone) return;
+    pinCheckDone = true;
+    try {
+        const res = await fetch('/api/admin/pin/status');
+        const data = await res.json();
+        const pinInput = document.getElementById('pin-input');
+        const pinStatus = document.getElementById('pin-status');
+        if (!pinInput || !pinStatus) return;
+
+        if (!data.has_pin) {
+            pinInput.disabled = true;
+            pinInput.placeholder = 'PIN 未设置';
+            pinStatus.textContent = '（请先使用长密码登录后设置PIN）';
+            pinStatus.style.color = '#888';
+            return;
+        }
+        // 查询锁定状态（通过尝试获取更多信息）
+        pinInput.disabled = false;
+        pinInput.placeholder = '8位数字PIN';
+        pinInput.focus();
+        pinStatus.textContent = '';
+        pinStatus.style.color = '#888';
+
+        pinInput.addEventListener('input', function() {
+            const val = pinInput.value.replace(/\D/g, '');
+            pinInput.value = val;
+            if (val.length === 8) {
+                submitPinLogin(val);
+            }
+        });
+    } catch(e) { console.warn('PIN状态检查失败', e); }
+}
+
+async function submitPinLogin(pin) {
+    const pinInput = document.getElementById('pin-input');
+    const pinStatus = document.getElementById('pin-status');
+    const errUnlock = document.getElementById('err-unlock');
+    pinInput.disabled = true;
+    pinStatus.textContent = '⏳ 验证中...';
+    pinStatus.style.color = '#FF9800';
+    errUnlock.textContent = '';
+
+    try {
+        const res = await fetch('/api/admin/pin/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ pin: pin })
+        });
+        const data = await res.json();
+
+        if (data.ok && data.token) {
+            // 解密存储的 derived key
+            const blobStr = localStorage.getItem(PIN_BLOB_KEY);
+            if (!blobStr) {
+                pinStatus.textContent = '❌ 缺少加密数据，请使用长密码登录后重新设置PIN';
+                pinStatus.style.color = '#f44336';
+                pinInput.disabled = false;
+                pinInput.value = '';
+                return;
+            }
+            try {
+                const blob = JSON.parse(blobStr);
+                const tokenBytes = new TextEncoder().encode(data.token);
+                const tokenHash = await crypto.subtle.digest('SHA-256', tokenBytes);
+                const aesKey = await crypto.subtle.importKey('raw', tokenHash, { name: 'AES-GCM' }, false, ['decrypt']);
+                const iv = Uint8Array.from(atob(blob.iv), c => c.charCodeAt(0));
+                const ct = Uint8Array.from(atob(blob.ciphertext), c => c.charCodeAt(0));
+                const decrypted = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: iv },
+                    aesKey,
+                    ct
+                );
+                const derivedKeyB64 = new TextDecoder().decode(decrypted);
+
+                // 设置 SharedWorker 的 key
+                const port = (function() {
+                    try {
+                        const worker = new SharedWorker('/static/key-worker.js');
+                        const p = worker.port;
+                        p.start();
+                        return p;
+                    } catch(e) { return null; }
+                })();
+                if (!port) throw new Error('SharedWorker 不可用');
+
+                await new Promise((resolve, reject) => {
+                    const msgId = Date.now().toString(36);
+                    const handler = (ev) => {
+                        if (ev.data.messageId === msgId) {
+                            port.removeEventListener('message', handler);
+                            if (ev.data.ok) resolve();
+                            else reject(new Error('set-key failed'));
+                        }
+                    };
+                    port.addEventListener('message', handler);
+                    port.start();
+                    port.postMessage({ type: 'set-key', key: derivedKeyB64, messageId: msgId });
+                });
+
+                // 正常初始化
+                const keys = await KeyManager.init();
+                if (keys) {
+                    rsaPrivateKeyPem = keys.rsaKey;
+                    jse.setPrivateKey(keys.rsaKey);
+                    try { pqcPrivateKeyBytes = Uint8Array.from(atob(keys.pqcKey), c => c.charCodeAt(0)); } catch(e) {}
+                    if (keys.dataKey) { dataJse = new JSEncrypt(); dataJse.setPrivateKey(keys.dataKey); }
+                    pinInput.value = '';
+                    pinStatus.textContent = '';
+                    showAdmin();
+                } else {
+                    throw new Error('密钥解密失败');
+                }
+            } catch(e) {
+                console.error('PIN blob 解密失败', e);
+                pinStatus.textContent = '❌ 解密失败，请使用长密码登录后重新设置PIN';
+                pinStatus.style.color = '#f44336';
+                pinInput.disabled = false;
+                pinInput.value = '';
+            }
+        } else if (data.locked) {
+            pinStatus.textContent = '🔒 PIN 已锁定（尝试次数耗尽）';
+            pinStatus.style.color = '#f44336';
+            pinInput.disabled = true;
+            pinInput.value = '';
+        } else {
+            pinStatus.textContent = '❌ ' + (data.error || 'PIN 错误');
+            pinStatus.style.color = '#f44336';
+            if (data.remaining !== undefined) {
+                pinStatus.textContent += '（还剩 ' + data.remaining + ' 次）';
+            }
+            pinInput.disabled = false;
+            pinInput.value = '';
+        }
+    } catch(e) {
+        pinStatus.textContent = '❌ 网络错误';
+        pinStatus.style.color = '#f44336';
+        pinInput.disabled = false;
+        pinInput.value = '';
+    }
+}
+
+async function setupPinPrompt() {
+    const pin = prompt('请输入 8 位数字 PIN（用于快捷登录）：');
+    if (!pin) return;
+    if (!/^\d{8}$/.test(pin)) { alert('PIN 必须是 8 位数字'); return; }
+    const pinConfirm = prompt('请再次输入 PIN 确认：');
+    if (pin !== pinConfirm) { alert('两次输入不一致'); return; }
+
+    try {
+        // 获取当前 derived key
+        const derivedKeyB64 = await (async () => {
+            try {
+                const worker = new SharedWorker('/static/key-worker.js');
+                const port = worker.port;
+                port.start();
+                return await new Promise((resolve, reject) => {
+                    const msgId = Date.now().toString(36);
+                    const handler = (ev) => {
+                        if (ev.data.messageId === msgId) {
+                            port.removeEventListener('message', handler);
+                            resolve(ev.data.key);
+                        }
+                    };
+                    port.addEventListener('message', handler);
+                    port.start();
+                    port.postMessage({ type: 'get-key', messageId: msgId });
+                });
+            } catch(e) { return null; }
+        })();
+        if (!derivedKeyB64) { alert('无法获取密钥，请重新登录'); return; }
+
+        const res = await authFetch('/api/admin/pin/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin: pin })
+        });
+        const data = await res.json();
+        if (!data.ok || !data.token) { alert('设置失败: ' + (data.error || '未知错误')); return; }
+
+        // 用 token 加密 derived key 并存到 localStorage
+        const tokenBytes = new TextEncoder().encode(data.token);
+        const tokenHash = await crypto.subtle.digest('SHA-256', tokenBytes);
+        const aesKey = await crypto.subtle.importKey('raw', tokenHash, { name: 'AES-GCM' }, false, ['encrypt']);
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const ct = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv: iv },
+            aesKey,
+            new TextEncoder().encode(derivedKeyB64)
+        );
+        localStorage.setItem(PIN_BLOB_KEY, JSON.stringify({
+            iv: btoa(String.fromCharCode(...iv)),
+            ciphertext: btoa(String.fromCharCode(...new Uint8Array(ct)))
+        }));
+
+        alert('✅ PIN 设置成功！');
+        refreshPinSetupUI();
+    } catch(e) {
+        alert('设置失败: ' + e.message);
+    }
+}
+
+async function disablePin() {
+    if (!confirm('确定关闭 PIN 快捷登录？')) return;
+    try {
+        const res = await authFetch('/api/admin/pin/disable', { method: 'POST' });
+        const data = await res.json();
+        if (data.ok) {
+            localStorage.removeItem(PIN_BLOB_KEY);
+            alert('✅ PIN 已关闭');
+            refreshPinSetupUI();
+        } else {
+            alert('关闭失败: ' + (data.error || ''));
+        }
+    } catch(e) { alert('关闭失败: ' + e.message); }
+}
+
+async function refreshPinSetupUI() {
+    try {
+        const res = await fetch('/api/admin/pin/status');
+        const data = await res.json();
+        const setupBtn = document.getElementById('pin-setup-btn');
+        const disableBtn = document.getElementById('pin-disable-btn');
+        if (!setupBtn || !disableBtn) return;
+        if (data.has_pin) {
+            setupBtn.textContent = '🔢 修改PIN';
+            disableBtn.style.display = 'inline-block';
+        } else {
+            setupBtn.textContent = '🔢 设置PIN';
+            disableBtn.style.display = 'none';
+        }
+    } catch(e) {}
+}
+
+async function resetPinViaPassword() {
+    const password = document.getElementById('unlock-password').value;
+    if (!password) {
+        document.getElementById('err-unlock').textContent = '请先输入长密码';
+        return;
+    }
+    document.getElementById('err-unlock').textContent = '';
+    try {
+        const keys = await KeyManager.unlock(password);
+        if (!keys) {
+            document.getElementById('err-unlock').textContent = '长密码错误';
+            return;
+        }
+        rsaPrivateKeyPem = keys.rsaKey;
+        jse.setPrivateKey(keys.rsaKey);
+        try {
+            pqcPrivateKeyBytes = Uint8Array.from(atob(keys.pqcKey), c => c.charCodeAt(0));
+        } catch(e) {}
+
+        // 执行 PQC 挑战验证
+        const chalRes = await fetch('/api/admin/challenge', { credentials: 'same-origin' });
+        if (!chalRes.ok) {
+            const errData = await chalRes.json().catch(() => ({}));
+            if (errData.error === '已登录') {
+                await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token': csrfToken}});
+                location.reload();
+                return;
+            }
+            throw new Error('获取挑战失败');
+        }
+        const chal = await chalRes.json();
+        if (!chal.ciphertext) { document.getElementById('err-unlock').textContent = '挑战响应异常'; return; }
+
+        if (!ml_kem1024) {
+            const mod = await import('@noble/post-quantum/ml-kem');
+            ml_kem1024 = mod.ml_kem1024;
+        }
+        const ct = Uint8Array.from(atob(chal.ciphertext), c => c.charCodeAt(0));
+        const ivBytes = Uint8Array.from(atob(chal.iv), c => c.charCodeAt(0));
+        const encNonce = Uint8Array.from(atob(chal.enc_nonce), c => c.charCodeAt(0));
+        const shared = ml_kem1024.decapsulate(ct, pqcPrivateKeyBytes);
+        const sharedKey = await crypto.subtle.digest('SHA-256', shared);
+        const aesKey = new Uint8Array(sharedKey);
+        const decrypted = await crypto.subtle.decrypt(
+            { name: 'AES-CBC', iv: ivBytes },
+            await crypto.subtle.importKey('raw', aesKey, { name: 'AES-CBC' }, false, ['decrypt']),
+            encNonce
+        );
+        const nonceBytes = new Uint8Array(decrypted);
+        const nonceHex = Array.from(nonceBytes).map(b => b.toString(16).padStart(2,'0')).join('');
+
+        const verifyRes = await fetch('/api/admin/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ nonce: nonceHex })
+        });
+        if (!verifyRes.ok) { document.getElementById('err-unlock').textContent = '验证失败'; return; }
+
+        sessionStorage.setItem('admin_has_key', 'true');
+        sessionStorage.setItem('admin_priv_key', rsaPrivateKeyPem);
+        sessionStorage.setItem('admin_pqc_priv_key', keys.pqcKey);
+        if (keys.dataKey) { dataJse = new JSEncrypt(); dataJse.setPrivateKey(keys.dataKey); }
+
+        // 现在可以设置新 PIN
+        const newPin = prompt('PIN 已重置！请输入新的 8 位数字 PIN：');
+        if (!newPin || !/^\d{8}$/.test(newPin)) { showAdmin(); return; }
+        const pinConfirm = prompt('请再次输入 PIN 确认：');
+        if (newPin !== pinConfirm) { alert('两次输入不一致，PIN 未更改'); showAdmin(); return; }
+
+        const pinRes = await authFetch('/api/admin/pin/setup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin: newPin })
+        });
+        const pinData = await pinRes.json();
+        if (pinData.ok && pinData.token) {
+            // 加密 derived key
+            const derivedKeyB64 = await (async () => {
+                try {
+                    const worker = new SharedWorker('/static/key-worker.js');
+                    const port = worker.port;
+                    port.start();
+                    return await new Promise((resolve) => {
+                        const msgId = Date.now().toString(36);
+                        const handler = (ev) => {
+                            if (ev.data.messageId === msgId) {
+                                port.removeEventListener('message', handler);
+                                resolve(ev.data.key);
+                            }
+                        };
+                        port.addEventListener('message', handler);
+                        port.start();
+                        port.postMessage({ type: 'get-key', messageId: msgId });
+                    });
+                } catch(e) { return null; }
+            })();
+            if (derivedKeyB64) {
+                const tokenBytes = new TextEncoder().encode(pinData.token);
+                const tokenHash = await crypto.subtle.digest('SHA-256', tokenBytes);
+                const aesKey2 = await crypto.subtle.importKey('raw', tokenHash, { name: 'AES-GCM' }, false, ['encrypt']);
+                const iv2 = crypto.getRandomValues(new Uint8Array(12));
+                const ct2 = await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: iv2 },
+                    aesKey2,
+                    new TextEncoder().encode(derivedKeyB64)
+                );
+                localStorage.setItem(PIN_BLOB_KEY, JSON.stringify({
+                    iv: btoa(String.fromCharCode(...iv2)),
+                    ciphertext: btoa(String.fromCharCode(...new Uint8Array(ct2)))
+                }));
+            }
+            alert('✅ PIN 已重新设置！');
+        }
+        showAdmin();
+    } catch(e) {
+        document.getElementById('err-unlock').textContent = 'PIN重置失败: ' + e.message;
+    }
+}
+
+async function rotatePQCKey() {
+    const randomStr = generateRandomString(6);
+    const expected = '我已下载明文数据，确定重置PQC密钥' + randomStr;
+    const userInput = prompt(
+        '⚠️ 即将生成新 PQC 密钥对并替换服务器公钥！\n\n' +
+        '此操作将导致所有用旧公钥加密的数据无法解密。\n' +
+        '请确保您已通过「导出明文数据」功能备份了所有数据。\n\n' +
+        '请输入以下确认短语以继续：\n\n' +
+        '"' + expected + '"'
+    );
+    if ((userInput || '').trim() !== expected) { alert('❌ 确认短语输入错误，操作已取消。'); return; }
+
+    try {
+        const mod = await import('@noble/post-quantum/ml-kem');
+        const ml_kem = mod.ml_kem1024;
+        const seed = crypto.getRandomValues(new Uint8Array(64));
+        const { publicKey, privateKey } = ml_kem.keygen(seed);
+        const pubB64 = btoa(String.fromCharCode(...publicKey));
+        const privB64 = btoa(String.fromCharCode(...privateKey));
+
+        const blob = new Blob([privB64], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'PQC.txt';
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a); URL.revokeObjectURL(url);
+        alert('✅ PQC 私钥已下载为 PQC.txt，请妥善保管！');
+
+        if (!confirm('公钥将上传至服务器，确认继续？')) return;
+        const res = await authFetch('/api/admin/rotate-pqc-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ public_key: pubB64 })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            alert('✅ PQC 公钥已更新！');
+            if (confirm('建议重新登录，是否刷新？')) location.reload();
+        } else {
+            alert('❌ 上传失败：' + (data.error || '未知错误'));
+        }
+    } catch(e) {
+        alert('❌ 生成或上传失败：' + e.message);
+    }
+}
+
+function resetKeys() {
+    if (!confirm('确定重置？localStorage 中的加密密钥将被清除，你需要重新粘贴 RSA 和 PQC 私钥。')) return;
+    if (typeof KeyManager !== 'undefined') KeyManager.destroy();
+    location.reload();
 }
 </script>
 </body>

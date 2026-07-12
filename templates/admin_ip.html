@@ -11,6 +11,7 @@
       }
   }
   </script>
+  <script src="/static/key-manager.js"></script>
   <style>
     body{font-family:sans-serif;max-width:1000px;margin:40px auto;padding:20px;color:#333}
     h2{margin-bottom:4px}
@@ -92,6 +93,59 @@ var esc = function(s) {
 var csrfToken = '';
 var adminJse = null;
 
+async function loadAdminKeys() {
+    // 1. 优先尝试 KeyManager（SharedWorker）
+    if (typeof KeyManager !== 'undefined') {
+        try {
+            const keys = await KeyManager.init();
+            if (keys) {
+                adminJse = new JSEncrypt();
+                adminJse.setPrivateKey(keys.rsaKey);
+                const binary = atob(keys.pqcKey);
+                adminPqcPrivBytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                    adminPqcPrivBytes[i] = binary.charCodeAt(i);
+                }
+                // 存入 sessionStorage 备用
+                sessionStorage.setItem('admin_priv_key', keys.rsaKey);
+                sessionStorage.setItem('admin_pqc_priv_key', keys.pqcKey);
+                if (keys.dataKey) {
+                    sessionStorage.setItem('admin_data_key', keys.dataKey);
+                    adminDataJse = new JSEncrypt();
+                    adminDataJse.setPrivateKey(keys.dataKey);
+                }
+                return true;
+            }
+        } catch (e) {
+            console.warn('KeyManager.init() 失败，尝试从 sessionStorage 恢复', e);
+        }
+    }
+
+    // 2. 回退：从 sessionStorage 读取明文私钥
+    const rsaKey = sessionStorage.getItem('admin_priv_key');
+    const pqcKey = sessionStorage.getItem('admin_pqc_priv_key');
+    if (rsaKey && pqcKey) {
+        try {
+            adminJse = new JSEncrypt();
+            adminJse.setPrivateKey(rsaKey);
+            const binary = atob(pqcKey);
+            adminPqcPrivBytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                adminPqcPrivBytes[i] = binary.charCodeAt(i);
+            }
+            const dataKey = sessionStorage.getItem('admin_data_key');
+            if (dataKey) {
+                adminDataJse = new JSEncrypt();
+                adminDataJse.setPrivateKey(dataKey);
+            }
+            return true;
+        } catch (e) {
+            console.error('从 sessionStorage 恢复私钥失败', e);
+        }
+    }
+    return false;
+}
+var adminPqcPrivBytes = null;
 var authFetch = function(url, opts) {
   opts = opts || {};
   var headers = opts.headers || {};
@@ -138,21 +192,20 @@ async function init() {
     var statusRes = await fetch('/api/admin/status', {credentials:'same-origin'});
     var status = await statusRes.json();
 
-    if (status.logged_in && sessionStorage.getItem('admin_has_key') === 'true') {
-      document.getElementById('login-wall').style.display = 'none';
-      document.getElementById('main-content').classList.remove('hidden');
+    if (status.logged_in) {
+          var keysLoaded = await loadAdminKeys();
+          if (!keysLoaded) {
+            await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
+            sessionStorage.clear();
+            window.location.href = '/admin';
+            return;
+          }
+          document.getElementById('login-wall').style.display = 'none';
+          document.getElementById('main-content').classList.remove('hidden');
 
-      // 尝试加载私钥
-      var savedKey = sessionStorage.getItem('admin_priv_key');
-      if (savedKey) {
-        adminJse = new JSEncrypt();
-        adminJse.setPrivateKey(savedKey);
-        document.getElementById('key-status').textContent = '✅ 已加载';
-        document.getElementById('key-status').style.color = '#4CAF50';
-      } else {
-        document.getElementById('key-status').textContent = '⚠️ 未加载';
-        document.getElementById('key-status').style.color = '#FF9800';
-      }
+          document.getElementById('key-status').textContent = '✅ 已加载';
+          document.getElementById('key-status').style.color = '#4CAF50';
+          document.getElementById('key-area').style.display = 'none';
 
       // 默认最近 7 天
       var end = new Date();
@@ -164,9 +217,6 @@ async function init() {
       fetch('/api/footer').then(function(r){return r.text();}).then(function(t){
         document.getElementById('footer').textContent = t;
       });
-    } else if (status.logged_in) {
-      await fetch('/api/admin/logout', {credentials:'same-origin', method:'POST', headers:{'X-CSRF-Token':csrfToken}});
-      sessionStorage.clear(); location.reload();
     } else {
       document.getElementById('login-wall').style.display = 'block';
       document.getElementById('main-content').classList.add('hidden');
@@ -194,10 +244,9 @@ function loadKey() {
 async function decryptIP(encrypted) {
   // ---- PQC 路径 ----
   if (encrypted && encrypted.startsWith('PQC:')) {
-    var savedPQC = sessionStorage.getItem('admin_pqc_priv_key');
-    if (!savedPQC) return '<span class="decrypt-fail">PQC私钥未加载</span>';
-    try {
-      var pqcPriv = Uint8Array.from(atob(savedPQC), function(c) { return c.charCodeAt(0); });
+    if (!adminPqcPrivBytes) return '<span class="decrypt-fail">PQC私钥未加载</span>';
+        try {
+          var pqcPriv = adminPqcPrivBytes;
       var b64 = encrypted.slice(4);
       var data = JSON.parse(atob(b64));
       var ct = Uint8Array.from(atob(data.ct), function(c) { return c.charCodeAt(0); });
