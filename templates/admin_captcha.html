@@ -118,6 +118,7 @@
       <a href="/admin/notice">📢 公告</a>
       <a href="/admin/chat">💬 私聊</a>
     </div>
+    <div id="statusMsg" class="status-msg"></div>
       <!-- 配置卡片 -->
       <div class="card">
         <h3>⚙️ 验证码配置</h3>
@@ -330,10 +331,13 @@ async function loadAdminKeys() {
                 document.getElementById('main-content').style.display = 'block';
 
                 var statusEl = document.getElementById('key-status');
-                statusEl.textContent = '✅ 已加载';
-                statusEl.style.color = '#4CAF50';
+                if (statusEl) {
+                    statusEl.textContent = '✅ 已加载';
+                    statusEl.style.color = '#4CAF50';
+                }
                 var saved = sessionStorage.getItem('admin_priv_key');
-                if (saved) document.getElementById('priv-key-input').value = saved;
+                var keyInput = document.getElementById('priv-key-input');
+                if (saved && keyInput) keyInput.value = saved;
 
                 refreshStats();
             }
