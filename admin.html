@@ -554,6 +554,10 @@ async function init() {
       } catch(e) { console.error('Init:', e); }
     }
   init();
+// ★ 绑定密码输入框 Enter 键
+document.getElementById('unlock-password').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') unlock();
+});
 
 async function verify() {
     const rsaKey = document.getElementById('privKey').value.trim();
@@ -3272,16 +3276,21 @@ function filterExportDataByCategories(data, categories) {
   return filtered;
 }
 async function unlock() {
-    const password = document.getElementById('unlock-password').value;
+    const passwordEl = document.getElementById('unlock-password');
+    const btnEl = document.querySelector('#unlock-mode button[onclick="unlock()"]');
+    const password = passwordEl.value;
     if (!password) {
         document.getElementById('err-unlock').textContent = '请输入密码';
         return;
     }
     document.getElementById('err-unlock').textContent = '';
+    // ★ 防重复点击
+    if (btnEl) { btnEl.disabled = true; btnEl.textContent = '验证中...'; }
     try {
         const keys = await KeyManager.unlock(password);
         if (!keys) {
             document.getElementById('err-unlock').textContent = '密码错误';
+            if (btnEl) { btnEl.disabled = false; btnEl.textContent = '解锁并进入'; }
             return;
         }
         rsaPrivateKeyPem = keys.rsaKey;
@@ -3294,7 +3303,6 @@ async function unlock() {
             dataJse.setPrivateKey(keys.dataKey);
         }
 
-        // ★ 执行 PQC 挑战验证以建立后端 session
         const chalRes = await fetch('/api/admin/challenge', { credentials: 'same-origin' });
         if (!chalRes.ok) {
             const errData = await chalRes.json().catch(() => ({}));
@@ -3306,7 +3314,7 @@ async function unlock() {
             throw new Error('获取挑战失败');
         }
         const chal = await chalRes.json();
-        if (!chal.ciphertext) { document.getElementById('err-unlock').textContent = '挑战响应异常'; return; }
+        if (!chal.ciphertext) { document.getElementById('err-unlock').textContent = '挑战响应异常'; if (btnEl) { btnEl.disabled = false; btnEl.textContent = '解锁并进入'; } return; }
 
         if (!ml_kem1024) {
             const mod = await import('@noble/post-quantum/ml-kem');
@@ -3331,24 +3339,23 @@ async function unlock() {
             headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
             body: JSON.stringify({ nonce: nonceHex })
         });
-        if (!verifyRes.ok) { document.getElementById('err-unlock').textContent = '验证失败'; return; }
+        if (!verifyRes.ok) { document.getElementById('err-unlock').textContent = '验证失败'; if (btnEl) { btnEl.disabled = false; btnEl.textContent = '解锁并进入'; } return; }
 
         sessionStorage.setItem('admin_has_key', 'true');
         sessionStorage.setItem('admin_priv_key', rsaPrivateKeyPem);
         sessionStorage.setItem('admin_pqc_priv_key', keys.pqcKey);
         if (keys.dataKey) { sessionStorage.setItem('admin_data_key', keys.dataKey); }
-        // ★ 存储 derived key 供 SharedWorker 恢复
         if (typeof KeyManager !== 'undefined') {
             const wk = await KeyManager.getWorkerKey();
             if (wk) sessionStorage.setItem('admin_worker_key', wk);
         }
 
-        // ★ 刷新 CSRF token（session 重建后 token 可能已变）
         csrfToken = (await fetch('/api/csrf', {credentials:'same-origin'}).then(r=>r.json())).token;
 
         showAdmin();
     } catch(e) {
         document.getElementById('err-unlock').textContent = '解锁失败: ' + e.message;
+        if (btnEl) { btnEl.disabled = false; btnEl.textContent = '解锁并进入'; }
     }
 }
 
