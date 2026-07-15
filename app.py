@@ -1,4 +1,6 @@
 from flask import Flask, request, render_template, jsonify, session, make_response, Response
+import zipstream  # 需要安装
+from flask import Response, stream_with_context
 from flask import send_file
 import os, re, glob, base64, json, secrets, time, hashlib, threading, tempfile, shutil
 from collections import OrderedDict
@@ -4251,7 +4253,6 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
 @require_csrf
 @require_private_key
 def export_data():
-    """导出 /data 目录为 ZIP 文件（流式传输，防止大文件撑爆内存）"""
     if not is_admin():
         return jsonify({'error': '未授权'}), 403
 
@@ -4259,63 +4260,25 @@ def export_data():
     if not os.path.exists(data_dir):
         return jsonify({'error': '数据目录不存在'}), 404
 
-    def generate_zip():
-        with zipfile.ZipFile(io.BytesIO(), 'w', zipfile.ZIP_DEFLATED) as zf_write:
-            # 先收集所有文件路径
-            file_list = []
-            for root, dirs, files in os.walk(data_dir):
-                for fname in files:
-                    file_list.append(os.path.join(root, fname))
-            # 写入临时文件（避免内存爆炸）
-            import tempfile
-            tmp_fd, tmp_path = tempfile.mkstemp(suffix='.zip')
-            os.close(tmp_fd)
-            try:
-                with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf_tmp:
-                    for file_path in file_list:
-                        arcname = os.path.relpath(file_path, data_dir)
-                        zf_tmp.write(file_path, arcname)
-                # 流式返回临时文件内容
-                with open(tmp_path, 'rb') as f:
-                    while True:
-                        chunk = f.read(65536)
-                        if not chunk:
-                            break
-                        yield chunk
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+    def generate_zip_stream():
+        zf = zipstream.ZipFile(mode='w', compression=zipstream.ZIP_DEFLATED)
+        # 遍历目录添加文件
+        for root, dirs, files in os.walk(data_dir):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                arcname = os.path.relpath(full_path, data_dir)
+                zf.write(full_path, arcname)
+        # 生成器逐块输出
+        for chunk in zf:
+            yield chunk
 
     return Response(
-        generate_zip(),
+        stream_with_context(generate_zip_stream()),
         mimetype='application/zip',
         headers={
             'Content-Disposition': f'attachment; filename=backup_{datetime.now(CST).strftime("%Y%m%d_%H%M%S")}.zip'
         }
     )
-
-def safe_extract(zip_file, extract_dir):
-    """
-    安全解压 ZIP 文件，防止路径遍历攻击。
-    逐个成员解压（而非 extractall），并在解压前对每个成员做路径检查。
-    """
-    extract_dir = os.path.realpath(extract_dir)
-    for member in zip_file.infolist():
-        # 跳过纯目录条目（以 / 结尾）, extract 时会自动创建
-        name = member.filename
-        # 拒绝绝对路径或包含 '..' 的路径
-        if name.startswith('/') or '..' in name.replace('\\', '/').split('/'):
-            raise Exception(f'非法路径: {name}')
-        # 计算目标路径
-        target = os.path.realpath(os.path.join(extract_dir, name))
-        # 必须位于 extract_dir 之下
-        if not target.startswith(extract_dir + os.sep) and target != extract_dir:
-            raise Exception(f'路径遍历检测: {name} → {target}')
-        # 仅解压文件（目录会自动创建）
-        if not name.endswith('/'):
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with zip_file.open(member) as src, open(target, 'wb') as dst:
-                shutil.copyfileobj(src, dst)
 
 @app.route('/api/admin/import-data', methods=['POST'])
 @require_csrf
