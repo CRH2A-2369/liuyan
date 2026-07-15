@@ -13,9 +13,10 @@ import random
 import string
 from kyber_py.ml_kem import ML_KEM_1024
 from Crypto.Cipher import AES
+import hmac
 
 load_dotenv()
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=360)
 
 CAPTCHA_DEFAULTS = {
@@ -123,10 +124,12 @@ DOWNLOAD_COUNT_FILE = os.path.join(DATA_DIR, 'download_counts.json')
 PQC_PUB_KEY_PATH = os.path.join(BASE_DIR, 'gongyaoPQC.txt')
 IP_SALT_FILE = os.path.join(DATA_DIR, 'ip_salt.txt')
 IP_ENCRYPTION_MODE_FILE = os.path.join(DATA_DIR, 'ip_encryption_mode.txt')
+ADMIN_PIN_FILE = os.path.join(DATA_DIR, 'admin_pin.json')
 # ===== 文件管理配置 =====
 FILES_DIR = os.path.join(DATA_DIR, 'files')
 os.makedirs(FILES_DIR, exist_ok=True)
 os.makedirs(TOKEN_DIR, exist_ok=True)
+os.makedirs(os.path.join(BASE_DIR, 'static'), exist_ok=True)
 
 def save_download_counts(counts):
     """原子保存下载计数，失败时记录错误"""
@@ -160,6 +163,8 @@ if not os.path.exists(IP_SALT_FILE):
     open(IP_SALT_FILE, 'w', encoding='utf-8').write('')
 if not os.path.exists(IP_ENCRYPTION_MODE_FILE):
     open(IP_ENCRYPTION_MODE_FILE, 'w', encoding='utf-8').write('rsa')
+if not os.path.exists(ADMIN_PIN_FILE):
+    open(ADMIN_PIN_FILE, 'w', encoding='utf-8').write('{}')
 # === 4. 并发安全工具 ===
 _file_lock = threading.Lock()
 
@@ -1305,6 +1310,13 @@ def admin_verify():
     session.pop('pqc_challenge', None)
     session['admin_ip'] = get_client_ip()
     generate_csrf()
+
+    # 登录成功 → 重置 PIN 尝试计数
+    pin_data = _load_admin_pin()
+    if pin_data and pin_data.get('pin_hash'):
+        pin_data['attempts'] = 2
+        _save_admin_pin(pin_data)
+
     return jsonify({'status': 'ok'})
 
 @app.route('/api/admin/logout', methods=['GET', 'POST'])
@@ -1312,6 +1324,118 @@ def admin_verify():
 def admin_logout():
     session.clear()
     return jsonify({'status': 'ok'})
+
+# ═══════════════════════════════════════════════════════════
+# 8.5 PIN 快捷登录
+# ═══════════════════════════════════════════════════════════
+def _load_admin_pin():
+    try:
+        with open(ADMIN_PIN_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_admin_pin(data):
+    atomic_write(ADMIN_PIN_FILE, json.dumps(data, ensure_ascii=False))
+
+@app.route('/api/admin/pin/status', methods=['GET'])
+def admin_pin_status():
+    pin_data = _load_admin_pin()
+    return jsonify({'has_pin': bool(pin_data.get('pin_hash'))})
+
+@app.route('/api/admin/pin/setup', methods=['POST'])
+@require_csrf
+@require_private_key
+def admin_pin_setup():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+
+    data = request.get_json(silent=True) or {}
+    pin = (data.get('pin') or '').strip()
+    if not re.match(r'^\d{8}$', pin):
+        return jsonify({'error': 'PIN 必须是 8 位数字'}), 400
+
+    salt = secrets.token_bytes(16)
+    pin_hash = base64.b64encode(salt + hashlib.scrypt(
+        pin.encode(), salt=salt, n=16384, r=8, p=1, dklen=64
+    )).decode()
+    token = secrets.token_hex(32)
+
+    pin_data = _load_admin_pin()
+    pin_data['pin_hash'] = pin_hash
+    pin_data['token'] = token
+    pin_data['attempts'] = 2
+    pin_data['created_at'] = time.time()
+    _save_admin_pin(pin_data)
+
+    return jsonify({'ok': True, 'token': token})
+
+@app.route('/api/admin/pin/disable', methods=['POST'])
+@require_csrf
+@require_private_key
+def admin_pin_disable():
+    if not is_admin():
+        return jsonify({'error': '未授权'}), 403
+    _save_admin_pin({})
+    return jsonify({'ok': True})
+
+@app.route('/api/admin/pin/login', methods=['POST'])
+@require_csrf
+def admin_pin_login():
+    if is_admin():
+        return jsonify({'error': '已登录'}), 400
+
+    data = request.get_json(silent=True) or {}
+    pin = (data.get('pin') or '').strip()
+    if not re.match(r'^\d{8}$', pin):
+        return jsonify({'error': 'PIN 必须是 8 位数字'}), 400
+
+    pin_data = _load_admin_pin()
+    if not pin_data.get('pin_hash'):
+        return jsonify({'error': 'PIN 未设置'}), 400
+
+    attempts = pin_data.get('attempts', 2)
+
+    if attempts <= 0:
+        return jsonify({
+            'error': 'PIN 已被锁定（尝试次数耗尽）。请使用长密码或重新验证私钥。',
+            'locked': True,
+            'remaining': 0
+        }), 429
+
+    try:
+        data_bytes = base64.b64decode(pin_data['pin_hash'])
+        salt = data_bytes[:16]
+        expected = data_bytes[16:]
+        actual = hashlib.scrypt(pin.encode(), salt=salt, n=16384, r=8, p=1, dklen=64)
+        if hmac.compare_digest(expected, actual):
+            pin_data['attempts'] = 2
+            _save_admin_pin(pin_data)
+
+            session['admin'] = True
+            session['admin_has_key'] = True
+            session['fp'] = get_fp()
+            session['admin_ip'] = get_client_ip()
+            session['auth_level'] = 'pin'
+            generate_csrf()
+            return jsonify({'ok': True, 'token': pin_data['token']})
+        else:
+            attempts -= 1
+            pin_data['attempts'] = attempts
+            _save_admin_pin(pin_data)
+            if attempts <= 0:
+                return jsonify({
+                    'error': 'PIN 错误，已锁定。请使用长密码或重新验证私钥。',
+                    'locked': True,
+                    'remaining': 0
+                }), 429
+            return jsonify({
+                'error': f'PIN 错误，还剩 {attempts} 次尝试',
+                'remaining': attempts,
+                'locked': False
+            }), 401
+    except Exception:
+        return jsonify({'error': '验证失败'}), 500
 
 # ===== 密钥轮换 =====
 @app.route('/api/admin/rotate-key', methods=['POST'])
@@ -1928,7 +2052,6 @@ def delete_reply_file(filename):
     return "ok"
 
 @app.route('/api/footer', methods=['POST'])
-@require_captcha
 @require_csrf
 def update_footer():
     if not is_admin(): return "未授权", 403
