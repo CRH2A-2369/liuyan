@@ -6,7 +6,7 @@ Pillow==10.1.0
 numpy==1.26.0
 kyber-py==1.2.0
 dilithium-py==1.4.0
-liboqs-python=0.15.0
+liboqs-python==0.15.0
 pqcrypto==0.4.0
 cryptography==43.0.0
 zipstream==1.1.4
