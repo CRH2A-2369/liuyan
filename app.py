@@ -1096,18 +1096,32 @@ _rate_db_path = os.path.join(DATA_DIR, 'rate_limits.db')
 _rate_db_lock = threading.Lock()
 
 def _init_rate_db():
-    with _rate_db_lock:
-        conn = sqlite3.connect(_rate_db_path, timeout=5.0)
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA synchronous=NORMAL')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS rate_blocks (
-                ip TEXT PRIMARY KEY,
-                block_until REAL NOT NULL
-            )
-        ''')
-        conn.commit()
-        conn.close()
+    max_retries = 5
+    retry_delay = 1
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            with _rate_db_lock:
+                conn = sqlite3.connect(_rate_db_path, timeout=10.0)
+                conn.execute('PRAGMA busy_timeout = 10000')   # 额外设置忙等待
+                conn.execute('PRAGMA journal_mode=WAL')
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rate_blocks (
+                        ip TEXT PRIMARY KEY,
+                        block_until REAL NOT NULL
+                    )
+                ''')
+                conn.commit()
+                conn.close()
+                return
+        except sqlite3.OperationalError as e:
+            if 'database is locked' in str(e) and attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+            last_exception = e
+            break
+    if last_exception:
+        raise last_exception
 
 _init_rate_db()
 
@@ -4828,4 +4842,4 @@ if __name__ == '__main__':
     print(f"[CONFIG] TRUSTED_PROXIES = {TRUSTED_PROXIES}")
     print(f"[CONFIG] RSA_PUB exists = {os.path.exists(RSA_PUB)}")
     port = int(os.environ.get('PORT', 5033))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    app.run(debug=False, host='::', port=port)
